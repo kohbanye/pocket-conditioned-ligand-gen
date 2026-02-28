@@ -1,29 +1,15 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
-class DataConfig:
-    n_samples: int = 1000
-    n_features: int = 20
-    n_informative: int = 10
-    n_classes: int = 3
-    test_size: float = 0.2
+class CrossDockedConfig:
+    data_dir: Path = Path("data")
+    base_url: str = "http://bits.csb.pitt.edu/files/crossdock2020"
+    data_tarball: str = "CrossDocked2020_v1.3.tgz"
+    types_tarball: str = "CrossDocked2020_v1.3_types.tgz"
     batch_size: int = 32
-    num_workers: int = 2
+    num_workers: int = 4
+    test_size: float = 0.1
+    val_size: float = 0.1
     random_state: int = 42
-
-
-@dataclass
-class ModelConfig:
-    input_dim: int = 20
-    hidden_dim: int = 64
-    num_classes: int = 3
-    learning_rate: float = 1e-3
-
-
-@dataclass
-class TrainerConfig:
-    max_epochs: int = 5
-    accelerator: str = "cpu"
-    devices: str = "auto"
-    log_every_n_steps: int = 10
