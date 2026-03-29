@@ -1,5 +1,9 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "ml-project-boilerplate"
+name = "pocket-conditioned-ligand-gen"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -19,6 +23,9 @@ dependencies = [
     "tqdm>=4.67.1",
     "wandb>=0.23.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
 
 [tool.ruff.lint]
 select = ["ALL"]

@@ -1,6 +1,6 @@
 import logging
+import shutil
 import subprocess
-import tarfile
 from pathlib import Path
 
 import lightning as L
@@ -50,6 +50,30 @@ class CrossDockedDataModule(L.LightningDataModule):
             check=True,
         )
 
+    def _extract_tarball(self, tarball_path: Path, dest: Path) -> None:
+        """Extract a .tgz tarball using pigz for parallel decompression."""
+        if shutil.which("pigz"):
+            logger.info("Extracting %s with pigz (parallel)", tarball_path)
+            pigz = subprocess.Popen(  # noqa: S603
+                ["pigz", "-dc", str(tarball_path)],  # noqa: S607
+                stdout=subprocess.PIPE,
+            )
+            subprocess.run(  # noqa: S603
+                ["tar", "xf", "-", "-C", str(dest)],  # noqa: S607
+                stdin=pigz.stdout,
+                check=True,
+            )
+            pigz.wait()
+            if pigz.returncode != 0:
+                msg = f"pigz failed with return code {pigz.returncode}"
+                raise RuntimeError(msg)
+        else:
+            logger.info("Extracting %s with tar (single-threaded)", tarball_path)
+            subprocess.run(  # noqa: S603
+                ["tar", "xzf", str(tarball_path), "-C", str(dest)],  # noqa: S607
+                check=True,
+            )
+
     def _download_and_extract_types(self, tarball_path: Path) -> None:
         """Download and extract types tarball to data_dir."""
         # Check if already extracted (types files are in data_dir directly)
@@ -64,16 +88,20 @@ class CrossDockedDataModule(L.LightningDataModule):
         url = f"{self.config.base_url}/{self.config.types_tarball}"
         self._download_file(url, tarball_path)
 
-        logger.info("Extracting %s to %s", tarball_path, self.data_dir)
-        with tarfile.open(tarball_path, "r:gz") as tar:
-            tar.extractall(path=self.data_dir, filter="data")
+        self._extract_tarball(tarball_path, self.data_dir)
 
     def _download_and_extract_data(self, tarball_path: Path) -> None:
         """Download and extract main data tarball to CrossDocked2020/."""
-        # Check if already extracted
-        if self.crossdocked_dir.exists() and any(self.crossdocked_dir.iterdir()):
+        # Use a marker file to distinguish complete vs partial extraction
+        done_marker = self.crossdocked_dir / ".extraction_done"
+        if done_marker.exists():
             logger.info("Data already extracted to %s", self.crossdocked_dir)
             return
+
+        # Clean up partial extraction from a previous interrupted run
+        if self.crossdocked_dir.exists():
+            logger.info("Removing partial extraction: %s", self.crossdocked_dir)
+            shutil.rmtree(self.crossdocked_dir)
 
         url = f"{self.config.base_url}/{self.config.data_tarball}"
         self._download_file(url, tarball_path)
@@ -85,10 +113,10 @@ class CrossDockedDataModule(L.LightningDataModule):
             tarball_path,
             self.crossdocked_dir,
         )
-        with tarfile.open(tarball_path, "r:gz") as tar:
-            tar.extractall(path=self.crossdocked_dir, filter="data")
+        self._extract_tarball(tarball_path, self.crossdocked_dir)
+        done_marker.touch()
 
-    def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
+    def setup(self, stage: str | None = None) -> None:
         """Set up train/val/test datasets."""
 
     def train_dataloader(self) -> DataLoader:
