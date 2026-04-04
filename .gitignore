@@ -208,4 +208,7 @@ __marimo__/
 
 lightning_logs/
 /data
-wandb
+wandb/
+checkpoints/
+*.ckpt
+wget-log
