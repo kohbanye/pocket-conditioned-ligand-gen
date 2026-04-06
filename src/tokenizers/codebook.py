@@ -1,7 +1,12 @@
 """EMA-updated vector quantization codebook shared by protein and ligand VQ-VAEs."""
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
+
+
+def _l2_normalize(x: Tensor) -> Tensor:
+    return F.normalize(x, p=2, dim=-1)
 
 
 class EMACodebook(nn.Module):
@@ -27,11 +32,14 @@ class EMACodebook(nn.Module):
         self.commitment_cost = commitment_cost
         self.dead_code_threshold = dead_code_threshold
 
-        embedding = torch.randn(num_codes, code_dim)
+        embedding = _l2_normalize(torch.randn(num_codes, code_dim))
         self.register_buffer("embedding", embedding)
         self.register_buffer("ema_cluster_size", torch.zeros(num_codes))
         self.register_buffer("ema_embedding_sum", embedding.clone())
         self.register_buffer("usage_count", torch.zeros(num_codes, dtype=torch.long))
+
+        # Learnable scale (log-parameterized for stability)
+        self.log_scale = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, z: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """Quantize encoder output and compute commitment loss.
@@ -42,44 +50,58 @@ class EMACodebook(nn.Module):
         Returns:
             Tuple of (quantized, indices, commitment_loss).
         """
-        # L2 nearest-neighbor lookup: (B, num_codes)
+        # L2-normalize encoder output and codebook (ViT-VQGAN)
+        z_norm = _l2_normalize(z)
+        embedding_norm = _l2_normalize(self.embedding)
+
+        # L2 nearest-neighbor lookup on normalized vectors: (B, num_codes)
         distances = (
-            z.pow(2).sum(dim=1, keepdim=True)
-            - 2 * z @ self.embedding.t()
-            + self.embedding.pow(2).sum(dim=1, keepdim=True).t()
+            z_norm.pow(2).sum(dim=1, keepdim=True)
+            - 2 * z_norm @ embedding_norm.t()
+            + embedding_norm.pow(2).sum(dim=1, keepdim=True).t()
         )
         indices = distances.argmin(dim=1)  # (B,)
-        quantized = self.embedding[indices]  # (B, code_dim)
+        quantized = embedding_norm[indices]  # (B, code_dim)
 
         if self.training:
             with torch.no_grad():
-                self._ema_update(z, indices)
-                self._restart_dead_codes(z)
+                self._ema_update(z_norm, indices)
+                self._restart_dead_codes(z_norm)
 
-        # Commitment loss: encourages encoder output to stay close to codebook
-        commitment_loss = self.commitment_cost * (z - quantized.detach()).pow(2).mean()
+        # Commitment loss on normalized vectors
+        commitment_loss = (
+            self.commitment_cost * (z_norm - quantized.detach()).pow(2).mean()
+        )
 
-        # Straight-through estimator: copy gradients from quantized to z
-        quantized = z + (quantized - z).detach()
+        # Straight-through estimator: copy gradients from quantized to z_norm
+        quantized = z_norm + (quantized - z_norm).detach()
+
+        # Apply learnable scale
+        scale = self.log_scale.exp()
+        quantized = quantized * scale
 
         return quantized, indices, commitment_loss
 
-    def _ema_update(self, z: Tensor, indices: Tensor) -> None:
+    def _ema_update(self, z_norm: Tensor, indices: Tensor) -> None:
         """Update codebook embeddings via exponential moving average."""
         one_hot = torch.zeros(
-            indices.shape[0], self.num_codes, device=z.device,
+            indices.shape[0],
+            self.num_codes,
+            device=z_norm.device,
         ).scatter_(1, indices.unsqueeze(1), 1.0)
 
         # Update cluster sizes
         batch_cluster_size = one_hot.sum(dim=0)
         self.ema_cluster_size.mul_(self.ema_decay).add_(
-            batch_cluster_size, alpha=1 - self.ema_decay,
+            batch_cluster_size,
+            alpha=1 - self.ema_decay,
         )
 
         # Update embedding sums
-        batch_embedding_sum = one_hot.t() @ z
+        batch_embedding_sum = one_hot.t() @ z_norm
         self.ema_embedding_sum.mul_(self.ema_decay).add_(
-            batch_embedding_sum, alpha=1 - self.ema_decay,
+            batch_embedding_sum,
+            alpha=1 - self.ema_decay,
         )
 
         # Laplace smoothing to avoid division by zero
@@ -91,7 +113,7 @@ class EMACodebook(nn.Module):
         # Track usage
         self.usage_count.add_((batch_cluster_size > 0).long())
 
-    def _restart_dead_codes(self, z: Tensor) -> None:
+    def _restart_dead_codes(self, z_norm: Tensor) -> None:
         """Replace unused codebook entries with random encoder outputs."""
         dead_mask = self.usage_count < self.dead_code_threshold
         num_dead = dead_mask.sum().item()
@@ -99,9 +121,9 @@ class EMACodebook(nn.Module):
             return
 
         # Sample random encoder outputs as replacements
-        num_samples = min(num_dead, z.shape[0])
-        perm = torch.randperm(z.shape[0], device=z.device)[:num_samples]
-        replacements = z[perm].detach()
+        num_samples = min(num_dead, z_norm.shape[0])
+        perm = torch.randperm(z_norm.shape[0], device=z_norm.device)[:num_samples]
+        replacements = z_norm[perm].detach()
 
         dead_indices = dead_mask.nonzero(as_tuple=True)[0][:num_samples]
         self.embedding[dead_indices] = replacements
@@ -111,4 +133,6 @@ class EMACodebook(nn.Module):
 
     def lookup(self, indices: Tensor) -> Tensor:
         """Look up codebook vectors by index (for decoding)."""
-        return self.embedding[indices]
+        embedding_norm = _l2_normalize(self.embedding)
+        scale = self.log_scale.exp()
+        return embedding_norm[indices] * scale

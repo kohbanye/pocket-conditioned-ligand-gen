@@ -70,6 +70,7 @@ class VQVAEModule(L.LightningModule):
 
         opt.zero_grad()
         self.manual_backward(total_loss)
+        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
         opt.step()
 
     def validation_step(
@@ -81,7 +82,9 @@ class VQVAEModule(L.LightningModule):
             (prot_x,) = batch["protein"]
             prot_out = self.protein_vqvae(prot_x)
             self.log(
-                "val/protein_recon", prot_out["reconstruction_loss"], sync_dist=True,
+                "val/protein_recon",
+                prot_out["reconstruction_loss"],
+                sync_dist=True,
             )
             self.log("val/protein_commit", prot_out["commitment_loss"], sync_dist=True)
             self._log_utilization("val/protein", prot_out["indices"])
