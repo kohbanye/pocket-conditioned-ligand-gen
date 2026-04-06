@@ -38,7 +38,7 @@ class VQVAEModule(L.LightningModule):
         self,
         batch: dict[str, list[Tensor]],
         batch_idx: int,  # noqa: ARG002
-    ) -> Tensor:
+    ) -> None:
         opt = self.optimizers()
         if not isinstance(opt, torch.optim.Optimizer):  # pragma: no cover
             msg = "Expected a single optimizer"
@@ -71,8 +71,6 @@ class VQVAEModule(L.LightningModule):
         opt.zero_grad()
         self.manual_backward(total_loss)
         opt.step()
-
-        return total_loss
 
     def validation_step(
         self,
