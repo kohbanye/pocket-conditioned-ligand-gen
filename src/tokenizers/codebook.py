@@ -52,8 +52,9 @@ class EMACodebook(nn.Module):
         quantized = self.embedding[indices]  # (B, code_dim)
 
         if self.training:
-            self._ema_update(z, indices)
-            self._restart_dead_codes(z)
+            with torch.no_grad():
+                self._ema_update(z, indices)
+                self._restart_dead_codes(z)
 
         # Commitment loss: encourages encoder output to stay close to codebook
         commitment_loss = self.commitment_cost * (z - quantized.detach()).pow(2).mean()
