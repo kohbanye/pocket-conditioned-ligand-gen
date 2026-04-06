@@ -55,9 +55,9 @@ class VQVAETrainingConfig:
     """Config for joint VQ-VAE training."""
 
     learning_rate: float = 3e-4
-    batch_size: int = 4096
+    batch_size: int = 65536
     max_epochs: int = 100
-    num_workers: int = 4
+    num_workers: int = 16
     protein: ProteinVQVAEConfig = field(default_factory=ProteinVQVAEConfig)
     ligand: LigandVQVAEConfig = field(default_factory=LigandVQVAEConfig)
     pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)

@@ -19,6 +19,7 @@ def main() -> None:
     parser.add_argument("--max-pairs", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
     args = parser.parse_args()
 
     config = VQVAETrainingConfig()
@@ -30,6 +31,8 @@ def main() -> None:
         config.max_epochs = args.max_epochs
     if args.batch_size is not None:
         config.batch_size = args.batch_size
+    if args.num_workers is not None:
+        config.num_workers = args.num_workers
 
     dm = ComplexDescriptorDataModule(config, data_config)
     module = VQVAEModule(config)
