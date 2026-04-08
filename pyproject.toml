@@ -16,6 +16,7 @@ dependencies = [
     "matplotlib>=3.10.7",
     "numpy>=2.3.5",
     "pandas>=2.3.3",
+    "py3dmol>=2.5.4",
     "pytest>=9.0.1",
     "rdkit",
     "scikit-learn>=1.7.2",
