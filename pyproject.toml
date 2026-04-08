@@ -37,6 +37,7 @@ ignore = ["D", "N812", "COM812"]
 [tool.ruff.lint.per-file-ignores]
 "scripts/*.py" = ["INP001"]
 "tests/*.py" = ["S101", "PLR2004"]
+"notebooks/*.ipynb" = ["T201", "E402", "ANN", "E501", "PLR2004", "INP001", "S101"]
 
 [dependency-groups]
 dev = [
