@@ -1,9 +1,13 @@
 """Tokenization modules for protein-ligand complexes."""
 
 from src.tokenizers.codebook import EMACodebook
-from src.tokenizers.ligand import LigandTokenizer, LigandVQVAE, SE3InvariantDescriptor
+from src.tokenizers.ligand import (
+    LigandDescriptor,
+    LigandTokenizer,
+    LigandVQVAE,
+)
 from src.tokenizers.protein import (
-    ProteinBackboneDescriptor,
+    PocketDescriptor,
     ProteinSequenceTokenizer,
     ProteinStructureVQVAE,
 )
@@ -11,11 +15,11 @@ from src.tokenizers.sequence import TokenSequenceAssembler
 
 __all__ = [
     "EMACodebook",
+    "LigandDescriptor",
     "LigandTokenizer",
     "LigandVQVAE",
-    "ProteinBackboneDescriptor",
+    "PocketDescriptor",
     "ProteinSequenceTokenizer",
     "ProteinStructureVQVAE",
-    "SE3InvariantDescriptor",
     "TokenSequenceAssembler",
 ]

@@ -2,14 +2,14 @@
 
 Provides:
 - Pocket extraction from PDB files
-- SE(3)-invariant backbone descriptor (k-NN based)
+- PCA canonical-frame per-residue descriptor (9D, invertible)
 - VQ-VAE for structure tokenization
 - Simple amino acid sequence tokenizer
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from torch import Tensor, nn
@@ -133,137 +133,178 @@ def extract_full_sequence(pdb_path: str | Path) -> str:
     return "".join(AA_3TO1[r[2]] for r in residues)
 
 
-class ProteinBackboneDescriptor:
-    """Compute SE(3)-invariant per-residue descriptor from backbone atoms.
+# ---------------------------------------------------------------------------
+# PCA canonical frame helpers
+# ---------------------------------------------------------------------------
 
-    Uses sorted CA-CA distances to k nearest neighbors plus backbone
-    dihedral angles.  All features are SE(3)-invariant by construction
-    (distances are norms; dihedrals use relative vectors).
 
-    Descriptor dimensions: k + 4.
+def _compute_canonical_frame(
+    ca_coords: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a deterministic canonical frame from CA coordinates via PCA.
+
+    Returns:
+        centroid: ``(3,)`` mean of CA positions.
+        rotation: ``(3, 3)`` orthogonal matrix (rows = principal-component
+            directions, sign-disambiguated).
+    """
+    centroid = ca_coords.mean(axis=0).astype(np.float64)
+    centered = (ca_coords - centroid).astype(np.float64)
+
+    if len(ca_coords) < 2:  # noqa: PLR2004
+        return centroid, np.eye(3, dtype=np.float64)
+
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+
+    # When fewer than 3 residues, SVD returns fewer rows in Vt;
+    # pad to a full 3x3 orthogonal matrix.
+    if vt.shape[0] < 3:  # noqa: PLR2004
+        vt_full = np.eye(3, dtype=np.float64)
+        vt_full[: vt.shape[0]] = vt
+        # Make the missing rows orthogonal to the existing ones
+        if vt.shape[0] == 1:
+            # Pick two perpendicular vectors
+            v0 = vt_full[0]
+            perp = (
+                np.array([0.0, 0.0, 1.0])
+                if abs(v0[2]) < 0.9  # noqa: PLR2004
+                else np.array([1.0, 0.0, 0.0])
+            )
+            vt_full[1] = np.cross(v0, perp)
+            vt_full[1] /= np.linalg.norm(vt_full[1])
+            vt_full[2] = np.cross(v0, vt_full[1])
+        elif vt.shape[0] == 2:  # noqa: PLR2004
+            vt_full[2] = np.cross(vt_full[0], vt_full[1])
+        vt = vt_full
+
+    # Sign disambiguation: flip each axis so the atom with the largest
+    # absolute projection determines the sign (more robust than sum).
+    for i in range(3):
+        proj = centered @ vt[i]
+        max_idx = int(np.argmax(np.abs(proj)))
+        if proj[max_idx] < 0:
+            vt[i] *= -1
+
+    # Ensure right-handed frame
+    if np.linalg.det(vt) < 0:
+        vt[2] *= -1
+
+    return centroid, vt.astype(np.float64)
+
+
+# ---------------------------------------------------------------------------
+# Descriptor class
+# ---------------------------------------------------------------------------
+
+
+class PocketDescriptor:
+    """PCA canonical-frame per-residue descriptor with exact inverse.
+
+    Each residue receives a **9-D** descriptor:
+
+    *   CA position in canonical frame (3D)
+    *   N-CA offset in canonical frame (3D)
+    *   C-CA offset in canonical frame (3D)
+
+    The canonical frame is derived from PCA of the pocket CA coordinates with
+    sign disambiguation, ensuring SE(3)-invariant descriptors.
     """
 
-    def __init__(self, num_neighbors: int = 16) -> None:
-        self.num_neighbors = num_neighbors
+    DESCRIPTOR_DIM = 9
 
-    def compute(self, backbone_coords: np.ndarray) -> np.ndarray:
+    def compute(
+        self,
+        backbone_coords: np.ndarray,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         """Compute descriptors for all residues.
 
         Args:
             backbone_coords: Shape ``(L, 3, 3)`` — (N, CA, C) per residue.
 
         Returns:
-            Descriptors of shape ``(L, k+4)``.
+            descriptors: ``(L, 9)`` float32 array.
+            metadata: ``{'centroid', 'rotation'}`` for inverse transform.
         """
-        n_coords = backbone_coords[:, 0]  # (L, 3)
-        ca_coords = backbone_coords[:, 1]  # (L, 3)
-        c_coords = backbone_coords[:, 2]  # (L, 3)
+        n_coords = backbone_coords[:, 0].astype(np.float64)  # (L, 3)
+        ca_coords = backbone_coords[:, 1].astype(np.float64)  # (L, 3)
+        c_coords = backbone_coords[:, 2].astype(np.float64)  # (L, 3)
 
-        # Compute sorted k-NN distances (SE(3)-invariant)
-        knn_dists = self._compute_knn_distances(ca_coords)
+        centroid, rotation = _compute_canonical_frame(ca_coords)
 
-        # Compute backbone dihedrals
-        dihedrals = self._compute_dihedrals(n_coords, ca_coords, c_coords)
+        # Transform into canonical frame:  x_can = (x - centroid) @ V
+        #   where V = rotation.T  (rotation rows are PC directions)
+        v = rotation.T
+        ca_can = (ca_coords - centroid) @ v
+        n_can = (n_coords - centroid) @ v
+        c_can = (c_coords - centroid) @ v
 
-        return np.concatenate([knn_dists, dihedrals], axis=1).astype(np.float32)
+        n_offset = n_can - ca_can
+        c_offset = c_can - ca_can
 
-    def _compute_knn_distances(self, ca_coords: np.ndarray) -> np.ndarray:
-        """Compute sorted distances to k nearest CA neighbors.
+        descriptors = np.concatenate([ca_can, n_offset, c_offset], axis=1)
 
-        Returns:
-            Sorted distances of shape ``(L, k)``.
-        """
-        num_residues = len(ca_coords)
-        k = self.num_neighbors
+        metadata: dict[str, Any] = {
+            "centroid": centroid,
+            "rotation": rotation,
+        }
+        return descriptors.astype(np.float32), metadata
 
-        # Pairwise CA-CA distances: (L, L)
-        diff = ca_coords[:, None, :] - ca_coords[None, :, :]
-        dists = np.linalg.norm(diff, axis=2)
-        np.fill_diagonal(dists, np.inf)
-
-        features = np.zeros((num_residues, k), dtype=np.float32)
-        for i in range(num_residues):
-            actual_k = min(k, num_residues - 1)
-            # Get k smallest distances, sorted
-            kth_dists = np.partition(dists[i], actual_k)[:actual_k]
-            kth_dists.sort()
-            features[i, :actual_k] = kth_dists
-
-        return features
-
-    def _compute_dihedrals(
-        self,
-        n_coords: np.ndarray,
-        ca_coords: np.ndarray,
-        c_coords: np.ndarray,
-    ) -> np.ndarray:
-        """Compute backbone phi/psi dihedrals as sin/cos.
-
-        Returns:
-            Shape ``(L, 4)`` — [sin(phi), cos(phi), sin(psi), cos(psi)].
-        """
-        num_residues = len(n_coords)
-        dihedrals = np.zeros((num_residues, 4), dtype=np.float32)
-
-        for i in range(num_residues):
-            if i > 0:  # phi: C(i-1)-N(i)-CA(i)-C(i)
-                phi = self._dihedral_angle(
-                    c_coords[i - 1], n_coords[i], ca_coords[i], c_coords[i],
-                )
-                dihedrals[i, 0] = np.sin(phi)
-                dihedrals[i, 1] = np.cos(phi)
-
-            if i < num_residues - 1:  # psi: N(i)-CA(i)-C(i)-N(i+1)
-                psi = self._dihedral_angle(
-                    n_coords[i], ca_coords[i], c_coords[i], n_coords[i + 1],
-                )
-                dihedrals[i, 2] = np.sin(psi)
-                dihedrals[i, 3] = np.cos(psi)
-
-        return dihedrals
+    # ---- inverse transform ------------------------------------------------
 
     @staticmethod
-    def _dihedral_angle(
-        p0: np.ndarray, p1: np.ndarray, p2: np.ndarray, p3: np.ndarray,
-    ) -> float:
-        """Compute dihedral angle defined by four points."""
-        b1 = p1 - p0
-        b2 = p2 - p1
-        b3 = p3 - p2
+    def descriptor_to_backbone_coords(
+        descriptors: np.ndarray,
+        metadata: dict[str, Any],
+    ) -> np.ndarray:
+        """Reconstruct backbone ``(N, CA, C)`` from descriptors + metadata.
 
-        n1 = np.cross(b1, b2)
-        n2 = np.cross(b2, b3)
+        The round-trip is exact (up to floating-point precision).
 
-        n1_norm = np.linalg.norm(n1)
-        n2_norm = np.linalg.norm(n2)
-        if n1_norm < _EPS or n2_norm < _EPS:
-            return 0.0
+        Returns:
+            backbone_coords: ``(L, 3, 3)`` float32 array.
+        """
+        centroid: np.ndarray = metadata["centroid"]
+        rotation: np.ndarray = metadata["rotation"]  # (3, 3), rows = PCs
 
-        n1 = n1 / n1_norm
-        n2 = n2 / n2_norm
+        ca_can = descriptors[:, :3].astype(np.float64)
+        n_offset = descriptors[:, 3:6].astype(np.float64)
+        c_offset = descriptors[:, 6:9].astype(np.float64)
 
-        b2_unit = b2 / (np.linalg.norm(b2) + _EPS)
-        m = np.cross(n1, b2_unit)
+        n_can = ca_can + n_offset
+        c_can = ca_can + c_offset
 
-        x = np.dot(n1, n2)
-        y = np.dot(m, n2)
+        # Inverse:  x_global = x_can @ V^T + centroid = x_can @ rotation + centroid
+        #   because V = rotation.T  →  V^T = rotation
+        ca_global = ca_can @ rotation + centroid
+        n_global = n_can @ rotation + centroid
+        c_global = c_can @ rotation + centroid
 
-        return float(np.arctan2(y, x))
+        num_residues = len(descriptors)
+        backbone = np.zeros((num_residues, 3, 3), dtype=np.float64)
+        backbone[:, 0] = n_global
+        backbone[:, 1] = ca_global
+        backbone[:, 2] = c_global
+
+        return backbone.astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# VQ-VAE
+# ---------------------------------------------------------------------------
 
 
 class ProteinStructureVQVAE(nn.Module):
     """VQ-VAE for protein backbone structure tokenization.
 
-    Encodes per-residue SE(3)-invariant descriptors into discrete codes.
+    Encodes per-residue descriptors into discrete codes.
     """
 
     def __init__(self, config: ProteinVQVAEConfig) -> None:
         super().__init__()
         self.config = config
-        descriptor_dim = config.num_neighbors + 4
 
         self.encoder = nn.Sequential(
-            nn.Linear(descriptor_dim, config.hidden_dim),
+            nn.Linear(config.descriptor_dim, config.hidden_dim),
             nn.ReLU(),
             nn.Linear(config.hidden_dim, config.hidden_dim),
             nn.ReLU(),
@@ -273,7 +314,7 @@ class ProteinStructureVQVAE(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(config.latent_dim, config.hidden_dim),
             nn.ReLU(),
-            nn.Linear(config.hidden_dim, descriptor_dim),
+            nn.Linear(config.hidden_dim, config.descriptor_dim),
         )
 
         self.codebook = EMACodebook(

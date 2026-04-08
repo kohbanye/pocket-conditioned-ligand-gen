@@ -28,8 +28,7 @@ class PocketExtractionConfig:
 class ProteinVQVAEConfig:
     """Config for protein backbone structure VQ-VAE."""
 
-    num_neighbors: int = 16
-    descriptor_dim: int = 20  # num_neighbors + 4
+    descriptor_dim: int = 9  # CA pos (3) + N-CA offset (3) + C-CA offset (3)
     hidden_dim: int = 128
     latent_dim: int = 8
     codebook_size: int = 512
@@ -39,15 +38,14 @@ class ProteinVQVAEConfig:
 
 @dataclass
 class LigandVQVAEConfig:
-    """Config for ligand structure VQ-VAE (Mol-StrucTok style)."""
+    """Config for ligand structure VQ-VAE (Z-matrix descriptors)."""
 
-    descriptor_dim: int = 14  # 4 generation + 10 understanding
+    descriptor_dim: int = 4  # bond_length, bond_angle, sin_dihedral, cos_dihedral
     hidden_dim: int = 128
-    latent_dim: int = 5
+    latent_dim: int = 4
     codebook_size: int = 256
     commitment_cost: float = 0.25
     ema_decay: float = 0.99
-    max_neighbors: int = 4
 
 
 @dataclass

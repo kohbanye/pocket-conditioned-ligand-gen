@@ -1,7 +1,7 @@
 """DataModule for computing and caching VQ-VAE training descriptors.
 
 Processes CrossDocked2020 protein-ligand complexes into per-residue and
-per-atom SE(3)-invariant descriptors for joint VQ-VAE training.
+per-atom descriptors for joint VQ-VAE training.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import torch
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.tokenizers.ligand import SE3InvariantDescriptor, parse_sdf
-from src.tokenizers.protein import ProteinBackboneDescriptor, extract_pocket
+from src.tokenizers.ligand import LigandDescriptor, parse_sdf
+from src.tokenizers.protein import PocketDescriptor, extract_pocket
 
 if TYPE_CHECKING:
     from src.config import (
@@ -88,8 +88,8 @@ def _get_ligand_coords_from_sdf(sdf_path: Path) -> np.ndarray | None:
 def _process_complex(
     rec_path: Path,
     lig_path: Path,
-    protein_desc: ProteinBackboneDescriptor,
-    ligand_desc: SE3InvariantDescriptor,
+    protein_desc: PocketDescriptor,
+    ligand_desc: LigandDescriptor,
     pocket_config: PocketExtractionConfig,
 ) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
     """Process one complex and return (protein_desc, ligand_desc, elements)."""
@@ -102,13 +102,18 @@ def _process_complex(
         return None
     backbone_coords, _pocket_seq = pocket
 
-    prot_desc = protein_desc.compute(backbone_coords)
+    prot_desc, prot_metadata = protein_desc.compute(backbone_coords)
+    pocket_frame = (prot_metadata["centroid"], prot_metadata["rotation"])
 
     molecules = parse_sdf(lig_path)
     if not molecules:
         return None
     mol = molecules[0]
-    lig_desc_arr, elements = ligand_desc.compute(mol["atoms"], mol["bonds"])
+    lig_desc_arr, elements, _lig_metadata = ligand_desc.compute(
+        mol["atoms"],
+        mol["bonds"],
+        pocket_frame=pocket_frame,
+    )
     if len(lig_desc_arr) == 0:
         return None
 
@@ -175,12 +180,8 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         self.data_dir = Path(data_config.data_dir)
         self.cache_dir = self.data_dir / "descriptor_cache"
 
-        self.protein_desc = ProteinBackboneDescriptor(
-            num_neighbors=training_config.protein.num_neighbors,
-        )
-        self.ligand_desc = SE3InvariantDescriptor(
-            max_neighbors=training_config.ligand.max_neighbors,
-        )
+        self.protein_desc = PocketDescriptor()
+        self.ligand_desc = LigandDescriptor()
 
         self.protein_train: torch.Tensor | None = None
         self.protein_val: torch.Tensor | None = None
@@ -223,8 +224,10 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
             try:
                 result = _process_complex(
-                    rec_full, lig_full,
-                    self.protein_desc, self.ligand_desc,
+                    rec_full,
+                    lig_full,
+                    self.protein_desc,
+                    self.ligand_desc,
                     self.training_config.pocket,
                 )
             except Exception:
@@ -256,10 +259,12 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
     def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
         """Load cached descriptors and split into train/val."""
         protein_all = torch.load(
-            self.cache_dir / "protein_descriptors.pt", weights_only=True,
+            self.cache_dir / "protein_descriptors.pt",
+            weights_only=True,
         )
         ligand_all = torch.load(
-            self.cache_dir / "ligand_descriptors.pt", weights_only=True,
+            self.cache_dir / "ligand_descriptors.pt",
+            weights_only=True,
         )
 
         val_frac = self.data_config.val_size
@@ -278,7 +283,10 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         self.ligand_train = ligand_all[lig_perm[n_lig_val:]]
 
     def _build_loader(
-        self, data: torch.Tensor, *, shuffle: bool,
+        self,
+        data: torch.Tensor,
+        *,
+        shuffle: bool,
     ) -> DataLoader:
         bs = self.training_config.batch_size
         nw = self.training_config.num_workers

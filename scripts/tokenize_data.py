@@ -16,9 +16,9 @@ from torch import Tensor
 from src.config import CrossDockedConfig, PocketExtractionConfig, VQVAETrainingConfig
 from src.data.descriptors import _get_ligand_coords_from_sdf, _parse_types_file
 from src.model.vqvae_module import VQVAEModule
-from src.tokenizers.ligand import SE3InvariantDescriptor, parse_sdf
+from src.tokenizers.ligand import LigandDescriptor, parse_sdf
 from src.tokenizers.protein import (
-    ProteinBackboneDescriptor,
+    PocketDescriptor,
     extract_full_sequence,
     extract_pocket,
 )
@@ -33,8 +33,8 @@ class TokenizerContext:
     """Holds all objects needed for tokenizing complexes."""
 
     module: VQVAEModule
-    protein_desc: ProteinBackboneDescriptor
-    ligand_desc: SE3InvariantDescriptor
+    protein_desc: PocketDescriptor
+    ligand_desc: LigandDescriptor
     assembler: TokenSequenceAssembler
     pocket_config: PocketExtractionConfig
     protein_mean: Tensor
@@ -66,8 +66,8 @@ def _load_context(config: VQVAETrainingConfig, data_dir: Path) -> TokenizerConte
 
     return TokenizerContext(
         module=module,
-        protein_desc=ProteinBackboneDescriptor(config.protein.num_neighbors),
-        ligand_desc=SE3InvariantDescriptor(config.ligand.max_neighbors),
+        protein_desc=PocketDescriptor(),
+        ligand_desc=LigandDescriptor(),
         assembler=TokenSequenceAssembler(),
         pocket_config=PocketExtractionConfig(),
         protein_mean=stats["protein_mean"].to(device),
@@ -97,7 +97,8 @@ def _tokenize_complex(
     full_seq = extract_full_sequence(rec_path)
 
     # Protein structure tokens
-    prot_desc = ctx.protein_desc.compute(backbone_coords)
+    prot_desc, prot_meta = ctx.protein_desc.compute(backbone_coords)
+    pocket_frame = (prot_meta["centroid"], prot_meta["rotation"])
     prot_t = torch.from_numpy(prot_desc).to(ctx.device)
     prot_t = (prot_t - ctx.protein_mean) / ctx.protein_std
     prot_indices = ctx.module.protein_vqvae.encode(prot_t).cpu().tolist()
@@ -105,12 +106,16 @@ def _tokenize_complex(
         f"{aa}_{code}" for aa, code in zip(pocket_seq, prot_indices, strict=True)
     ]
 
-    # Ligand tokens
+    # Ligand tokens (anchored to pocket canonical frame)
     molecules = parse_sdf(lig_path)
     if not molecules:
         return None
     mol = molecules[0]
-    lig_desc, elements = ctx.ligand_desc.compute(mol["atoms"], mol["bonds"])
+    lig_desc, elements, _lig_meta = ctx.ligand_desc.compute(
+        mol["atoms"],
+        mol["bonds"],
+        pocket_frame=pocket_frame,
+    )
     if len(lig_desc) == 0:
         return None
 
