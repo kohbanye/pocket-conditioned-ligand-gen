@@ -266,7 +266,7 @@ def _(mo):
 
 
 @app.cell
-def _(gzip, lig_coords, lig_path, mo, np, pocket_config, py3Dmol, rec_path):
+def _(lig_coords, np, pocket_config, rec_path):
     # --- Identify pocket residue IDs for highlighting ---
     from Bio.PDB import PDBParser as _PDBParser
 
@@ -290,23 +290,22 @@ def _(gzip, lig_coords, lig_path, mo, np, pocket_config, py3Dmol, rec_path):
             ):
                 pocket_residue_ids.append((chain.id, residue.get_id()[1]))
 
-    # Read raw PDB text
+    print(f"Pocket residue IDs: {len(pocket_residue_ids)}")
+    return (pocket_residue_ids,)
+
+
+@app.cell
+def _(gzip, lig_path, pocket_residue_ids, py3Dmol, rec_path):
+    print("=== 3D viewer cell STARTED ===")
     pdb_block = rec_path.read_text()
 
-    # Read raw SDF text (decompress .sdf.gz)
     with gzip.open(str(lig_path), "rt") as f:
         sdf_full = f.read()
-    # Take only the first molecule (up to first $$$$)
     sdf_block = sdf_full.split("$$$$")[0] + "$$$$\n"
 
-    # --- Build py3Dmol viewer ---
     view = py3Dmol.view(width=800, height=500)
-
-    # Add protein
     view.addModel(pdb_block, "pdb")
-    # Light cartoon for whole protein
     view.setStyle({"model": 0}, {"cartoon": {"color": "white", "opacity": 0.3}})
-    # Highlight pocket residues
     pocket_resi = [r[1] for r in pocket_residue_ids]
     view.setStyle(
         {"model": 0, "resi": pocket_resi},
@@ -315,13 +314,10 @@ def _(gzip, lig_coords, lig_path, mo, np, pocket_config, py3Dmol, rec_path):
             "stick": {"color": "skyblue", "radius": 0.1},
         },
     )
-
-    # Add ligand
     view.addModel(sdf_block, "sdf")
     view.setStyle({"model": 1}, {"stick": {"colorscheme": "default", "radius": 0.2}})
-
-    view.zoomTo({"model": 1})  # Focus on ligand
-    mo.iframe(view._make_html())  # noqa: SLF001 — no public API for py3Dmol HTML export
+    view.zoomTo({"model": 1})
+    print(f"PDB: {len(pdb_block):,} bytes, SDF: {len(sdf_block):,} bytes")
     return (sdf_block,)
 
 
@@ -609,7 +605,7 @@ def _(
     py3Dmol,
     sdf_block,
 ):
-    def coords_to_xyz_block(coords: "ndarray", elements_list: list[str]) -> str:
+    def coords_to_xyz_block(coords: "numpy.ndarray", elements_list: list[str]) -> str:
         """Convert coordinates and elements to XYZ format string."""
         lines = [str(len(coords)), "reconstructed"]
         for (x, y, z), elem in zip(coords, elements_list, strict=True):

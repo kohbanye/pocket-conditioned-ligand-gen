@@ -46,6 +46,8 @@ ignore = ["D", "N812", "COM812"]
     "PLC0415",    # import inside function — marimo cell structure
     "PLR0913",    # too many arguments — marimo cell dependencies
     "PLR0915",    # too many statements — large cells
+    "PLR1711",    # useless return — marimo empty cells end with bare return
+    "SLF001",     # private member access — py3Dmol has no public HTML export API
     "N803",       # uppercase argument name — class names as cell deps
     "N806",       # uppercase variable — constants in cell scope
     "B018",       # useless expression — marimo cell output pattern (_fig)
