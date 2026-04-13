@@ -10,11 +10,13 @@ Provides:
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from src.tokenizers.codebook import EMACodebook
@@ -759,27 +761,82 @@ class LigandDescriptor:
 # ---------------------------------------------------------------------------
 
 
+def _sinusoidal_positional_encoding(max_len: int, d_model: int) -> Tensor:
+    """Create sinusoidal positional encoding table."""
+    pe = torch.zeros(max_len, d_model)
+    position = torch.arange(max_len, dtype=torch.float).unsqueeze(1)
+    div_term = torch.exp(
+        torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
+    )
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe
+
+
 class LigandVQVAE(nn.Module):
-    """VQ-VAE for ligand atom structure tokenization."""
+    """Transformer-based VQ-VAE for ligand atom structure tokenization.
+
+    Processes the full molecule as a sequence, giving each atom access
+    to the molecular context via self-attention before quantization.
+    Quantization is still per-atom (each atom maps to one codebook entry).
+    """
 
     def __init__(self, config: LigandVQVAEConfig) -> None:
         super().__init__()
         self.config = config
+        h = config.hidden_dim
+        d = config.descriptor_dim
+        z = config.latent_dim
 
-        self.encoder = nn.Sequential(
-            nn.Linear(config.descriptor_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.latent_dim),
+        # Encoder
+        self.input_proj = nn.Sequential(
+            nn.Linear(d, h),
+            nn.GELU(),
+            nn.Linear(h, h),
+        )
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=h,
+            nhead=config.num_attention_heads,
+            dim_feedforward=config.transformer_feedforward_dim,
+            dropout=config.transformer_dropout,
+            activation=F.gelu,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=config.num_transformer_layers,
+        )
+        self.latent_proj = nn.Linear(h, z)
+
+        # Decoder
+        self.latent_unproj = nn.Linear(z, h)
+        decoder_layer = nn.TransformerEncoderLayer(
+            d_model=h,
+            nhead=config.num_attention_heads,
+            dim_feedforward=config.transformer_feedforward_dim,
+            dropout=config.transformer_dropout,
+            activation=F.gelu,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.transformer_decoder = nn.TransformerEncoder(
+            decoder_layer,
+            num_layers=config.num_transformer_layers + 2,
+        )
+        self.output_proj = nn.Sequential(
+            nn.Linear(h, h),
+            nn.GELU(),
+            nn.Linear(h, d),
         )
 
-        self.decoder = nn.Sequential(
-            nn.Linear(config.latent_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.descriptor_dim),
+        # Positional encoding (buffer, not a parameter)
+        self.register_buffer(
+            "pos_encoding",
+            _sinusoidal_positional_encoding(config.max_seq_len, h),
         )
 
+        # Codebook
         self.codebook = EMACodebook(
             num_codes=config.codebook_size,
             code_dim=config.latent_dim,
@@ -787,38 +844,93 @@ class LigandVQVAE(nn.Module):
             commitment_cost=config.commitment_cost,
         )
 
-    def forward(self, x: Tensor) -> dict[str, Tensor]:
-        """Forward pass: encode, quantize, decode.
+    def forward(
+        self,
+        x: Tensor,
+        mask: Tensor | None = None,
+    ) -> dict[str, Tensor]:
+        """Forward pass with sequence context.
 
         Args:
-            x: Descriptors of shape ``(B, descriptor_dim)``.
+            x: Descriptors of shape ``(B, L, descriptor_dim)``.
+            mask: Boolean mask ``(B, L)``, ``True`` for real atoms.
 
         Returns:
             Dict with keys: reconstructed, indices, commitment_loss,
             reconstruction_loss.
         """
-        z = self.encoder(x)
-        quantized, indices, commitment_loss = self.codebook(z)
-        reconstructed = self.decoder(quantized)
-        reconstruction_loss = (x - reconstructed).pow(2).mean()
+        b, seq_len, _ = x.shape
+
+        if mask is None:
+            mask = torch.ones(b, seq_len, dtype=torch.bool, device=x.device)
+
+        # Encode
+        h = self.input_proj(x) + self.pos_encoding[:seq_len]
+        h = self.transformer_encoder(h, src_key_padding_mask=~mask)
+        z = self.latent_proj(h)  # (B, L, latent_dim)
+
+        # Quantize per-atom (only real atoms)
+        z_real = z[mask]  # (N_real, latent_dim)
+        quantized_real, indices_real, commitment_loss = self.codebook(z_real)
+
+        # Scatter quantized vectors back to (B, L, latent_dim)
+        quantized = torch.zeros_like(z)
+        quantized[mask] = quantized_real
+
+        indices = torch.full(
+            (b, seq_len),
+            -1,
+            dtype=torch.long,
+            device=x.device,
+        )
+        indices[mask] = indices_real
+
+        # Decode
+        dec_in = self.latent_unproj(quantized) + self.pos_encoding[:seq_len]
+        dec_out = self.transformer_decoder(dec_in, src_key_padding_mask=~mask)
+        x_hat = self.output_proj(dec_out)  # (B, L, descriptor_dim)
+
+        # Masked reconstruction loss
+        diff = (x - x_hat)[mask]  # (N_real, descriptor_dim)
+        reconstruction_loss = diff.pow(2).mean()
 
         return {
-            "reconstructed": reconstructed,
+            "reconstructed": x_hat,
             "indices": indices,
             "commitment_loss": commitment_loss,
             "reconstruction_loss": reconstruction_loss,
         }
 
     def encode(self, x: Tensor) -> Tensor:
-        """Encode descriptors to codebook indices."""
-        z = self.encoder(x)
+        """Encode descriptors to codebook indices.
+
+        Args:
+            x: ``(N, descriptor_dim)`` for a single molecule.
+
+        Returns:
+            Codebook indices of shape ``(N,)``.
+        """
+        x_seq = x.unsqueeze(0)  # (1, N, D)
+        h = self.input_proj(x_seq) + self.pos_encoding[: x.shape[0]]
+        h = self.transformer_encoder(h)
+        z = self.latent_proj(h).squeeze(0)  # (N, latent_dim)
         _, indices, _ = self.codebook(z)
         return indices
 
     def decode(self, indices: Tensor) -> Tensor:
-        """Decode codebook indices back to descriptors."""
-        quantized = self.codebook.lookup(indices)
-        return self.decoder(quantized)
+        """Decode codebook indices back to descriptors.
+
+        Args:
+            indices: ``(N,)`` codebook indices for a single molecule.
+
+        Returns:
+            Reconstructed descriptors of shape ``(N, descriptor_dim)``.
+        """
+        quantized = self.codebook.lookup(indices)  # (N, latent_dim)
+        q_seq = quantized.unsqueeze(0)  # (1, N, latent_dim)
+        dec_in = self.latent_unproj(q_seq) + self.pos_encoding[: indices.shape[0]]
+        dec_out = self.transformer_decoder(dec_in)
+        return self.output_proj(dec_out).squeeze(0)  # (N, descriptor_dim)
 
 
 class LigandTokenizer:

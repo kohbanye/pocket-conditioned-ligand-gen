@@ -36,7 +36,7 @@ class VQVAEModule(L.LightningModule):
 
     def training_step(
         self,
-        batch: dict[str, list[Tensor]],
+        batch: dict[str, list[Tensor] | tuple[Tensor, Tensor]],
         batch_idx: int,  # noqa: ARG002
     ) -> None:
         opt = self.optimizers()
@@ -46,7 +46,7 @@ class VQVAEModule(L.LightningModule):
 
         total_loss = torch.tensor(0.0, device=self.device)
 
-        # Protein VQ-VAE
+        # Protein VQ-VAE (flat residue batching)
         if "protein" in batch:
             (prot_x,) = batch["protein"]
             prot_out = self.protein_vqvae(prot_x)
@@ -56,15 +56,16 @@ class VQVAEModule(L.LightningModule):
             self.log("train/protein_commit", prot_out["commitment_loss"])
             self._log_utilization("train/protein", prot_out["indices"])
 
-        # Ligand VQ-VAE
+        # Ligand VQ-VAE (molecule-level batching with mask)
         if "ligand" in batch:
-            (lig_x,) = batch["ligand"]
-            lig_out = self.ligand_vqvae(lig_x)
+            lig_x, lig_mask = batch["ligand"]
+            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask)
             lig_loss = lig_out["reconstruction_loss"] + lig_out["commitment_loss"]
             total_loss = total_loss + lig_loss
             self.log("train/ligand_recon", lig_out["reconstruction_loss"])
             self.log("train/ligand_commit", lig_out["commitment_loss"])
-            self._log_utilization("train/ligand", lig_out["indices"])
+            real_indices = lig_out["indices"][lig_mask]
+            self._log_utilization("train/ligand", real_indices)
 
         self.log("train/total_loss", total_loss, prog_bar=True)
 
@@ -75,7 +76,7 @@ class VQVAEModule(L.LightningModule):
 
     def validation_step(
         self,
-        batch: dict[str, list[Tensor]],
+        batch: dict[str, list[Tensor] | tuple[Tensor, Tensor]],
         batch_idx: int,  # noqa: ARG002
     ) -> None:
         if "protein" in batch:
@@ -90,11 +91,12 @@ class VQVAEModule(L.LightningModule):
             self._log_utilization("val/protein", prot_out["indices"])
 
         if "ligand" in batch:
-            (lig_x,) = batch["ligand"]
-            lig_out = self.ligand_vqvae(lig_x)
+            lig_x, lig_mask = batch["ligand"]
+            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask)
             self.log("val/ligand_recon", lig_out["reconstruction_loss"], sync_dist=True)
             self.log("val/ligand_commit", lig_out["commitment_loss"], sync_dist=True)
-            self._log_utilization("val/ligand", lig_out["indices"])
+            real_indices = lig_out["indices"][lig_mask]
+            self._log_utilization("val/ligand", real_indices)
 
     def _log_utilization(self, prefix: str, indices: Tensor) -> None:
         """Log codebook utilization and perplexity."""

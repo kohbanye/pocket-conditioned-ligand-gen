@@ -308,11 +308,15 @@ class ProteinStructureVQVAE(nn.Module):
             nn.ReLU(),
             nn.Linear(config.hidden_dim, config.hidden_dim),
             nn.ReLU(),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.ReLU(),
             nn.Linear(config.hidden_dim, config.latent_dim),
         )
 
         self.decoder = nn.Sequential(
             nn.Linear(config.latent_dim, config.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(config.hidden_dim, config.hidden_dim),
             nn.ReLU(),
             nn.Linear(config.hidden_dim, config.descriptor_dim),
         )

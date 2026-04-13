@@ -29,9 +29,9 @@ class ProteinVQVAEConfig:
     """Config for protein backbone structure VQ-VAE."""
 
     descriptor_dim: int = 9  # CA pos (3) + N-CA offset (3) + C-CA offset (3)
-    hidden_dim: int = 128
-    latent_dim: int = 8
-    codebook_size: int = 512
+    hidden_dim: int = 256
+    latent_dim: int = 16
+    codebook_size: int = 2048
     commitment_cost: float = 0.25
     ema_decay: float = 0.99
 
@@ -41,11 +41,17 @@ class LigandVQVAEConfig:
     """Config for ligand structure VQ-VAE (Z-matrix descriptors)."""
 
     descriptor_dim: int = 4  # bond_length, bond_angle, sin_dihedral, cos_dihedral
-    hidden_dim: int = 128
-    latent_dim: int = 4
-    codebook_size: int = 256
+    hidden_dim: int = 256
+    latent_dim: int = 8
+    codebook_size: int = 1024
     commitment_cost: float = 0.25
     ema_decay: float = 0.99
+    # Transformer context parameters
+    num_transformer_layers: int = 4
+    num_attention_heads: int = 8
+    transformer_feedforward_dim: int = 512
+    transformer_dropout: float = 0.1
+    max_seq_len: int = 256
 
 
 @dataclass

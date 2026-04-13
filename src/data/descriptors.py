@@ -14,7 +14,8 @@ import lightning as L
 import numpy as np
 import torch
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
-from torch.utils.data import DataLoader, TensorDataset
+from torch import Tensor
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 
 from src.tokenizers.ligand import LigandDescriptor, parse_sdf
 from src.tokenizers.protein import PocketDescriptor, extract_pocket
@@ -136,16 +137,19 @@ def _save_descriptors(
     ligand_std = ligand_all.std(axis=0) + 1e-8
 
     protein_all = (protein_all - protein_mean) / protein_std
-    ligand_all = (ligand_all - ligand_mean) / ligand_std
 
     torch.save(
         torch.from_numpy(protein_all),
         cache_dir / "protein_descriptors.pt",
     )
-    torch.save(
-        torch.from_numpy(ligand_all),
-        cache_dir / "ligand_descriptors.pt",
-    )
+
+    # Save ligand descriptors per-molecule (for Transformer sequence processing)
+    ligand_molecules = [
+        torch.from_numpy((desc - ligand_mean) / ligand_std).float()
+        for desc in all_ligand_desc
+    ]
+    torch.save(ligand_molecules, cache_dir / "ligand_molecules.pt")
+
     torch.save(
         {
             "protein_mean": torch.from_numpy(protein_mean),
@@ -160,10 +164,49 @@ def _save_descriptors(
     torch.save(unique_elements, cache_dir / "ligand_elements.pt")
 
     logger.info(
-        "Cached %d protein residue descriptors, %d ligand atom descriptors",
+        "Cached %d protein residue descriptors, %d ligand molecules (%d atoms)",
         len(protein_all),
+        len(ligand_molecules),
         len(ligand_all),
     )
+
+
+class MoleculeDataset(Dataset[Tensor]):
+    """Dataset of variable-length molecule descriptor sequences."""
+
+    def __init__(self, molecules: list[Tensor]) -> None:
+        self.molecules = molecules
+
+    def __len__(self) -> int:
+        return len(self.molecules)
+
+    def __getitem__(self, idx: int) -> Tensor:
+        return self.molecules[idx]  # (N_atoms, descriptor_dim)
+
+
+def collate_molecules(batch: list[Tensor]) -> tuple[Tensor, Tensor]:
+    """Pad variable-length molecules and create attention mask.
+
+    Args:
+        batch: List of tensors, each ``(N_atoms_i, descriptor_dim)``.
+
+    Returns:
+        Tuple of ``(padded, mask)`` where *padded* has shape
+        ``(B, max_len, descriptor_dim)`` and *mask* is a boolean tensor
+        of shape ``(B, max_len)`` (``True`` for real atoms).
+    """
+    max_len = max(mol.shape[0] for mol in batch)
+    descriptor_dim = batch[0].shape[1]
+
+    padded = torch.zeros(len(batch), max_len, descriptor_dim)
+    mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
+
+    for i, mol in enumerate(batch):
+        n = mol.shape[0]
+        padded[i, :n] = mol
+        mask[i, :n] = True
+
+    return padded, mask
 
 
 class ComplexDescriptorDataModule(L.LightningDataModule):
@@ -185,12 +228,12 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
         self.protein_train: torch.Tensor | None = None
         self.protein_val: torch.Tensor | None = None
-        self.ligand_train: torch.Tensor | None = None
-        self.ligand_val: torch.Tensor | None = None
+        self.ligand_train: list[Tensor] | None = None
+        self.ligand_val: list[Tensor] | None = None
 
     def prepare_data(self) -> None:
         """Compute descriptors from CrossDocked2020 and cache to disk."""
-        if (self.cache_dir / "protein_descriptors.pt").exists():
+        if (self.cache_dir / "ligand_molecules.pt").exists():
             logger.info("Descriptor cache already exists at %s", self.cache_dir)
             return
 
@@ -262,10 +305,6 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             self.cache_dir / "protein_descriptors.pt",
             weights_only=True,
         )
-        ligand_all = torch.load(
-            self.cache_dir / "ligand_descriptors.pt",
-            weights_only=True,
-        )
 
         val_frac = self.data_config.val_size
         rng = torch.Generator().manual_seed(self.data_config.random_state)
@@ -276,13 +315,17 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         self.protein_val = protein_all[prot_perm[:n_prot_val]]
         self.protein_train = protein_all[prot_perm[n_prot_val:]]
 
-        n_lig = len(ligand_all)
-        lig_perm = torch.randperm(n_lig, generator=rng)
+        ligand_molecules: list[Tensor] = torch.load(
+            self.cache_dir / "ligand_molecules.pt",
+            weights_only=True,
+        )
+        n_lig = len(ligand_molecules)
+        lig_perm = torch.randperm(n_lig, generator=rng).tolist()
         n_lig_val = int(n_lig * val_frac)
-        self.ligand_val = ligand_all[lig_perm[:n_lig_val]]
-        self.ligand_train = ligand_all[lig_perm[n_lig_val:]]
+        self.ligand_val = [ligand_molecules[i] for i in lig_perm[:n_lig_val]]
+        self.ligand_train = [ligand_molecules[i] for i in lig_perm[n_lig_val:]]
 
-    def _build_loader(
+    def _build_protein_loader(
         self,
         data: torch.Tensor,
         *,
@@ -298,6 +341,23 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             persistent_workers=nw > 0,
         )
 
+    def _build_ligand_loader(
+        self,
+        molecules: list[Tensor],
+        *,
+        shuffle: bool,
+    ) -> DataLoader:
+        bs = self.training_config.ligand_mol_batch_size
+        nw = self.training_config.num_workers
+        return DataLoader(
+            MoleculeDataset(molecules),
+            batch_size=bs,
+            shuffle=shuffle,
+            num_workers=nw,
+            persistent_workers=nw > 0,
+            collate_fn=collate_molecules,
+        )
+
     def train_dataloader(self) -> CombinedLoader:
         """Return train dataloaders for protein and ligand."""
         if self.protein_train is None or self.ligand_train is None:
@@ -305,8 +365,14 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             raise RuntimeError(msg)
         return CombinedLoader(
             {
-                "protein": self._build_loader(self.protein_train, shuffle=True),
-                "ligand": self._build_loader(self.ligand_train, shuffle=True),
+                "protein": self._build_protein_loader(
+                    self.protein_train,
+                    shuffle=True,
+                ),
+                "ligand": self._build_ligand_loader(
+                    self.ligand_train,
+                    shuffle=True,
+                ),
             },
             mode="max_size_cycle",
         )
@@ -318,8 +384,14 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             raise RuntimeError(msg)
         return CombinedLoader(
             {
-                "protein": self._build_loader(self.protein_val, shuffle=False),
-                "ligand": self._build_loader(self.ligand_val, shuffle=False),
+                "protein": self._build_protein_loader(
+                    self.protein_val,
+                    shuffle=False,
+                ),
+                "ligand": self._build_ligand_loader(
+                    self.ligand_val,
+                    shuffle=False,
+                ),
             },
             mode="max_size_cycle",
         )
