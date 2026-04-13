@@ -36,6 +36,7 @@
 - **Deep Learning**: PyTorch + PyTorch Lightning
 - **Config**: Hydra (hydra-core)
 - **Experiment Tracking**: Weights & Biases (wandb)
+- **Notebooks**: marimo (`.py` format, not Jupyter)
 - **Linter**: Ruff (select = ALL, ignore = D, N812)
 - **Type Checker**: ty
 - **Testing**: pytest
@@ -61,7 +62,7 @@ pocket-conditioned-ligand-gen/
 ├── scripts/                  # CLI entry points
 │   ├── tokenize.py           # Tokenization pipeline
 │   └── train.py              # Training pipeline
-├── notebooks/                # Jupyter notebooks for exploration/visualization
+├── notebooks/                # marimo notebooks (.py) for exploration/visualization
 ├── data/                     # Downloaded datasets (gitignored)
 ├── pyproject.toml            # Project config and dependencies
 └── uv.lock                   # Dependency lock file
