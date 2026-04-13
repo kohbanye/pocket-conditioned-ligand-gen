@@ -60,6 +60,7 @@ class VQVAETrainingConfig:
 
     learning_rate: float = 3e-4
     batch_size: int = 65536
+    ligand_mol_batch_size: int = 1024
     max_epochs: int = 100
     num_workers: int = 16
     protein: ProteinVQVAEConfig = field(default_factory=ProteinVQVAEConfig)
