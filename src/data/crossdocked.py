@@ -116,6 +116,33 @@ class CrossDockedDataModule(L.LightningDataModule):
         self._extract_tarball(tarball_path, self.crossdocked_dir)
         done_marker.touch()
 
+        self._cleanup_extracted(tarball_path)
+
+    def _cleanup_extracted(self, tarball_path: Path | None = None) -> None:
+        """Remove unused .gninatypes files and the tarball after extraction."""
+        cleanup_marker = self.crossdocked_dir / ".cleanup_done"
+        if cleanup_marker.exists():
+            return
+
+        num_deleted = 0
+        bytes_freed = 0
+        for gninatypes_file in self.crossdocked_dir.rglob("*.gninatypes"):
+            bytes_freed += gninatypes_file.stat().st_size
+            gninatypes_file.unlink()
+            num_deleted += 1
+
+        logger.info(
+            "Deleted %d .gninatypes files (%.1f GB freed)",
+            num_deleted,
+            bytes_freed / 1e9,
+        )
+
+        if tarball_path is not None:
+            tarball_path.unlink(missing_ok=True)
+            logger.info("Deleted tarball %s", tarball_path)
+
+        cleanup_marker.touch()
+
     def setup(self, stage: str | None = None) -> None:
         """Set up train/val/test datasets."""
 
