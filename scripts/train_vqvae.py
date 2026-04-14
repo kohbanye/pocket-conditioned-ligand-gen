@@ -51,6 +51,7 @@ def main() -> None:
         ],
     )
     trainer.fit(module, dm)
+    trainer.test(module, dm)
 
 
 if __name__ == "__main__":

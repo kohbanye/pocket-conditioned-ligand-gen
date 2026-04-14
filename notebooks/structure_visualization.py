@@ -142,7 +142,7 @@ def _(mo):
 
 @app.cell
 def _(parse_types_file, project_root):
-    types_file = project_root / "data" / "types" / "cdonly_it2_tt_v1.3_0_train0.types"
+    types_file = project_root / "data" / "types" / "cdonly_it2_tt_v1.3_0_test0.types"
     pairs = parse_types_file(types_file)
     crossdocked_dir = project_root / "data" / "CrossDocked2020"
 

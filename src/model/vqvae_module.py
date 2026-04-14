@@ -98,6 +98,38 @@ class VQVAEModule(L.LightningModule):
             real_indices = lig_out["indices"][lig_mask]
             self._log_utilization("val/ligand", real_indices)
 
+    def test_step(
+        self,
+        batch: dict[str, list[Tensor] | tuple[Tensor, Tensor]],
+        batch_idx: int,  # noqa: ARG002
+    ) -> None:
+        if "protein" in batch:
+            (prot_x,) = batch["protein"]
+            prot_out = self.protein_vqvae(prot_x)
+            self.log(
+                "test/protein_recon",
+                prot_out["reconstruction_loss"],
+                sync_dist=True,
+            )
+            self.log("test/protein_commit", prot_out["commitment_loss"], sync_dist=True)
+            self._log_utilization("test/protein", prot_out["indices"])
+
+        if "ligand" in batch:
+            lig_x, lig_mask = batch["ligand"]
+            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask)
+            self.log(
+                "test/ligand_recon",
+                lig_out["reconstruction_loss"],
+                sync_dist=True,
+            )
+            self.log(
+                "test/ligand_commit",
+                lig_out["commitment_loss"],
+                sync_dist=True,
+            )
+            real_indices = lig_out["indices"][lig_mask]
+            self._log_utilization("test/ligand", real_indices)
+
     def _log_utilization(self, prefix: str, indices: Tensor) -> None:
         """Log codebook utilization and perplexity."""
         unique_codes = indices.unique().numel()

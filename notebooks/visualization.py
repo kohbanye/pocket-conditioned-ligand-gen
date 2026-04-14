@@ -132,38 +132,34 @@ def _(
     project_root: Path,
     torch: types.ModuleType,
 ):
-    # Load cached descriptors and prepare validation split
+    # Load cached descriptors and prepare test split
     config = VQVAETrainingConfig()
     data_config = CrossDockedConfig(data_dir=project_root / "data")
     dm = ComplexDescriptorDataModule(config, data_config)
     dm.setup()
 
-    protein_val = dm.protein_val.to(device)
-    # Ligand val is now a list of per-molecule tensors (for Transformer sequence processing)
-    ligand_val_molecules = [mol.to(device) for mol in dm.ligand_val]
-    ligand_val_flat = torch.cat(ligand_val_molecules)
+    protein_test = dm.protein_test.to(device)
+    ligand_test_molecules = [mol.to(device) for mol in dm.ligand_test]
+    ligand_test_flat = torch.cat(ligand_test_molecules)
 
-    # Also load normalization stats for de-normalization
-    norm_stats = torch.load(
-        project_root / "data" / "descriptor_cache" / "normalization_stats.pt",
-        weights_only=True,
-    )
-    print(f"Protein val: {protein_val.shape}")
+    # Normalization stats (computed from train split)
+    norm_stats = dm.norm_stats
+    print(f"Protein test: {protein_test.shape}")
     print(
-        f"Ligand val:  {len(ligand_val_molecules)} molecules, {ligand_val_flat.shape[0]} atoms total"
+        f"Ligand test:  {len(ligand_test_molecules)} molecules, {ligand_test_flat.shape[0]} atoms total"
     )
-    return config, ligand_val_flat, ligand_val_molecules, norm_stats, protein_val
+    return config, ligand_test_flat, ligand_test_molecules, norm_stats, protein_test
 
 
 @app.cell
 def _(
-    ligand_val_molecules: list[Tensor],
+    ligand_test_molecules: list[Tensor],
     ligand_vqvae: LigandVQVAE,
-    protein_val: Tensor,
+    protein_test: Tensor,
     protein_vqvae: ProteinStructureVQVAE,
     torch: types.ModuleType,
 ):
-    # Run inference on validation set
+    # Run inference on test set
     @torch.no_grad()
     def run_vqvae_protein(
         model: "ProteinStructureVQVAE", data: "Tensor", batch_size: int = 4096
@@ -199,8 +195,10 @@ def _(
             all_z.append(z)
         return torch.cat(all_recon), torch.cat(all_indices), torch.cat(all_z)
 
-    prot_recon, prot_indices, prot_z = run_vqvae_protein(protein_vqvae, protein_val)
-    lig_recon, lig_indices, lig_z = run_vqvae_ligand(ligand_vqvae, ligand_val_molecules)
+    prot_recon, prot_indices, prot_z = run_vqvae_protein(protein_vqvae, protein_test)
+    lig_recon, lig_indices, lig_z = run_vqvae_ligand(
+        ligand_vqvae, ligand_test_molecules
+    )
 
     print("Inference done.")
     print(
@@ -224,11 +222,11 @@ def _(mo: types.ModuleType):
 @app.cell
 def _(
     lig_recon: Tensor,
-    ligand_val_flat: Tensor,
+    ligand_test_flat: Tensor,
     norm_stats: dict[str, Tensor],
     np: types.ModuleType,
     prot_recon: Tensor,
-    protein_val: Tensor,
+    protein_test: Tensor,
 ):
     def compute_mse_metrics(
         original: "Tensor",
@@ -269,14 +267,14 @@ def _(
         }
 
     prot_metrics = compute_mse_metrics(
-        protein_val,
+        protein_test,
         prot_recon,
         "Protein",
         norm_stats["protein_mean"],
         norm_stats["protein_std"],
     )
     lig_metrics = compute_mse_metrics(
-        ligand_val_flat,
+        ligand_test_flat,
         lig_recon,
         "Ligand",
         norm_stats["ligand_mean"],
@@ -502,18 +500,18 @@ def _(mo: types.ModuleType):
 @app.cell
 def _(
     lig_recon: Tensor,
-    ligand_val_flat: Tensor,
+    ligand_test_flat: Tensor,
     np: types.ModuleType,
     plt: types.ModuleType,
     prot_recon: Tensor,
-    protein_val: Tensor,
+    protein_test: Tensor,
 ):
     _fig, _axes = plt.subplots(1, 2, figsize=(12, 4))
     prot_per_sample = np.mean(
-        (protein_val.cpu().numpy() - prot_recon.cpu().numpy()) ** 2, axis=1
+        (protein_test.cpu().numpy() - prot_recon.cpu().numpy()) ** 2, axis=1
     )
     lig_per_sample = np.mean(
-        (ligand_val_flat.cpu().numpy() - lig_recon.cpu().numpy()) ** 2, axis=1
+        (ligand_test_flat.cpu().numpy() - lig_recon.cpu().numpy()) ** 2, axis=1
     )
     _axes[0].hist(prot_per_sample, bins=100, edgecolor="none", alpha=0.8)
     _axes[0].axvline(
@@ -591,7 +589,7 @@ def _(
     pocket_config = PocketExtractionConfig()
     protein_desc_calc = PocketDescriptor()
     ligand_desc_calc = LigandDescriptor()
-    types_file = project_root / "data" / "types" / "cdonly_it2_tt_v1.3_0_train0.types"
+    types_file = project_root / "data" / "types" / "cdonly_it2_tt_v1.3_0_test0.types"
     pairs = _parse_types_file(types_file)
     crossdocked_dir = project_root / "data" / "CrossDocked2020"
     prot_mean = norm_stats["protein_mean"].to(device)
@@ -834,9 +832,9 @@ def _(
             "Metric": [
                 "Codebook size",
                 "Latent dim",
-                "Val MSE (normalized)",
-                "Val MSE (original scale)",
-                "Val RMSE (original scale)",
+                "Test MSE (normalized)",
+                "Test MSE (original scale)",
+                "Test RMSE (original scale)",
                 "Active codes",
                 "Utilization",
                 "Perplexity",

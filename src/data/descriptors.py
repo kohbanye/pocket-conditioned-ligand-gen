@@ -1,7 +1,8 @@
 """DataModule for computing and caching VQ-VAE training descriptors.
 
 Processes CrossDocked2020 protein-ligand complexes into per-residue and
-per-atom descriptors for joint VQ-VAE training.
+per-atom descriptors for joint VQ-VAE training.  Data is split at the
+**complex** level into train / val / test to prevent data leakage.
 """
 
 from __future__ import annotations
@@ -9,6 +10,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 import lightning as L
 import numpy as np
@@ -29,11 +33,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Per-worker state for multiprocessing (set by _worker_init).
+_worker_protein_desc: PocketDescriptor | None = None
+_worker_ligand_desc: LigandDescriptor | None = None
+_worker_pocket_config: PocketExtractionConfig | None = None
+
 
 def _gninatypes_to_pdb(gninatypes_path: str) -> str:
     """Convert a receptor .gninatypes path to the corresponding .pdb path.
 
-    Example: ``subdir/5f74_A_rec_0.gninatypes`` → ``subdir/5f74_A_rec.pdb``
+    Example: ``subdir/5f74_A_rec_0.gninatypes`` -> ``subdir/5f74_A_rec.pdb``
     """
     import re  # noqa: PLC0415
 
@@ -44,7 +53,7 @@ def _gninatypes_to_sdf(gninatypes_path: str) -> str:
     """Convert a ligand .gninatypes path to the corresponding .sdf.gz path.
 
     Example: ``subdir/5f74_A_rec_5f74_amp_lig_tt_docked_0.gninatypes``
-           → ``subdir/5f74_A_rec_5f74_amp_lig_tt_docked.sdf.gz``
+           -> ``subdir/5f74_A_rec_5f74_amp_lig_tt_docked.sdf.gz``
     """
     import re  # noqa: PLC0415
 
@@ -71,6 +80,37 @@ def _parse_types_file(types_path: Path) -> list[tuple[str, str]]:
         if key not in seen:
             seen.add(key)
             pairs.append(key)
+    return pairs
+
+
+def _parse_all_types_files(
+    types_dir: Path,
+    max_pairs: int | None = None,
+) -> list[tuple[str, str]]:
+    """Parse train0 and test0 types files and return deduplicated union.
+
+    When *max_pairs* is set, stops reading once enough unique pairs have
+    been collected (avoids parsing multi-GB files unnecessarily).
+    """
+    train_files = sorted(types_dir.glob("cdonly_*train0.types"))
+    test_files = sorted(types_dir.glob("cdonly_*test0.types"))
+    all_files = train_files + test_files
+    if not all_files:
+        msg = f"No cdonly_*train0/test0.types files found in {types_dir}"
+        raise FileNotFoundError(msg)
+
+    seen: set[tuple[str, str]] = set()
+    pairs: list[tuple[str, str]] = []
+    for types_file in all_files:
+        for pair in _parse_types_file(types_file):
+            if pair not in seen:
+                seen.add(pair)
+                pairs.append(pair)
+                if max_pairs is not None and len(pairs) >= max_pairs:
+                    break
+        if max_pairs is not None and len(pairs) >= max_pairs:
+            break
+    logger.info("Loaded %d unique pairs from %s", len(pairs), types_dir)
     return pairs
 
 
@@ -121,54 +161,132 @@ def _process_complex(
     return prot_desc, lig_desc_arr, elements
 
 
-def _save_descriptors(
+def _worker_init(pocket_config_dict: dict) -> None:
+    """Initialize per-worker descriptor calculators (called once per process)."""
+    global _worker_protein_desc, _worker_ligand_desc, _worker_pocket_config  # noqa: PLW0603
+
+    from src.config import PocketExtractionConfig  # noqa: PLC0415
+
+    _worker_protein_desc = PocketDescriptor()
+    _worker_ligand_desc = LigandDescriptor()
+    _worker_pocket_config = PocketExtractionConfig(**pocket_config_dict)
+
+
+def _worker_process_one(
+    args: tuple[str, str, str],
+) -> dict[str, np.ndarray | list[str]] | None:
+    """Process a single complex in a worker process."""
+    rec_str, lig_str, crossdocked_str = args
+    rec_full = Path(crossdocked_str) / rec_str
+    lig_full = Path(crossdocked_str) / lig_str
+
+    if not rec_full.exists() or not lig_full.exists():
+        return None
+
+    try:
+        result = _process_complex(
+            rec_full,
+            lig_full,
+            _worker_protein_desc,  # type: ignore[arg-type]
+            _worker_ligand_desc,  # type: ignore[arg-type]
+            _worker_pocket_config,  # type: ignore[arg-type]
+        )
+    except Exception:
+        logger.exception("Error processing %s / %s", rec_str, lig_str)
+        return None
+
+    if result is None:
+        return None
+
+    prot, lig, elems = result
+    return {"protein": prot, "ligand": lig, "elements": elems}
+
+
+def _process_pairs(
+    pairs: list[tuple[str, str]],
+    crossdocked_dir: Path,
+    pocket_config: PocketExtractionConfig,
+    num_workers: int = 0,
+) -> list[dict[str, np.ndarray | list[str]]]:
+    """Process a list of (receptor, ligand) pairs into complex dicts.
+
+    When *num_workers* > 0, processing runs in parallel using a
+    ``multiprocessing.Pool``.
+
+    Returns a list of dicts, each containing raw (un-normalized) descriptors:
+      - ``"protein"``: ``ndarray`` of shape ``(n_residues, 9)``
+      - ``"ligand"``: ``ndarray`` of shape ``(n_atoms, 4)``
+      - ``"elements"``: ``list[str]`` of per-atom element symbols
+    """
+    from dataclasses import asdict  # noqa: PLC0415
+
+    crossdocked_str = str(crossdocked_dir)
+    work_items = [(rec, lig, crossdocked_str) for rec, lig in pairs]
+
+    pocket_config_dict = asdict(pocket_config)
+
+    if num_workers > 0:
+        import multiprocessing  # noqa: PLC0415
+
+        logger.info("Processing with %d workers", num_workers)
+        with multiprocessing.Pool(
+            num_workers,
+            initializer=_worker_init,
+            initargs=(pocket_config_dict,),
+        ) as pool:
+            results = pool.imap_unordered(
+                _worker_process_one,
+                work_items,
+                chunksize=64,
+            )
+            return _collect_results(results, len(work_items))
+
+    # Single-process fallback
+    _worker_init(pocket_config_dict)
+    results_iter = (_worker_process_one(item) for item in work_items)
+    return _collect_results(results_iter, len(work_items))
+
+
+def _collect_results(
+    results: Iterable[dict[str, np.ndarray | list[str]] | None],
+    total: int,
+) -> list[dict[str, np.ndarray | list[str]]]:
+    """Collect results from an iterator, logging progress."""
+    complexes: list[dict[str, np.ndarray | list[str]]] = []
+    num_skipped = 0
+
+    for num_done, result in enumerate(results, 1):
+        if result is None:
+            num_skipped += 1
+        else:
+            complexes.append(result)
+
+        if num_done % 1000 == 0:
+            logger.info(
+                "Progress: %d / %d done (%d ok, %d skipped)",
+                num_done,
+                total,
+                len(complexes),
+                num_skipped,
+            )
+
+    logger.info("Done: %d processed, %d skipped", len(complexes), num_skipped)
+    return complexes
+
+
+def _save_complexes(
     cache_dir: Path,
-    all_protein_desc: list[np.ndarray],
-    all_ligand_desc: list[np.ndarray],
-    all_ligand_elements: list[list[str]],
+    complexes: list[dict[str, np.ndarray | list[str]]],
 ) -> None:
-    """Normalize and save descriptors to cache directory."""
-    protein_all = np.concatenate(all_protein_desc, axis=0)
-    ligand_all = np.concatenate(all_ligand_desc, axis=0)
+    """Save per-complex descriptors and element vocabulary to cache."""
+    torch.save(complexes, cache_dir / "complexes.pt")
 
-    protein_mean = protein_all.mean(axis=0)
-    protein_std = protein_all.std(axis=0) + 1e-8
-    ligand_mean = ligand_all.mean(axis=0)
-    ligand_std = ligand_all.std(axis=0) + 1e-8
-
-    protein_all = (protein_all - protein_mean) / protein_std
-
-    torch.save(
-        torch.from_numpy(protein_all),
-        cache_dir / "protein_descriptors.pt",
+    unique_elements = sorted(
+        {e for c in complexes for e in c["elements"]}  # type: ignore[union-attr]
     )
-
-    # Save ligand descriptors per-molecule (for Transformer sequence processing)
-    ligand_molecules = [
-        torch.from_numpy((desc - ligand_mean) / ligand_std).float()
-        for desc in all_ligand_desc
-    ]
-    torch.save(ligand_molecules, cache_dir / "ligand_molecules.pt")
-
-    torch.save(
-        {
-            "protein_mean": torch.from_numpy(protein_mean),
-            "protein_std": torch.from_numpy(protein_std),
-            "ligand_mean": torch.from_numpy(ligand_mean),
-            "ligand_std": torch.from_numpy(ligand_std),
-        },
-        cache_dir / "normalization_stats.pt",
-    )
-
-    unique_elements = sorted({e for elems in all_ligand_elements for e in elems})
     torch.save(unique_elements, cache_dir / "ligand_elements.pt")
 
-    logger.info(
-        "Cached %d protein residue descriptors, %d ligand molecules (%d atoms)",
-        len(protein_all),
-        len(ligand_molecules),
-        len(ligand_all),
-    )
+    logger.info("Cached %d complexes", len(complexes))
 
 
 class MoleculeDataset(Dataset[Tensor]):
@@ -209,8 +327,41 @@ def collate_molecules(batch: list[Tensor]) -> tuple[Tensor, Tensor]:
     return padded, mask
 
 
+def _split_and_normalize(  # noqa: PLR0913
+    complexes: list[dict[str, np.ndarray | list[str]]],
+    indices: list[int],
+    protein_mean: np.ndarray,
+    protein_std: np.ndarray,
+    ligand_mean: np.ndarray,
+    ligand_std: np.ndarray,
+) -> tuple[Tensor, list[Tensor]]:
+    """Extract, normalize, and concatenate descriptors for a split.
+
+    Returns ``(protein_tensor, ligand_molecule_list)``.
+    """
+    protein_parts = [complexes[i]["protein"] for i in indices]
+    ligand_parts = [complexes[i]["ligand"] for i in indices]
+
+    protein_cat = np.concatenate(protein_parts, axis=0)  # type: ignore[arg-type]
+    protein_norm = (protein_cat - protein_mean) / protein_std
+    protein_tensor = torch.from_numpy(protein_norm).float()
+
+    ligand_molecules = [
+        torch.from_numpy(
+            (lig - ligand_mean) / ligand_std  # type: ignore[operator]
+        ).float()
+        for lig in ligand_parts
+    ]
+
+    return protein_tensor, ligand_molecules
+
+
 class ComplexDescriptorDataModule(L.LightningDataModule):
-    """DataModule that computes and caches descriptors for VQ-VAE training."""
+    """DataModule that computes and caches descriptors for VQ-VAE training.
+
+    Data is split at the **complex** level to prevent data leakage between
+    train, validation, and test sets.
+    """
 
     def __init__(
         self,
@@ -223,107 +374,110 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         self.data_dir = Path(data_config.data_dir)
         self.cache_dir = self.data_dir / "descriptor_cache"
 
-        self.protein_desc = PocketDescriptor()
-        self.ligand_desc = LigandDescriptor()
-
         self.protein_train: torch.Tensor | None = None
         self.protein_val: torch.Tensor | None = None
+        self.protein_test: torch.Tensor | None = None
         self.ligand_train: list[Tensor] | None = None
         self.ligand_val: list[Tensor] | None = None
+        self.ligand_test: list[Tensor] | None = None
+        self.norm_stats: dict[str, Tensor] | None = None
 
     def prepare_data(self) -> None:
         """Compute descriptors from CrossDocked2020 and cache to disk."""
-        if (self.cache_dir / "ligand_molecules.pt").exists():
+        if (self.cache_dir / "complexes.pt").exists():
             logger.info("Descriptor cache already exists at %s", self.cache_dir)
             return
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         types_dir = self.data_dir / "types"
-        types_files = sorted(types_dir.glob("*train0.types"))
-        if not types_files:
-            msg = f"No .types files found in {types_dir}"
-            raise FileNotFoundError(msg)
-
-        pairs = _parse_types_file(types_files[0])
-        if self.data_config.max_pairs is not None:
-            pairs = pairs[: self.data_config.max_pairs]
+        pairs = _parse_all_types_files(types_dir, max_pairs=self.data_config.max_pairs)
         logger.info("Processing %d complex pairs", len(pairs))
 
         crossdocked_dir = self.data_dir / "CrossDocked2020"
-        all_protein: list[np.ndarray] = []
-        all_ligand: list[np.ndarray] = []
-        all_elements: list[list[str]] = []
-        num_processed = 0
-        num_skipped = 0
+        complexes = _process_pairs(
+            pairs,
+            crossdocked_dir,
+            self.training_config.pocket,
+            num_workers=self.training_config.num_workers,
+        )
 
-        for rec_path, lig_path in pairs:
-            rec_full = crossdocked_dir / rec_path
-            lig_full = crossdocked_dir / lig_path
-
-            if not rec_full.exists() or not lig_full.exists():
-                num_skipped += 1
-                continue
-
-            try:
-                result = _process_complex(
-                    rec_full,
-                    lig_full,
-                    self.protein_desc,
-                    self.ligand_desc,
-                    self.training_config.pocket,
-                )
-            except Exception:
-                logger.exception("Error processing %s / %s", rec_path, lig_path)
-                num_skipped += 1
-                continue
-
-            if result is None:
-                num_skipped += 1
-                continue
-
-            prot, lig, elems = result
-            all_protein.append(prot)
-            all_ligand.append(lig)
-            all_elements.append(elems)
-            num_processed += 1
-
-            if num_processed % 1000 == 0:
-                logger.info("Processed %d (%d skipped)", num_processed, num_skipped)
-
-        logger.info("Done: %d processed, %d skipped", num_processed, num_skipped)
-
-        if not all_protein or not all_ligand:
-            msg = "No descriptors computed — check data paths"
+        if not complexes:
+            msg = "No descriptors computed -- check data paths"
             raise RuntimeError(msg)
 
-        _save_descriptors(self.cache_dir, all_protein, all_ligand, all_elements)
+        _save_complexes(self.cache_dir, complexes)
 
     def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
-        """Load cached descriptors and split into train/val."""
-        protein_all = torch.load(
-            self.cache_dir / "protein_descriptors.pt",
-            weights_only=True,
+        """Load cached descriptors and split into train/val/test at complex level."""
+        complexes: list[dict[str, np.ndarray | list[str]]] = torch.load(
+            self.cache_dir / "complexes.pt",
+            weights_only=False,
         )
 
-        val_frac = self.data_config.val_size
+        # --- Complex-level split ---
+        n = len(complexes)
         rng = torch.Generator().manual_seed(self.data_config.random_state)
+        perm = torch.randperm(n, generator=rng).tolist()
 
-        n_prot = len(protein_all)
-        prot_perm = torch.randperm(n_prot, generator=rng)
-        n_prot_val = int(n_prot * val_frac)
-        self.protein_val = protein_all[prot_perm[:n_prot_val]]
-        self.protein_train = protein_all[prot_perm[n_prot_val:]]
+        n_test = int(n * self.data_config.test_size)
+        n_val = int(n * self.data_config.val_size)
+        test_indices = perm[:n_test]
+        val_indices = perm[n_test : n_test + n_val]
+        train_indices = perm[n_test + n_val :]
 
-        ligand_molecules: list[Tensor] = torch.load(
-            self.cache_dir / "ligand_molecules.pt",
-            weights_only=True,
+        logger.info(
+            "Complex-level split: %d train, %d val, %d test (total %d)",
+            len(train_indices),
+            len(val_indices),
+            len(test_indices),
+            n,
         )
-        n_lig = len(ligand_molecules)
-        lig_perm = torch.randperm(n_lig, generator=rng).tolist()
-        n_lig_val = int(n_lig * val_frac)
-        self.ligand_val = [ligand_molecules[i] for i in lig_perm[:n_lig_val]]
-        self.ligand_train = [ligand_molecules[i] for i in lig_perm[n_lig_val:]]
+
+        # --- Compute normalization from train split only ---
+        train_protein = np.concatenate(
+            [complexes[i]["protein"] for i in train_indices],
+            axis=0,  # type: ignore[arg-type]
+        )
+        train_ligand = np.concatenate(
+            [complexes[i]["ligand"] for i in train_indices],
+            axis=0,  # type: ignore[arg-type]
+        )
+        protein_mean = train_protein.mean(axis=0)
+        protein_std = train_protein.std(axis=0) + 1e-8
+        ligand_mean = train_ligand.mean(axis=0)
+        ligand_std = train_ligand.std(axis=0) + 1e-8
+
+        self.norm_stats = {
+            "protein_mean": torch.from_numpy(protein_mean),
+            "protein_std": torch.from_numpy(protein_std),
+            "ligand_mean": torch.from_numpy(ligand_mean),
+            "ligand_std": torch.from_numpy(ligand_std),
+        }
+
+        # --- Normalize and build per-split tensors ---
+        self.protein_train, self.ligand_train = _split_and_normalize(
+            complexes, train_indices, protein_mean, protein_std, ligand_mean, ligand_std
+        )
+        self.protein_val, self.ligand_val = _split_and_normalize(
+            complexes, val_indices, protein_mean, protein_std, ligand_mean, ligand_std
+        )
+        self.protein_test, self.ligand_test = _split_and_normalize(
+            complexes, test_indices, protein_mean, protein_std, ligand_mean, ligand_std
+        )
+
+        logger.info(
+            "Protein residues: %d train, %d val, %d test",
+            len(self.protein_train),
+            len(self.protein_val),
+            len(self.protein_test),
+        )
+        logger.info(
+            "Ligand molecules: %d train, %d val, %d test",
+            len(self.ligand_train),
+            len(self.ligand_val),
+            len(self.ligand_test),
+        )
 
     def _build_protein_loader(
         self,
@@ -390,6 +544,25 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
                 ),
                 "ligand": self._build_ligand_loader(
                     self.ligand_val,
+                    shuffle=False,
+                ),
+            },
+            mode="max_size_cycle",
+        )
+
+    def test_dataloader(self) -> CombinedLoader:
+        """Return test dataloaders for protein and ligand."""
+        if self.protein_test is None or self.ligand_test is None:
+            msg = "setup() must be called before test_dataloader()"
+            raise RuntimeError(msg)
+        return CombinedLoader(
+            {
+                "protein": self._build_protein_loader(
+                    self.protein_test,
+                    shuffle=False,
+                ),
+                "ligand": self._build_ligand_loader(
+                    self.ligand_test,
                     shuffle=False,
                 ),
             },
