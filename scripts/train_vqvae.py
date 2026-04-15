@@ -7,7 +7,7 @@ import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
-from src.config import CrossDockedConfig, VQVAETrainingConfig
+from src.config import CrossDockedConfig, HubDatasetConfig, VQVAETrainingConfig
 from src.data.descriptors import ComplexDescriptorDataModule
 from src.model.vqvae_module import VQVAEModule
 
@@ -20,6 +20,19 @@ def main() -> None:
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument(
+        "--from-hub",
+        action="store_true",
+        help="Load data from HuggingFace Hub",
+    )
+    parser.add_argument("--hub-repo-id", type=str, default=None, help="HF Hub repo ID")
+    parser.add_argument(
+        "--source-types",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Types categories to use (e.g. cdonly it0)",
+    )
     args = parser.parse_args()
 
     config = VQVAETrainingConfig()
@@ -34,7 +47,20 @@ def main() -> None:
     if args.num_workers is not None:
         config.num_workers = args.num_workers
 
-    dm = ComplexDescriptorDataModule(config, data_config)
+    hub_config = None
+    if args.from_hub:
+        hub_config = HubDatasetConfig()
+        if args.hub_repo_id is not None:
+            hub_config.repo_id = args.hub_repo_id
+        if args.source_types is not None:
+            hub_config.source_types = args.source_types
+
+        from src.data import HubCrossDockedDataModule  # noqa: PLC0415
+
+        hub_dm = HubCrossDockedDataModule(hub_config)
+        hub_dm.prepare_data()
+
+    dm = ComplexDescriptorDataModule(config, data_config, hub_config=hub_config)
     module = VQVAEModule(config)
 
     trainer = L.Trainer(

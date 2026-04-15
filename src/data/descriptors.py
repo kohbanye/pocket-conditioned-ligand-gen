@@ -27,6 +27,7 @@ from src.tokenizers.protein import PocketDescriptor, extract_pocket
 if TYPE_CHECKING:
     from src.config import (
         CrossDockedConfig,
+        HubDatasetConfig,
         PocketExtractionConfig,
         VQVAETrainingConfig,
     )
@@ -114,6 +115,49 @@ def _parse_all_types_files(
     return pairs
 
 
+def _load_pairs_from_manifest(
+    hub_config: HubDatasetConfig,
+    max_pairs: int | None = None,
+) -> tuple[list[tuple[str, str]], Path]:
+    """Load pairs from a HuggingFace Hub manifest.
+
+    Returns ``(pairs, base_dir)`` where *pairs* are
+    ``(receptor_rel_path, ligand_rel_path)`` and *base_dir* is the
+    root directory that both paths are relative to.
+
+    The receptor path is relative to ``hub_cache/receptors/`` and the
+    ligand path is relative to ``hub_cache/ligands/``.  To unify them
+    under a single base directory we return the cache root and use
+    prefixed paths.
+    """
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    cache_dir = Path(hub_config.cache_dir)
+    manifest_path = cache_dir / "repo" / "manifest.parquet"
+    if not manifest_path.exists():
+        msg = f"Manifest not found: {manifest_path}"
+        raise FileNotFoundError(msg)
+
+    table = pq.read_table(manifest_path)
+    df = table.to_pandas()
+
+    # Filter by source_type
+    if hub_config.source_types:
+        df = df[df["source_type"].isin(hub_config.source_types)]
+
+    if max_pairs is not None:
+        df = df.head(max_pairs)
+
+    pairs: list[tuple[str, str]] = []
+    for _, row in df.iterrows():
+        rec_rel = f"{row['complex_dir']}/{row['receptor_pdb']}"
+        lig_rel = f"{row['pair_idx']:07d}.sdf.gz"
+        pairs.append((rec_rel, lig_rel))
+
+    logger.info("Loaded %d pairs from manifest", len(pairs))
+    return pairs, cache_dir
+
+
 def _get_ligand_coords_from_sdf(sdf_path: Path) -> np.ndarray | None:
     """Extract heavy-atom coordinates from an SDF file for pocket extraction."""
     molecules = parse_sdf(sdf_path)
@@ -175,10 +219,18 @@ def _worker_init(pocket_config_dict: dict) -> None:
 def _worker_process_one(
     args: tuple[str, str, str],
 ) -> dict[str, np.ndarray | list[str]] | None:
-    """Process a single complex in a worker process."""
-    rec_str, lig_str, crossdocked_str = args
-    rec_full = Path(crossdocked_str) / rec_str
-    lig_full = Path(crossdocked_str) / lig_str
+    """Process a single complex in a worker process.
+
+    *args* is ``(rec_path, lig_path, base_dir)``.  When *base_dir* is
+    empty, the paths are treated as absolute.
+    """
+    rec_str, lig_str, base_str = args
+    if base_str:
+        rec_full = Path(base_str) / rec_str
+        lig_full = Path(base_str) / lig_str
+    else:
+        rec_full = Path(rec_str)
+        lig_full = Path(lig_str)
 
     if not rec_full.exists() or not lig_full.exists():
         return None
@@ -242,6 +294,38 @@ def _process_pairs(
             return _collect_results(results, len(work_items))
 
     # Single-process fallback
+    _worker_init(pocket_config_dict)
+    results_iter = (_worker_process_one(item) for item in work_items)
+    return _collect_results(results_iter, len(work_items))
+
+
+def _process_pairs_from_abs(
+    abs_pairs: list[tuple[str, str]],
+    pocket_config: PocketExtractionConfig,
+    num_workers: int = 0,
+) -> list[dict[str, np.ndarray | list[str]]]:
+    """Like ``_process_pairs`` but accepts absolute paths directly."""
+    from dataclasses import asdict  # noqa: PLC0415
+
+    work_items = [(rec, lig, "") for rec, lig in abs_pairs]
+    pocket_config_dict = asdict(pocket_config)
+
+    if num_workers > 0:
+        import multiprocessing  # noqa: PLC0415
+
+        logger.info("Processing with %d workers", num_workers)
+        with multiprocessing.Pool(
+            num_workers,
+            initializer=_worker_init,
+            initargs=(pocket_config_dict,),
+        ) as pool:
+            results = pool.imap_unordered(
+                _worker_process_one,
+                work_items,
+                chunksize=64,
+            )
+            return _collect_results(results, len(work_items))
+
     _worker_init(pocket_config_dict)
     results_iter = (_worker_process_one(item) for item in work_items)
     return _collect_results(results_iter, len(work_items))
@@ -367,10 +451,12 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         self,
         training_config: VQVAETrainingConfig,
         data_config: CrossDockedConfig,
+        hub_config: HubDatasetConfig | None = None,
     ) -> None:
         super().__init__()
         self.training_config = training_config
         self.data_config = data_config
+        self.hub_config = hub_config
         self.data_dir = Path(data_config.data_dir)
         self.cache_dir = self.data_dir / "descriptor_cache"
 
@@ -390,14 +476,37 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        types_dir = self.data_dir / "types"
-        pairs = _parse_all_types_files(types_dir, max_pairs=self.data_config.max_pairs)
-        logger.info("Processing %d complex pairs", len(pairs))
+        if self.hub_config is not None:
+            pairs, cache_dir = _load_pairs_from_manifest(
+                self.hub_config,
+                max_pairs=self.data_config.max_pairs,
+            )
+            receptor_dir = cache_dir / "receptors"
+            ligand_dir = cache_dir / "ligands"
+            # Build absolute paths for _process_pairs: receptor from
+            # receptors/, ligand from ligands/
+            abs_pairs = [
+                (str(receptor_dir / rec), str(ligand_dir / lig)) for rec, lig in pairs
+            ]
+        else:
+            types_dir = self.data_dir / "types"
+            pairs = _parse_all_types_files(
+                types_dir,
+                max_pairs=self.data_config.max_pairs,
+            )
+            crossdocked_dir = self.data_dir / "CrossDocked2020"
+            abs_pairs = [
+                (str(crossdocked_dir / rec), str(crossdocked_dir / lig))
+                for rec, lig in pairs
+            ]
 
-        crossdocked_dir = self.data_dir / "CrossDocked2020"
-        complexes = _process_pairs(
-            pairs,
-            crossdocked_dir,
+        logger.info("Processing %d complex pairs", len(abs_pairs))
+
+        # _process_pairs expects (rec, lig) strings and a base dir.
+        # Since abs_pairs already has absolute paths, pass Path("/") as
+        # the base dir so joining is a no-op.
+        complexes = _process_pairs_from_abs(
+            abs_pairs,
             self.training_config.pocket,
             num_workers=self.training_config.num_workers,
         )

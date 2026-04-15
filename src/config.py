@@ -3,6 +3,17 @@ from pathlib import Path
 
 
 @dataclass
+class HubDatasetConfig:
+    """Config for loading CrossDocked2020 from HuggingFace Hub."""
+
+    repo_id: str = "sakano/crossdocked2020"
+    cache_dir: Path = Path("data/hub_cache")
+    fold: int = 0
+    source_types: list[str] = field(default_factory=lambda: ["cdonly"])
+    revision: str | None = None
+
+
+@dataclass
 class CrossDockedConfig:
     data_dir: Path = Path("data")
     base_url: str = "http://bits.csb.pitt.edu/files/crossdock2020"
