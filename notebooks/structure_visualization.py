@@ -49,7 +49,8 @@ def _():
     from src.model.vqvae_module import VQVAEModule
     from src.tokenizers.ligand import LigandDescriptor, parse_sdf
     from src.tokenizers.protein import (
-        PocketDescriptor,
+        BackboneZMatrixDescriptor,
+        _compute_canonical_frame,
         extract_full_sequence,
         extract_pocket,
     )
@@ -57,14 +58,16 @@ def _():
 
     # Alias for cross-cell access (marimo treats _-prefixed names as cell-local)
     parse_types_file = _parse_types_file
+    compute_canonical_frame = _compute_canonical_frame
 
     plt.rcParams["figure.dpi"] = 120
     return (
+        BackboneZMatrixDescriptor,
         LigandDescriptor,
-        PocketDescriptor,
         PocketExtractionConfig,
         TokenSequenceAssembler,
         VQVAEModule,
+        compute_canonical_frame,
         extract_full_sequence,
         extract_pocket,
         gzip,
@@ -143,13 +146,13 @@ def _(mo):
 @app.cell
 def _(parse_types_file, project_root):
     types_file = project_root / "data" / "types" / "cdonly_it2_tt_v1.3_0_test0.types"
-    pairs = parse_types_file(types_file)
+    entries = parse_types_file(types_file)
     crossdocked_dir = project_root / "data" / "CrossDocked2020"
 
-    # Try a few pairs until we find one that works
+    # Try a few entries until we find one that works
     SAMPLE_IDX = 0
-    for _try_idx in range(min(20, len(pairs))):
-        rec_rel, lig_rel = pairs[SAMPLE_IDX + _try_idx]
+    for _try_idx in range(min(20, len(entries))):
+        rec_rel, lig_rel, _pose_idx = entries[SAMPLE_IDX + _try_idx]
         rec_path = crossdocked_dir / rec_rel
         lig_path = crossdocked_dir / lig_rel
         if rec_path.exists() and lig_path.exists():
@@ -159,15 +162,16 @@ def _(parse_types_file, project_root):
     print(f"Sample #{SAMPLE_IDX}")
     print(f"  Receptor: {rec_rel}")
     print(f"  Ligand:   {lig_rel}")
-    return crossdocked_dir, lig_path, pairs, rec_path
+    return crossdocked_dir, entries, lig_path, rec_path
 
 
 @app.cell
 def _(
+    BackboneZMatrixDescriptor,
     LigandDescriptor,
-    PocketDescriptor,
     PocketExtractionConfig,
     TokenSequenceAssembler,
+    compute_canonical_frame,
     device,
     extract_full_sequence,
     extract_pocket,
@@ -189,12 +193,19 @@ def _(
     )
 
     pocket_result = extract_pocket(rec_path, lig_coords, pocket_config)
-    backbone_coords, pocket_seq = pocket_result
+    backbone_coords, pocket_seq, residue_ids = pocket_result
     full_seq = extract_full_sequence(rec_path)
 
+    # Compute canonical frame
+    ca_coords = backbone_coords[:, 1].astype(np.float64)
+    centroid, rotation = compute_canonical_frame(ca_coords)
+    pocket_frame = (centroid, rotation)
+
     # Compute protein descriptors → VQ-VAE tokens
-    protein_desc_calc = PocketDescriptor()
-    prot_desc_raw, prot_meta = protein_desc_calc.compute(backbone_coords)
+    protein_desc_calc = BackboneZMatrixDescriptor()
+    prot_desc_raw, prot_meta = protein_desc_calc.compute(
+        backbone_coords, residue_ids, pocket_frame=pocket_frame,
+    )
 
     prot_t = torch.from_numpy(prot_desc_raw).to(device)
     prot_t = (prot_t - norm_stats["protein_mean"].to(device)) / norm_stats[
@@ -714,12 +725,12 @@ def _(mo):
 
 
 @app.cell
-def _(PocketDescriptor, np, prot_desc_raw, prot_meta, prot_recon_desc):
+def _(BackboneZMatrixDescriptor, np, prot_desc_raw, prot_meta, prot_recon_desc):
     # --- Reconstruct protein backbone from VQ-VAE descriptors ---
-    prot_backbone_orig = PocketDescriptor.descriptor_to_backbone_coords(
+    prot_backbone_orig = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
         prot_desc_raw, prot_meta
     )
-    prot_backbone_recon = PocketDescriptor.descriptor_to_backbone_coords(
+    prot_backbone_recon = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
         prot_recon_desc, prot_meta
     )
     per_res_diff = prot_backbone_orig - prot_backbone_recon
@@ -855,16 +866,17 @@ def _(mo):
 
 @app.cell
 def _(
+    BackboneZMatrixDescriptor,
     LigandDescriptor,
-    PocketDescriptor,
+    compute_canonical_frame,
     crossdocked_dir,
     device,
+    entries,
     extract_pocket,
     ligand_desc_calc,
     ligand_vqvae,
     norm_stats,
     np,
-    pairs,
     parse_sdf,
     pocket_config,
     protein_desc_calc,
@@ -878,8 +890,8 @@ def _(
     lig_sizes = []
     failed = 0
 
-    for idx in range(min(N_SAMPLES, len(pairs))):
-        rec_r, lig_r = pairs[idx]
+    for idx in range(min(N_SAMPLES, len(entries))):
+        rec_r, lig_r, _pose_idx = entries[idx]
         rp = crossdocked_dir / rec_r
         lp = crossdocked_dir / lig_r
         if not (rp.exists() and lp.exists()):
@@ -893,10 +905,15 @@ def _(
                 dtype=np.float32,
             )
 
-            bc, _ps = extract_pocket(rp, lc, pocket_config)
+            bc, _ps, res_ids = extract_pocket(rp, lc, pocket_config)
+
+            # Canonical frame
+            ca = bc[:, 1].astype(np.float64)
+            ctr, rot = compute_canonical_frame(ca)
+            pf = (ctr, rot)
 
             # Protein
-            pd_raw, pm = protein_desc_calc.compute(bc)
+            pd_raw, pm = protein_desc_calc.compute(bc, res_ids, pocket_frame=pf)
             pt = torch.from_numpy(pd_raw).to(device)
             pt = (pt - norm_stats["protein_mean"].to(device)) / norm_stats[
                 "protein_std"
@@ -907,8 +924,8 @@ def _(
             pr_desc = (
                 pr * norm_stats["protein_std"] + norm_stats["protein_mean"]
             ).numpy()
-            bb_orig = PocketDescriptor.descriptor_to_backbone_coords(pd_raw, pm)
-            bb_recon = PocketDescriptor.descriptor_to_backbone_coords(pr_desc, pm)
+            bb_orig = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(pd_raw, pm)
+            bb_recon = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(pr_desc, pm)
             prot_rmsds.append(np.sqrt(np.mean((bb_orig - bb_recon) ** 2)))
 
             # Ligand

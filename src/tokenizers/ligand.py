@@ -4,27 +4,43 @@ Provides:
 - Canonical DFS ordering via RDKit
 - Z-matrix internal coordinates (4D per atom)
 - Inverse reconstruction via NeRF algorithm
-- VQ-VAE for structure tokenization
+- VQ-VAE for structure tokenization (via TransformerVQVAE)
 - SDF file parsing
 """
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torch import Tensor, nn
 
-from src.tokenizers.codebook import EMACodebook
-
-_EPS = 1e-8
-
-if TYPE_CHECKING:
-    from src.config import LigandVQVAEConfig
+from src.tokenizers.geometry import (
+    _EPS,
+)
+from src.tokenizers.geometry import (
+    bond_angle as _bond_angle,
+)
+from src.tokenizers.geometry import (
+    canonical_virtual_ref as _canonical_virtual_ref,
+)
+from src.tokenizers.geometry import (
+    cartesian_to_spherical as _cartesian_to_spherical,
+)
+from src.tokenizers.geometry import (
+    dihedral_angle as _dihedral_angle,
+)
+from src.tokenizers.geometry import (
+    place_atom as _place_atom,
+)
+from src.tokenizers.geometry import (
+    spherical_to_cartesian as _spherical_to_cartesian,
+)
+from src.tokenizers.geometry import (
+    virtual_dihedral_ref as _virtual_dihedral_ref,
+)
+from src.tokenizers.vqvae import TransformerVQVAE as LigandVQVAE  # noqa: TC001
 
 
 def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
@@ -310,171 +326,6 @@ def _find_dihedral_ref(  # noqa: PLR0913
 
 
 # ---------------------------------------------------------------------------
-# Geometry helpers
-# ---------------------------------------------------------------------------
-
-
-def _bond_angle(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
-    """Return the angle (radians) at *b* in the triangle a-b-c."""
-    v1 = a - b
-    v2 = c - b
-    denom = np.linalg.norm(v1) * np.linalg.norm(v2)
-    if denom < _EPS:
-        return 0.0
-    cos_angle = np.dot(v1, v2) / denom
-    return float(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
-
-
-def _dihedral_angle(
-    p0: np.ndarray,
-    p1: np.ndarray,
-    p2: np.ndarray,
-    p3: np.ndarray,
-) -> float:
-    """Dihedral angle (radians) defined by four points p0-p1-p2-p3."""
-    b1 = p1 - p0
-    b2 = p2 - p1
-    b3 = p3 - p2
-
-    n1 = np.cross(b1, b2)
-    n2 = np.cross(b2, b3)
-
-    n1_norm = np.linalg.norm(n1)
-    n2_norm = np.linalg.norm(n2)
-    if n1_norm < _EPS or n2_norm < _EPS:
-        return 0.0
-
-    n1 = n1 / n1_norm
-    n2 = n2 / n2_norm
-
-    b2_unit = b2 / (np.linalg.norm(b2) + _EPS)
-    m = np.cross(n1, b2_unit)
-
-    return float(np.arctan2(np.dot(m, n2), np.dot(n1, n2)))
-
-
-def _place_atom(  # noqa: PLR0913
-    ref_a: np.ndarray,
-    ref_b: np.ndarray,
-    ref_c: np.ndarray,
-    bond_length: float,
-    bond_angle: float,
-    torsion: float,
-) -> np.ndarray:
-    """Place atom D via NeRF so that ``dihedral(A, B, C, D) == torsion``.
-
-    *ref_a*, *ref_b*, *ref_c* correspond to dihedral_ref, angle_ref, parent.
-    """
-    v1 = ref_b - ref_c
-    v1_norm = np.linalg.norm(v1)
-    if v1_norm < _EPS:
-        return ref_c + np.array([bond_length, 0.0, 0.0])
-    v1_hat = v1 / v1_norm
-
-    v2 = ref_a - ref_b
-    n = np.cross(v1_hat, v2)
-    n_norm = np.linalg.norm(n)
-
-    if n_norm < _EPS:
-        perp = (
-            np.array([1.0, 0.0, 0.0])
-            if abs(v1_hat[0]) < 0.9  # noqa: PLR2004
-            else np.array([0.0, 1.0, 0.0])
-        )
-        n = np.cross(v1_hat, perp)
-        n = n / np.linalg.norm(n)
-    else:
-        n = n / n_norm
-
-    m = np.cross(n, v1_hat)
-
-    return ref_c + bond_length * (
-        np.cos(bond_angle) * v1_hat
-        + np.sin(bond_angle) * np.cos(torsion) * m
-        + np.sin(bond_angle) * np.sin(torsion) * n
-    )
-
-
-def _virtual_dihedral_ref(
-    angle_ref_pos: np.ndarray,
-    parent_pos: np.ndarray,
-) -> np.ndarray:
-    """Construct a deterministic virtual dihedral reference point.
-
-    Used when no real dihedral reference is available (DFS positions 0-2 and
-    disconnected-component starts).  The virtual point is placed so that
-    ``torsion = 0`` produces a deterministic, reproducible placement.
-    """
-    v = angle_ref_pos - parent_pos
-    v_hat = v / (np.linalg.norm(v) + _EPS)
-    up = (
-        np.array([0.0, 1.0, 0.0])
-        if abs(v_hat[1]) < 0.9  # noqa: PLR2004
-        else np.array([0.0, 0.0, 1.0])
-    )
-    perp = up - np.dot(up, v_hat) * v_hat
-    perp = perp / (np.linalg.norm(perp) + _EPS)
-    return angle_ref_pos + perp
-
-
-def _canonical_virtual_ref(
-    angle_ref_pos: np.ndarray,
-    parent_pos: np.ndarray,
-) -> np.ndarray:
-    """Virtual dihedral ref aligned with the canonical frame z-axis.
-
-    Used in pocket-anchored mode so that the torsion encodes
-    orientation relative to the pocket's canonical frame.
-    Falls back to x-axis if the bond is nearly parallel to z.
-    """
-    bond = parent_pos - angle_ref_pos
-    bond_norm = np.linalg.norm(bond)
-    if bond_norm < _EPS:
-        return angle_ref_pos + np.array([0.0, 0.0, 1.0])
-    bond_hat = bond / bond_norm
-    axis = (
-        np.array([1.0, 0.0, 0.0])
-        if abs(bond_hat[2]) > 0.9  # noqa: PLR2004
-        else np.array([0.0, 0.0, 1.0])
-    )
-    return angle_ref_pos + axis
-
-
-# ---------------------------------------------------------------------------
-# Spherical coordinate helpers (for pocket-anchored mode)
-# ---------------------------------------------------------------------------
-
-
-def _cartesian_to_spherical(
-    pos: np.ndarray,
-) -> tuple[float, float, float, float]:
-    """Convert 3D Cartesian to ``(r, θ_polar, sin φ, cos φ)``."""
-    r = float(np.linalg.norm(pos))
-    if r < _EPS:
-        return 0.0, 0.0, 0.0, 1.0
-    theta = float(np.arccos(np.clip(pos[2] / r, -1.0, 1.0)))
-    phi = float(np.arctan2(pos[1], pos[0]))
-    return r, theta, float(np.sin(phi)), float(np.cos(phi))
-
-
-def _spherical_to_cartesian(
-    r: float,
-    theta: float,
-    sin_phi: float,
-    cos_phi: float,
-) -> np.ndarray:
-    """Convert ``(r, θ_polar, sin φ, cos φ)`` to 3D Cartesian."""
-    phi = np.arctan2(sin_phi, cos_phi)
-    return np.array(
-        [
-            r * np.sin(theta) * np.cos(phi),
-            r * np.sin(theta) * np.sin(phi),
-            r * np.cos(theta),
-        ]
-    )
-
-
-# ---------------------------------------------------------------------------
 # Ring-closure identification
 # ---------------------------------------------------------------------------
 
@@ -755,182 +606,6 @@ class LigandDescriptor:
 
         return coords
 
-
-# ---------------------------------------------------------------------------
-# VQ-VAE
-# ---------------------------------------------------------------------------
-
-
-def _sinusoidal_positional_encoding(max_len: int, d_model: int) -> Tensor:
-    """Create sinusoidal positional encoding table."""
-    pe = torch.zeros(max_len, d_model)
-    position = torch.arange(max_len, dtype=torch.float).unsqueeze(1)
-    div_term = torch.exp(
-        torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
-    )
-    pe[:, 0::2] = torch.sin(position * div_term)
-    pe[:, 1::2] = torch.cos(position * div_term)
-    return pe
-
-
-class LigandVQVAE(nn.Module):
-    """Transformer-based VQ-VAE for ligand atom structure tokenization.
-
-    Processes the full molecule as a sequence, giving each atom access
-    to the molecular context via self-attention before quantization.
-    Quantization is still per-atom (each atom maps to one codebook entry).
-    """
-
-    def __init__(self, config: LigandVQVAEConfig) -> None:
-        super().__init__()
-        self.config = config
-        h = config.hidden_dim
-        d = config.descriptor_dim
-        z = config.latent_dim
-
-        # Encoder
-        self.input_proj = nn.Sequential(
-            nn.Linear(d, h),
-            nn.GELU(),
-            nn.Linear(h, h),
-        )
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=h,
-            nhead=config.num_attention_heads,
-            dim_feedforward=config.transformer_feedforward_dim,
-            dropout=config.transformer_dropout,
-            activation=F.gelu,
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=config.num_transformer_layers,
-        )
-        self.latent_proj = nn.Linear(h, z)
-
-        # Decoder
-        self.latent_unproj = nn.Linear(z, h)
-        decoder_layer = nn.TransformerEncoderLayer(
-            d_model=h,
-            nhead=config.num_attention_heads,
-            dim_feedforward=config.transformer_feedforward_dim,
-            dropout=config.transformer_dropout,
-            activation=F.gelu,
-            batch_first=True,
-            norm_first=True,
-        )
-        self.transformer_decoder = nn.TransformerEncoder(
-            decoder_layer,
-            num_layers=config.num_transformer_layers + 2,
-        )
-        self.output_proj = nn.Sequential(
-            nn.Linear(h, h),
-            nn.GELU(),
-            nn.Linear(h, d),
-        )
-
-        # Positional encoding (buffer, not a parameter)
-        self.register_buffer(
-            "pos_encoding",
-            _sinusoidal_positional_encoding(config.max_seq_len, h),
-        )
-
-        # Codebook
-        self.codebook = EMACodebook(
-            num_codes=config.codebook_size,
-            code_dim=config.latent_dim,
-            ema_decay=config.ema_decay,
-            commitment_cost=config.commitment_cost,
-        )
-
-    def forward(
-        self,
-        x: Tensor,
-        mask: Tensor | None = None,
-    ) -> dict[str, Tensor]:
-        """Forward pass with sequence context.
-
-        Args:
-            x: Descriptors of shape ``(B, L, descriptor_dim)``.
-            mask: Boolean mask ``(B, L)``, ``True`` for real atoms.
-
-        Returns:
-            Dict with keys: reconstructed, indices, commitment_loss,
-            reconstruction_loss.
-        """
-        b, seq_len, _ = x.shape
-
-        if mask is None:
-            mask = torch.ones(b, seq_len, dtype=torch.bool, device=x.device)
-
-        # Encode
-        h = self.input_proj(x) + self.pos_encoding[:seq_len]
-        h = self.transformer_encoder(h, src_key_padding_mask=~mask)
-        z = self.latent_proj(h)  # (B, L, latent_dim)
-
-        # Quantize per-atom (only real atoms)
-        z_real = z[mask]  # (N_real, latent_dim)
-        quantized_real, indices_real, commitment_loss = self.codebook(z_real)
-
-        # Scatter quantized vectors back to (B, L, latent_dim)
-        quantized = torch.zeros_like(z)
-        quantized[mask] = quantized_real
-
-        indices = torch.full(
-            (b, seq_len),
-            -1,
-            dtype=torch.long,
-            device=x.device,
-        )
-        indices[mask] = indices_real
-
-        # Decode
-        dec_in = self.latent_unproj(quantized) + self.pos_encoding[:seq_len]
-        dec_out = self.transformer_decoder(dec_in, src_key_padding_mask=~mask)
-        x_hat = self.output_proj(dec_out)  # (B, L, descriptor_dim)
-
-        # Masked reconstruction loss
-        diff = (x - x_hat)[mask]  # (N_real, descriptor_dim)
-        reconstruction_loss = diff.pow(2).mean()
-
-        return {
-            "reconstructed": x_hat,
-            "indices": indices,
-            "commitment_loss": commitment_loss,
-            "reconstruction_loss": reconstruction_loss,
-        }
-
-    def encode(self, x: Tensor) -> Tensor:
-        """Encode descriptors to codebook indices.
-
-        Args:
-            x: ``(N, descriptor_dim)`` for a single molecule.
-
-        Returns:
-            Codebook indices of shape ``(N,)``.
-        """
-        x_seq = x.unsqueeze(0)  # (1, N, D)
-        h = self.input_proj(x_seq) + self.pos_encoding[: x.shape[0]]
-        h = self.transformer_encoder(h)
-        z = self.latent_proj(h).squeeze(0)  # (N, latent_dim)
-        _, indices, _ = self.codebook(z)
-        return indices
-
-    def decode(self, indices: Tensor) -> Tensor:
-        """Decode codebook indices back to descriptors.
-
-        Args:
-            indices: ``(N,)`` codebook indices for a single molecule.
-
-        Returns:
-            Reconstructed descriptors of shape ``(N, descriptor_dim)``.
-        """
-        quantized = self.codebook.lookup(indices)  # (N, latent_dim)
-        q_seq = quantized.unsqueeze(0)  # (1, N, latent_dim)
-        dec_in = self.latent_unproj(q_seq) + self.pos_encoding[: indices.shape[0]]
-        dec_out = self.transformer_decoder(dec_in)
-        return self.output_proj(dec_out).squeeze(0)  # (N, descriptor_dim)
 
 
 class LigandTokenizer:

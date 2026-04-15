@@ -176,7 +176,8 @@ class TestProteinVQVAE:
     """Tests for the deepened ProteinStructureVQVAE."""
 
     def _make_config(self, **kwargs: object) -> ProteinVQVAEConfig:
-        defaults = {
+        defaults: dict[str, object] = {
+            "descriptor_dim": 9,
             "hidden_dim": 64,
             "latent_dim": 16,
             "codebook_size": 64,
@@ -215,9 +216,14 @@ class TestVQVAEModuleBatchFormat:
     def test_forward_both_models(self) -> None:
         config = VQVAETrainingConfig(
             protein=ProteinVQVAEConfig(
+                descriptor_dim=12,
                 hidden_dim=32,
                 latent_dim=8,
                 codebook_size=16,
+                num_transformer_layers=1,
+                num_attention_heads=4,
+                transformer_feedforward_dim=64,
+                max_seq_len=32,
             ),
             ligand=LigandVQVAEConfig(
                 hidden_dim=32,
@@ -232,10 +238,13 @@ class TestVQVAEModuleBatchFormat:
         module = VQVAEModule(config)
         module.train()
 
-        # Protein forward (flat batch)
-        prot_x = torch.randn(16, 9)
-        prot_out = module.protein_vqvae(prot_x)
-        assert prot_out["reconstructed"].shape == (16, 9)
+        # Protein forward (sequence batch with mask)
+        prot_x = torch.randn(4, 8, 12)
+        prot_mask = torch.ones(4, 8, dtype=torch.bool)
+        prot_mask[0, 6:] = False
+        prot_out = module.protein_vqvae(prot_x, mask=prot_mask)
+        assert prot_out["reconstructed"].shape == (4, 8, 12)
+        assert (prot_out["indices"][0, 6:] == -1).all()
 
         # Ligand forward (sequence batch with mask)
         lig_x = torch.randn(4, 10, 4)

@@ -11,8 +11,10 @@ from scipy.spatial.transform import Rotation
 
 from src.tokenizers.ligand import LigandDescriptor
 from src.tokenizers.protein import (
+    BackboneZMatrixDescriptor,
     PocketDescriptor,
     _compute_canonical_frame,
+    _detect_segments,
 )
 
 
@@ -498,3 +500,270 @@ class TestAnchoredLigandDescriptor:
         assert metadata["anchored"] is False
         # Root should be padding
         np.testing.assert_allclose(result[0], [0, 0, 0, 1], atol=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# Segment detection tests
+# ---------------------------------------------------------------------------
+
+
+class TestDetectSegments:
+    def test_single_segment(self) -> None:
+        """All contiguous residues should form one segment."""
+        ids = [("A", 10), ("A", 11), ("A", 12), ("A", 13)]
+        assert _detect_segments(ids) == [(0, 4)]
+
+    def test_multiple_segments(self) -> None:
+        """Gaps in residue indices should split into segments."""
+        ids = [("A", 10), ("A", 11), ("A", 20), ("A", 21), ("A", 22)]
+        assert _detect_segments(ids) == [(0, 2), (2, 5)]
+
+    def test_different_chains(self) -> None:
+        """Different chains should be separate segments."""
+        ids = [("A", 10), ("A", 11), ("B", 10), ("B", 11)]
+        assert _detect_segments(ids) == [(0, 2), (2, 4)]
+
+    def test_single_residue_segments(self) -> None:
+        """Isolated residues should each be their own segment."""
+        ids = [("A", 10), ("A", 20), ("A", 30)]
+        assert _detect_segments(ids) == [(0, 1), (1, 2), (2, 3)]
+
+    def test_empty(self) -> None:
+        assert _detect_segments([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Backbone Z-matrix descriptor tests
+# ---------------------------------------------------------------------------
+
+
+def _make_realistic_backbone(num_residues: int = 10) -> np.ndarray:
+    """Generate a realistic protein backbone using ideal geometry.
+
+    Uses standard backbone bond lengths and angles with varying
+    phi/psi torsion angles to create a plausible chain.
+    """
+    # Ideal backbone geometry
+    d_n_ca = 1.458  # N-CA bond
+    d_ca_c = 1.525  # CA-C bond
+    d_c_n = 1.329   # C-N peptide bond
+    angle_ca_c_n = np.radians(116.2)
+    angle_c_n_ca = np.radians(121.7)
+    angle_n_ca_c = np.radians(111.2)
+
+    coords = np.zeros((num_residues, 3, 3), dtype=np.float64)
+
+    # Place first residue at origin
+    coords[0, 0] = [0.0, 0.0, 0.0]  # N
+    coords[0, 1] = [d_n_ca, 0.0, 0.0]  # CA
+    # C: placed at bond angle from N-CA
+    coords[0, 2] = coords[0, 1] + d_ca_c * np.array([
+        -np.cos(np.pi - angle_n_ca_c),
+        np.sin(np.pi - angle_n_ca_c),
+        0.0,
+    ])
+
+    rng = np.random.default_rng(42)
+    for i in range(1, num_residues):
+        prev_n = coords[i - 1, 0]
+        prev_ca = coords[i - 1, 1]
+        prev_c = coords[i - 1, 2]
+
+        # Phi, psi, omega torsion angles (random but realistic)
+        psi_prev = rng.uniform(-np.pi, np.pi)
+        omega = np.pi + rng.normal(0, 0.05)  # ~180 deg (trans)
+        phi = rng.uniform(-np.pi, np.pi)
+
+        # Place N(i) using NeRF: dihedral N(i-1)-CA(i-1)-C(i-1)-N(i)
+        from src.tokenizers.geometry import place_atom  # noqa: PLC0415
+        n_pos = place_atom(
+            prev_n, prev_ca, prev_c, d_c_n, angle_ca_c_n, psi_prev,
+        )
+        coords[i, 0] = n_pos
+
+        # Place CA(i): dihedral CA(i-1)-C(i-1)-N(i)-CA(i)
+        ca_pos = place_atom(
+            prev_ca, prev_c, n_pos, d_n_ca, angle_c_n_ca, omega,
+        )
+        coords[i, 1] = ca_pos
+
+        # Place C(i): dihedral C(i-1)-N(i)-CA(i)-C(i)
+        c_pos = place_atom(
+            prev_c, n_pos, ca_pos, d_ca_c, angle_n_ca_c, phi,
+        )
+        coords[i, 2] = c_pos
+
+    return coords
+
+
+class TestBackboneZMatrixDescriptor:
+    def test_round_trip_single_segment(self) -> None:
+        """descriptor → backbone coords should round-trip for contiguous residues."""
+        backbone = _make_realistic_backbone(10)
+        residue_ids = [("A", i) for i in range(10)]
+        desc = BackboneZMatrixDescriptor()
+
+        descriptors, metadata = desc.compute(backbone, residue_ids)
+        reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
+            descriptors, metadata,
+        )
+
+        np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
+
+    def test_round_trip_multiple_segments(self) -> None:
+        """Round-trip with non-contiguous residues (multiple segments)."""
+        backbone = _make_realistic_backbone(10)
+        # Simulate non-contiguous: residues 0-3 and 7-9 (gap at 4-6)
+        residue_ids = [
+            ("A", 10), ("A", 11), ("A", 12), ("A", 13),
+            ("A", 20), ("A", 21), ("A", 22),
+            ("B", 5), ("B", 6), ("B", 7),
+        ]
+        desc = BackboneZMatrixDescriptor()
+
+        descriptors, metadata = desc.compute(backbone, residue_ids)
+        reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
+            descriptors, metadata,
+        )
+
+        np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
+
+    def test_se3_invariance_rotation(self) -> None:
+        """Descriptors should be identical under rotation."""
+        backbone = _make_realistic_backbone(8)
+        residue_ids = [("A", i) for i in range(8)]
+        desc = BackboneZMatrixDescriptor()
+
+        original, _ = desc.compute(backbone, residue_ids)
+
+        rot = _random_rotation()
+        rotated = np.zeros_like(backbone)
+        for i in range(len(backbone)):
+            for j in range(3):
+                rotated[i, j] = rot @ backbone[i, j]
+
+        rotated_desc, _ = desc.compute(rotated, residue_ids)
+
+        np.testing.assert_allclose(original, rotated_desc, atol=1e-4)
+
+    def test_se3_invariance_translation(self) -> None:
+        """Descriptors should be identical under translation."""
+        backbone = _make_realistic_backbone(8)
+        residue_ids = [("A", i) for i in range(8)]
+        desc = BackboneZMatrixDescriptor()
+
+        original, _ = desc.compute(backbone, residue_ids)
+
+        translation = np.array([10.0, -5.0, 3.0])
+        translated = backbone + translation
+
+        translated_desc, _ = desc.compute(translated, residue_ids)
+
+        np.testing.assert_allclose(original, translated_desc, atol=1e-4)
+
+    def test_se3_invariance_full(self) -> None:
+        """Descriptors should be identical under rotation + translation."""
+        backbone = _make_realistic_backbone(8)
+        residue_ids = [("A", i) for i in range(8)]
+        desc = BackboneZMatrixDescriptor()
+
+        original, _ = desc.compute(backbone, residue_ids)
+
+        rot = _random_rotation()
+        trans = np.array([100.0, -50.0, 25.0])
+        transformed = np.zeros_like(backbone)
+        for i in range(len(backbone)):
+            for j in range(3):
+                transformed[i, j] = rot @ backbone[i, j] + trans
+
+        transformed_desc, _ = desc.compute(transformed, residue_ids)
+
+        np.testing.assert_allclose(original, transformed_desc, atol=1e-4)
+
+    def test_output_shape(self) -> None:
+        """Check descriptor output dimensions."""
+        backbone = _make_realistic_backbone(5)
+        residue_ids = [("A", i) for i in range(5)]
+        desc = BackboneZMatrixDescriptor()
+        result, metadata = desc.compute(backbone, residue_ids)
+
+        assert result.shape == (5, 12)
+        assert "centroid" in metadata
+        assert "rotation" in metadata
+        assert "segments" in metadata
+
+    def test_single_residue(self) -> None:
+        """Handle single-residue pocket."""
+        backbone = _make_realistic_backbone(1)
+        residue_ids = [("A", 1)]
+        desc = BackboneZMatrixDescriptor()
+        result, metadata = desc.compute(backbone, residue_ids)
+
+        assert result.shape == (1, 12)
+
+        reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
+            result, metadata,
+        )
+        np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
+
+    def test_two_residues(self) -> None:
+        """Handle two-residue pocket."""
+        backbone = _make_realistic_backbone(2)
+        residue_ids = [("A", 1), ("A", 2)]
+        desc = BackboneZMatrixDescriptor()
+        result, metadata = desc.compute(backbone, residue_ids)
+
+        assert result.shape == (2, 12)
+
+        reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
+            result, metadata,
+        )
+        np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
+
+    def test_with_explicit_pocket_frame(self) -> None:
+        """compute() should accept an explicit pocket_frame."""
+        backbone = _make_realistic_backbone(5)
+        residue_ids = [("A", i) for i in range(5)]
+        ca = backbone[:, 1]
+        centroid, rotation = _compute_canonical_frame(ca)
+        pocket_frame = (centroid, rotation)
+
+        desc = BackboneZMatrixDescriptor()
+        result, metadata = desc.compute(
+            backbone, residue_ids, pocket_frame=pocket_frame,
+        )
+
+        reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
+            result, metadata,
+        )
+        np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
+
+    def test_descriptor_values_bounded(self) -> None:
+        """Bond lengths, angles, sin/cos should be in expected ranges."""
+        backbone = _make_realistic_backbone(10)
+        residue_ids = [("A", i) for i in range(10)]
+        desc = BackboneZMatrixDescriptor()
+        result, metadata = desc.compute(backbone, residue_ids)
+
+        # For continuation residues (skip first segment start)
+        segments = metadata["segments"]
+        for seg_start, seg_end in segments:
+            for idx in range(seg_start + 1, seg_end):
+                for atom_offset in range(3):
+                    base = atom_offset * 4
+                    bond_len = result[idx, base]
+                    bond_angle = result[idx, base + 1]
+                    sin_tor = result[idx, base + 2]
+                    cos_tor = result[idx, base + 3]
+
+                    # Bond lengths should be ~1.3-1.6 Angstrom
+                    assert 1.0 < bond_len < 2.0, (
+                        f"Bond length {bond_len} out of range"
+                    )
+                    # Bond angles should be reasonable (~1.5-2.5 rad)
+                    assert 1.0 < bond_angle < 3.0, (
+                        f"Bond angle {bond_angle} out of range"
+                    )
+                    # sin/cos should be in [-1, 1]
+                    assert -1.01 < sin_tor < 1.01
+                    assert -1.01 < cos_tor < 1.01

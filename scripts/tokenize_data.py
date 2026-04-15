@@ -18,7 +18,8 @@ from src.data.descriptors import _get_ligand_coords_from_sdf, _parse_types_file
 from src.model.vqvae_module import VQVAEModule
 from src.tokenizers.ligand import LigandDescriptor, parse_sdf
 from src.tokenizers.protein import (
-    PocketDescriptor,
+    BackboneZMatrixDescriptor,
+    _compute_canonical_frame,
     extract_full_sequence,
     extract_pocket,
 )
@@ -33,7 +34,7 @@ class TokenizerContext:
     """Holds all objects needed for tokenizing complexes."""
 
     module: VQVAEModule
-    protein_desc: PocketDescriptor
+    protein_desc: BackboneZMatrixDescriptor
     ligand_desc: LigandDescriptor
     assembler: TokenSequenceAssembler
     pocket_config: PocketExtractionConfig
@@ -66,7 +67,7 @@ def _load_context(config: VQVAETrainingConfig, data_dir: Path) -> TokenizerConte
 
     return TokenizerContext(
         module=module,
-        protein_desc=PocketDescriptor(),
+        protein_desc=BackboneZMatrixDescriptor(),
         ligand_desc=LigandDescriptor(),
         assembler=TokenSequenceAssembler(),
         pocket_config=PocketExtractionConfig(),
@@ -85,6 +86,8 @@ def _tokenize_complex(
     ctx: TokenizerContext,
 ) -> str | None:
     """Tokenize a single protein-ligand complex."""
+    import numpy as np  # noqa: PLC0415
+
     lig_coords = _get_ligand_coords_from_sdf(lig_path)
     if lig_coords is None:
         return None
@@ -92,13 +95,19 @@ def _tokenize_complex(
     pocket = extract_pocket(rec_path, lig_coords, ctx.pocket_config)
     if pocket is None:
         return None
-    backbone_coords, pocket_seq = pocket
+    backbone_coords, pocket_seq, residue_ids = pocket
 
     full_seq = extract_full_sequence(rec_path)
 
-    # Protein structure tokens
-    prot_desc, prot_meta = ctx.protein_desc.compute(backbone_coords)
-    pocket_frame = (prot_meta["centroid"], prot_meta["rotation"])
+    # Compute canonical frame
+    ca_coords = backbone_coords[:, 1].astype(np.float64)
+    centroid, rotation = _compute_canonical_frame(ca_coords)
+    pocket_frame = (centroid, rotation)
+
+    # Protein structure tokens (12D backbone Z-matrix)
+    prot_desc, _prot_meta = ctx.protein_desc.compute(
+        backbone_coords, residue_ids, pocket_frame=pocket_frame,
+    )
     prot_t = torch.from_numpy(prot_desc).to(ctx.device)
     prot_t = (prot_t - ctx.protein_mean) / ctx.protein_std
     prot_indices = ctx.module.protein_vqvae.encode(prot_t).cpu().tolist()
@@ -142,17 +151,17 @@ def main() -> None:
         msg = f"No .types files found in {types_dir}"
         raise FileNotFoundError(msg)
 
-    pairs = _parse_types_file(types_files[0])
+    entries = _parse_types_file(types_files[0])
     crossdocked_dir = data_dir / "CrossDocked2020"
     output_path = data_dir / "tokenized" / "sequences.txt"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Tokenizing %d complexes...", len(pairs))
+    logger.info("Tokenizing %d poses...", len(entries))
     num_ok = 0
     num_skip = 0
 
     with output_path.open("w") as f:
-        for rec_path, lig_path in pairs:
+        for rec_path, lig_path, _pose_idx in entries:
             rec_full = crossdocked_dir / rec_path
             lig_full = crossdocked_dir / lig_path
 

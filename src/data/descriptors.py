@@ -19,10 +19,16 @@ import numpy as np
 import torch
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 
 from src.tokenizers.ligand import LigandDescriptor, parse_sdf
-from src.tokenizers.protein import PocketDescriptor, extract_pocket
+from src.tokenizers.protein import (
+    BackboneZMatrixDescriptor,
+    _compute_canonical_frame,
+    extract_pocket,
+    extract_pocket_from_candidates,
+    precompute_pocket_candidates,
+)
 
 if TYPE_CHECKING:
     from src.config import (
@@ -35,7 +41,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Per-worker state for multiprocessing (set by _worker_init).
-_worker_protein_desc: PocketDescriptor | None = None
+_worker_protein_desc: BackboneZMatrixDescriptor | None = None
 _worker_ligand_desc: LigandDescriptor | None = None
 _worker_pocket_config: PocketExtractionConfig | None = None
 
@@ -61,37 +67,46 @@ def _gninatypes_to_sdf(gninatypes_path: str) -> str:
     return re.sub(r"_\d+\.gninatypes$", ".sdf.gz", gninatypes_path)
 
 
-def _parse_types_file(types_path: Path) -> list[tuple[str, str]]:
-    """Parse a .types file to extract (receptor_pdb, ligand_sdf) pairs.
+def _extract_pose_index(gninatypes_path: str) -> int:
+    """Extract the docked-pose index from a .gninatypes filename.
+
+    Example: ``subdir/5f74_A_rec_5f74_amp_lig_tt_docked_3.gninatypes`` -> 3
+    """
+    import re  # noqa: PLC0415
+
+    m = re.search(r"_(\d+)\.gninatypes$", gninatypes_path)
+    return int(m.group(1)) if m else 0
+
+
+def _parse_types_file(types_path: Path) -> list[tuple[str, str, int]]:
+    """Parse a .types file to extract (receptor_pdb, ligand_sdf, pose_idx).
 
     Each line has format:
         label score1 score2 receptor.gninatypes ligand.gninatypes #comment
 
-    Converts .gninatypes paths to .pdb / .sdf.gz paths and deduplicates.
+    Each docked pose is kept as a separate entry.
     """
-    seen: set[tuple[str, str]] = set()
-    pairs: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, int]] = []
     for line in types_path.read_text().splitlines():
         parts = line.strip().split()
         if len(parts) < 5:  # noqa: PLR2004
             continue
         rec_pdb = _gninatypes_to_pdb(parts[3])
         lig_sdf = _gninatypes_to_sdf(parts[4])
-        key = (rec_pdb, lig_sdf)
-        if key not in seen:
-            seen.add(key)
-            pairs.append(key)
-    return pairs
+        pose_idx = _extract_pose_index(parts[4])
+        entries.append((rec_pdb, lig_sdf, pose_idx))
+    return entries
 
 
 def _parse_all_types_files(
     types_dir: Path,
     max_pairs: int | None = None,
-) -> list[tuple[str, str]]:
-    """Parse train0 and test0 types files and return deduplicated union.
+) -> list[tuple[str, str, int]]:
+    """Parse train0 and test0 types files and return all entries.
 
-    When *max_pairs* is set, stops reading once enough unique pairs have
-    been collected (avoids parsing multi-GB files unnecessarily).
+    Each docked pose is a separate entry (no deduplication).
+    When *max_pairs* is set, stops reading once enough entries have
+    been collected.
     """
     train_files = sorted(types_dir.glob("cdonly_*train0.types"))
     test_files = sorted(types_dir.glob("cdonly_*test0.types"))
@@ -100,19 +115,16 @@ def _parse_all_types_files(
         msg = f"No cdonly_*train0/test0.types files found in {types_dir}"
         raise FileNotFoundError(msg)
 
-    seen: set[tuple[str, str]] = set()
-    pairs: list[tuple[str, str]] = []
+    entries: list[tuple[str, str, int]] = []
     for types_file in all_files:
-        for pair in _parse_types_file(types_file):
-            if pair not in seen:
-                seen.add(pair)
-                pairs.append(pair)
-                if max_pairs is not None and len(pairs) >= max_pairs:
-                    break
-        if max_pairs is not None and len(pairs) >= max_pairs:
+        for entry in _parse_types_file(types_file):
+            entries.append(entry)
+            if max_pairs is not None and len(entries) >= max_pairs:
+                break
+        if max_pairs is not None and len(entries) >= max_pairs:
             break
-    logger.info("Loaded %d unique pairs from %s", len(pairs), types_dir)
-    return pairs
+    logger.info("Loaded %d entries from %s", len(entries), types_dir)
+    return entries
 
 
 def _load_pairs_from_manifest(
@@ -158,42 +170,52 @@ def _load_pairs_from_manifest(
     return pairs, cache_dir
 
 
-def _get_ligand_coords_from_sdf(sdf_path: Path) -> np.ndarray | None:
+def _get_ligand_coords_from_sdf(
+    sdf_path: Path,
+    pose_idx: int = 0,
+) -> np.ndarray | None:
     """Extract heavy-atom coordinates from an SDF file for pocket extraction."""
     molecules = parse_sdf(sdf_path)
-    if not molecules:
+    if pose_idx >= len(molecules):
         return None
-    mol = molecules[0]
+    mol = molecules[pose_idx]
     heavy_atoms = [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"]
     if not heavy_atoms:
         return None
     return np.array(heavy_atoms, dtype=np.float32)
 
 
-def _process_complex(
+def _process_complex(  # noqa: PLR0913
     rec_path: Path,
     lig_path: Path,
-    protein_desc: PocketDescriptor,
+    pose_idx: int,
+    protein_desc: BackboneZMatrixDescriptor,
     ligand_desc: LigandDescriptor,
     pocket_config: PocketExtractionConfig,
 ) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
-    """Process one complex and return (protein_desc, ligand_desc, elements)."""
-    lig_coords = _get_ligand_coords_from_sdf(lig_path)
+    """Process one complex pose and return (protein_desc, ligand_desc, elements)."""
+    lig_coords = _get_ligand_coords_from_sdf(lig_path, pose_idx=pose_idx)
     if lig_coords is None:
         return None
 
     pocket = extract_pocket(rec_path, lig_coords, pocket_config)
     if pocket is None:
         return None
-    backbone_coords, _pocket_seq = pocket
+    backbone_coords, _pocket_seq, residue_ids = pocket
 
-    prot_desc, prot_metadata = protein_desc.compute(backbone_coords)
-    pocket_frame = (prot_metadata["centroid"], prot_metadata["rotation"])
+    # Compute canonical frame from CA coords
+    ca_coords = backbone_coords[:, 1].astype(np.float64)
+    centroid, rotation = _compute_canonical_frame(ca_coords)
+    pocket_frame = (centroid, rotation)
+
+    prot_desc, _prot_metadata = protein_desc.compute(
+        backbone_coords, residue_ids, pocket_frame=pocket_frame,
+    )
 
     molecules = parse_sdf(lig_path)
-    if not molecules:
+    if pose_idx >= len(molecules):
         return None
-    mol = molecules[0]
+    mol = molecules[pose_idx]
     lig_desc_arr, elements, _lig_metadata = ligand_desc.compute(
         mol["atoms"],
         mol["bonds"],
@@ -211,20 +233,20 @@ def _worker_init(pocket_config_dict: dict) -> None:
 
     from src.config import PocketExtractionConfig  # noqa: PLC0415
 
-    _worker_protein_desc = PocketDescriptor()
+    _worker_protein_desc = BackboneZMatrixDescriptor()
     _worker_ligand_desc = LigandDescriptor()
     _worker_pocket_config = PocketExtractionConfig(**pocket_config_dict)
 
 
 def _worker_process_one(
-    args: tuple[str, str, str],
+    args: tuple[str, str, int, str],
 ) -> dict[str, np.ndarray | list[str]] | None:
-    """Process a single complex in a worker process.
+    """Process a single complex pose in a worker process.
 
-    *args* is ``(rec_path, lig_path, base_dir)``.  When *base_dir* is
-    empty, the paths are treated as absolute.
+    *args* is ``(rec_path, lig_path, pose_idx, base_dir)``.  When
+    *base_dir* is empty, the paths are treated as absolute.
     """
-    rec_str, lig_str, base_str = args
+    rec_str, lig_str, pose_idx, base_str = args
     if base_str:
         rec_full = Path(base_str) / rec_str
         lig_full = Path(base_str) / lig_str
@@ -239,12 +261,13 @@ def _worker_process_one(
         result = _process_complex(
             rec_full,
             lig_full,
+            pose_idx,
             _worker_protein_desc,  # type: ignore[arg-type]
             _worker_ligand_desc,  # type: ignore[arg-type]
             _worker_pocket_config,  # type: ignore[arg-type]
         )
     except Exception:
-        logger.exception("Error processing %s / %s", rec_str, lig_str)
+        logger.exception("Error processing %s / %s pose %d", rec_str, lig_str, pose_idx)
         return None
 
     if result is None:
@@ -254,27 +277,151 @@ def _worker_process_one(
     return {"protein": prot, "ligand": lig, "elements": elems}
 
 
-def _process_pairs(
-    pairs: list[tuple[str, str]],
-    crossdocked_dir: Path,
+# ---------------------------------------------------------------------------
+# Grouped processing: parse each PDB/SDF once across all poses
+# ---------------------------------------------------------------------------
+
+
+def _group_entries_by_receptor(
+    abs_entries: list[tuple[str, str, int]],
+) -> list[tuple[str, list[tuple[str, list[int]]]]]:
+    """Group entries by receptor PDB, then by SDF file.
+
+    Returns a list of ``(rec_path, sdf_groups)`` where *sdf_groups* is
+    ``[(sdf_path, [pose_indices]), ...]``.
+    """
+    from collections import defaultdict  # noqa: PLC0415
+
+    # rec -> sdf -> [pose_idx]
+    grouped: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
+    for rec, lig, pose_idx in abs_entries:
+        grouped[rec][lig].append(pose_idx)
+
+    return [
+        (rec, [(sdf, poses) for sdf, poses in sdf_dict.items()])
+        for rec, sdf_dict in grouped.items()
+    ]
+
+
+def _process_pose(
+    mol: dict,
+    precomputed: object,
+    pocket_config: object,
+    protein_desc: BackboneZMatrixDescriptor,
+    ligand_desc: LigandDescriptor,
+) -> dict[str, np.ndarray | list[str]] | None:
+    """Process a single pose given a pre-parsed molecule and receptor."""
+    heavy = [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"]
+    if not heavy:
+        return None
+    lig_coords = np.array(heavy, dtype=np.float32)
+
+    pocket = extract_pocket_from_candidates(
+        precomputed, lig_coords, pocket_config,  # type: ignore[arg-type]
+    )
+    if pocket is None:
+        return None
+    backbone_coords, _pocket_seq, residue_ids = pocket
+
+    ca_coords = backbone_coords[:, 1].astype(np.float64)
+    centroid, rotation = _compute_canonical_frame(ca_coords)
+    pocket_frame = (centroid, rotation)
+
+    prot_desc_arr, _prot_meta = protein_desc.compute(
+        backbone_coords, residue_ids, pocket_frame=pocket_frame,
+    )
+    lig_desc_arr, elements, _lig_meta = ligand_desc.compute(
+        mol["atoms"],
+        mol["bonds"],
+        pocket_frame=pocket_frame,
+    )
+    if len(lig_desc_arr) == 0:
+        return None
+
+    return {"protein": prot_desc_arr, "ligand": lig_desc_arr, "elements": elements}
+
+
+def _worker_process_receptor_group(
+    args: tuple[str, list[tuple[str, list[int]]]],
+) -> tuple[list[dict[str, np.ndarray | list[str]]], int]:
+    """Process all entries for one receptor PDB.
+
+    Parses the PDB once and each SDF once across all poses.
+    Returns ``(results, total_poses)`` where *total_poses* is the number
+    of poses attempted (for progress tracking).
+    """
+    rec_path, sdf_groups = args
+    results: list[dict[str, np.ndarray | list[str]]] = []
+    total = sum(len(poses) for _, poses in sdf_groups)
+
+    rec_full = Path(rec_path)
+    if not rec_full.exists():
+        return results, total
+
+    try:
+        precomputed = precompute_pocket_candidates(rec_full)
+    except Exception:
+        logger.exception("Error parsing PDB %s", rec_path)
+        return results, total
+
+    for sdf_path, pose_indices in sdf_groups:
+        sdf_full = Path(sdf_path)
+        if not sdf_full.exists():
+            continue
+
+        try:
+            molecules = parse_sdf(sdf_full)
+        except Exception:
+            logger.exception("Error parsing SDF %s", sdf_path)
+            continue
+
+        for pose_idx in pose_indices:
+            if pose_idx >= len(molecules):
+                continue
+            try:
+                result = _process_pose(
+                    molecules[pose_idx],
+                    precomputed,
+                    _worker_pocket_config,
+                    _worker_protein_desc,  # type: ignore[arg-type]
+                    _worker_ligand_desc,  # type: ignore[arg-type]
+                )
+            except Exception:
+                logger.exception(
+                    "Error: %s / %s pose %d", rec_path, sdf_path, pose_idx,
+                )
+                continue
+            if result is not None:
+                results.append(result)
+
+    return results, total
+
+
+def _process_entries_from_abs(
+    abs_entries: list[tuple[str, str, int]],
     pocket_config: PocketExtractionConfig,
     num_workers: int = 0,
 ) -> list[dict[str, np.ndarray | list[str]]]:
-    """Process a list of (receptor, ligand) pairs into complex dicts.
+    """Process (receptor, ligand, pose_idx) entries into complex dicts.
 
+    Entries are grouped by receptor PDB so each file is parsed only once.
     When *num_workers* > 0, processing runs in parallel using a
     ``multiprocessing.Pool``.
 
     Returns a list of dicts, each containing raw (un-normalized) descriptors:
-      - ``"protein"``: ``ndarray`` of shape ``(n_residues, 9)``
+      - ``"protein"``: ``ndarray`` of shape ``(n_residues, 12)``
       - ``"ligand"``: ``ndarray`` of shape ``(n_atoms, 4)``
       - ``"elements"``: ``list[str]`` of per-atom element symbols
     """
     from dataclasses import asdict  # noqa: PLC0415
 
-    crossdocked_str = str(crossdocked_dir)
-    work_items = [(rec, lig, crossdocked_str) for rec, lig in pairs]
-
+    total_entries = len(abs_entries)
+    receptor_groups = _group_entries_by_receptor(abs_entries)
+    logger.info(
+        "Grouped %d entries into %d receptor groups",
+        total_entries,
+        len(receptor_groups),
+    )
     pocket_config_dict = asdict(pocket_config)
 
     if num_workers > 0:
@@ -286,49 +433,46 @@ def _process_pairs(
             initializer=_worker_init,
             initargs=(pocket_config_dict,),
         ) as pool:
-            results = pool.imap_unordered(
-                _worker_process_one,
-                work_items,
-                chunksize=64,
+            batch_results = pool.imap_unordered(
+                _worker_process_receptor_group,
+                receptor_groups,
+                chunksize=4,
             )
-            return _collect_results(results, len(work_items))
+            return _collect_grouped_results(batch_results, total_entries)
 
-    # Single-process fallback
     _worker_init(pocket_config_dict)
-    results_iter = (_worker_process_one(item) for item in work_items)
-    return _collect_results(results_iter, len(work_items))
+    batch_iter = (
+        _worker_process_receptor_group(group) for group in receptor_groups
+    )
+    return _collect_grouped_results(batch_iter, total_entries)
 
 
-def _process_pairs_from_abs(
-    abs_pairs: list[tuple[str, str]],
-    pocket_config: PocketExtractionConfig,
-    num_workers: int = 0,
+def _collect_grouped_results(
+    batch_results: Iterable[tuple[list[dict[str, np.ndarray | list[str]]], int]],
+    total_entries: int,
 ) -> list[dict[str, np.ndarray | list[str]]]:
-    """Like ``_process_pairs`` but accepts absolute paths directly."""
-    from dataclasses import asdict  # noqa: PLC0415
+    """Collect results from grouped receptor processing."""
+    complexes: list[dict[str, np.ndarray | list[str]]] = []
+    num_done = 0
+    num_skipped = 0
 
-    work_items = [(rec, lig, "") for rec, lig in abs_pairs]
-    pocket_config_dict = asdict(pocket_config)
+    for group_results, group_total in batch_results:
+        complexes.extend(group_results)
+        group_skipped = group_total - len(group_results)
+        num_done += group_total
+        num_skipped += group_skipped
 
-    if num_workers > 0:
-        import multiprocessing  # noqa: PLC0415
-
-        logger.info("Processing with %d workers", num_workers)
-        with multiprocessing.Pool(
-            num_workers,
-            initializer=_worker_init,
-            initargs=(pocket_config_dict,),
-        ) as pool:
-            results = pool.imap_unordered(
-                _worker_process_one,
-                work_items,
-                chunksize=64,
+        if num_done % 10000 < group_total or num_done == total_entries:
+            logger.info(
+                "Progress: %d / %d done (%d ok, %d skipped)",
+                num_done,
+                total_entries,
+                len(complexes),
+                num_skipped,
             )
-            return _collect_results(results, len(work_items))
 
-    _worker_init(pocket_config_dict)
-    results_iter = (_worker_process_one(item) for item in work_items)
-    return _collect_results(results_iter, len(work_items))
+    logger.info("Done: %d processed, %d skipped", len(complexes), num_skipped)
+    return complexes
 
 
 def _collect_results(
@@ -418,17 +562,20 @@ def _split_and_normalize(  # noqa: PLR0913
     protein_std: np.ndarray,
     ligand_mean: np.ndarray,
     ligand_std: np.ndarray,
-) -> tuple[Tensor, list[Tensor]]:
-    """Extract, normalize, and concatenate descriptors for a split.
+) -> tuple[list[Tensor], list[Tensor]]:
+    """Extract, normalize, and build per-complex descriptor lists for a split.
 
-    Returns ``(protein_tensor, ligand_molecule_list)``.
+    Returns ``(protein_pocket_list, ligand_molecule_list)``.
     """
     protein_parts = [complexes[i]["protein"] for i in indices]
     ligand_parts = [complexes[i]["ligand"] for i in indices]
 
-    protein_cat = np.concatenate(protein_parts, axis=0)  # type: ignore[arg-type]
-    protein_norm = (protein_cat - protein_mean) / protein_std
-    protein_tensor = torch.from_numpy(protein_norm).float()
+    protein_pockets = [
+        torch.from_numpy(
+            (prot - protein_mean) / protein_std  # type: ignore[operator]
+        ).float()
+        for prot in protein_parts
+    ]
 
     ligand_molecules = [
         torch.from_numpy(
@@ -437,7 +584,7 @@ def _split_and_normalize(  # noqa: PLR0913
         for lig in ligand_parts
     ]
 
-    return protein_tensor, ligand_molecules
+    return protein_pockets, ligand_molecules
 
 
 class ComplexDescriptorDataModule(L.LightningDataModule):
@@ -460,9 +607,9 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         self.data_dir = Path(data_config.data_dir)
         self.cache_dir = self.data_dir / "descriptor_cache"
 
-        self.protein_train: torch.Tensor | None = None
-        self.protein_val: torch.Tensor | None = None
-        self.protein_test: torch.Tensor | None = None
+        self.protein_train: list[Tensor] | None = None
+        self.protein_val: list[Tensor] | None = None
+        self.protein_test: list[Tensor] | None = None
         self.ligand_train: list[Tensor] | None = None
         self.ligand_val: list[Tensor] | None = None
         self.ligand_test: list[Tensor] | None = None
@@ -483,30 +630,26 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             )
             receptor_dir = cache_dir / "receptors"
             ligand_dir = cache_dir / "ligands"
-            # Build absolute paths for _process_pairs: receptor from
-            # receptors/, ligand from ligands/
-            abs_pairs = [
-                (str(receptor_dir / rec), str(ligand_dir / lig)) for rec, lig in pairs
+            abs_entries = [
+                (str(receptor_dir / rec), str(ligand_dir / lig), 0)
+                for rec, lig in pairs
             ]
         else:
             types_dir = self.data_dir / "types"
-            pairs = _parse_all_types_files(
+            entries = _parse_all_types_files(
                 types_dir,
                 max_pairs=self.data_config.max_pairs,
             )
             crossdocked_dir = self.data_dir / "CrossDocked2020"
-            abs_pairs = [
-                (str(crossdocked_dir / rec), str(crossdocked_dir / lig))
-                for rec, lig in pairs
+            abs_entries = [
+                (str(crossdocked_dir / rec), str(crossdocked_dir / lig), pose_idx)
+                for rec, lig, pose_idx in entries
             ]
 
-        logger.info("Processing %d complex pairs", len(abs_pairs))
+        logger.info("Processing %d complex poses", len(abs_entries))
 
-        # _process_pairs expects (rec, lig) strings and a base dir.
-        # Since abs_pairs already has absolute paths, pass Path("/") as
-        # the base dir so joining is a no-op.
-        complexes = _process_pairs_from_abs(
-            abs_pairs,
+        complexes = _process_entries_from_abs(
+            abs_entries,
             self.training_config.pocket,
             num_workers=self.training_config.num_workers,
         )
@@ -564,7 +707,7 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             "ligand_std": torch.from_numpy(ligand_std),
         }
 
-        # --- Normalize and build per-split tensors ---
+        # --- Normalize and build per-split lists ---
         self.protein_train, self.ligand_train = _split_and_normalize(
             complexes, train_indices, protein_mean, protein_std, ligand_mean, ligand_std
         )
@@ -576,7 +719,7 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         )
 
         logger.info(
-            "Protein residues: %d train, %d val, %d test",
+            "Protein pockets: %d train, %d val, %d test",
             len(self.protein_train),
             len(self.protein_val),
             len(self.protein_test),
@@ -588,36 +731,20 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             len(self.ligand_test),
         )
 
-    def _build_protein_loader(
-        self,
-        data: torch.Tensor,
-        *,
-        shuffle: bool,
-    ) -> DataLoader:
-        bs = self.training_config.batch_size
-        nw = self.training_config.num_workers
-        return DataLoader(
-            TensorDataset(data),
-            batch_size=bs,
-            shuffle=shuffle,
-            num_workers=nw,
-            persistent_workers=nw > 0,
-        )
-
-    def _build_ligand_loader(
+    def _build_loader(
         self,
         molecules: list[Tensor],
         *,
         shuffle: bool,
     ) -> DataLoader:
-        bs = self.training_config.ligand_mol_batch_size
         nw = self.training_config.num_workers
         return DataLoader(
             MoleculeDataset(molecules),
-            batch_size=bs,
+            batch_size=self.training_config.mol_batch_size,
             shuffle=shuffle,
             num_workers=nw,
             persistent_workers=nw > 0,
+            pin_memory=True,
             collate_fn=collate_molecules,
         )
 
@@ -628,11 +755,11 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             raise RuntimeError(msg)
         return CombinedLoader(
             {
-                "protein": self._build_protein_loader(
+                "protein": self._build_loader(
                     self.protein_train,
                     shuffle=True,
                 ),
-                "ligand": self._build_ligand_loader(
+                "ligand": self._build_loader(
                     self.ligand_train,
                     shuffle=True,
                 ),
@@ -647,11 +774,11 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             raise RuntimeError(msg)
         return CombinedLoader(
             {
-                "protein": self._build_protein_loader(
+                "protein": self._build_loader(
                     self.protein_val,
                     shuffle=False,
                 ),
-                "ligand": self._build_ligand_loader(
+                "ligand": self._build_loader(
                     self.ligand_val,
                     shuffle=False,
                 ),
@@ -666,11 +793,11 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             raise RuntimeError(msg)
         return CombinedLoader(
             {
-                "protein": self._build_protein_loader(
+                "protein": self._build_loader(
                     self.protein_test,
                     shuffle=False,
                 ),
-                "ligand": self._build_ligand_loader(
+                "ligand": self._build_loader(
                     self.ligand_test,
                     shuffle=False,
                 ),

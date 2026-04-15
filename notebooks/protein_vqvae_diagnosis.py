@@ -30,7 +30,7 @@ if TYPE_CHECKING:
         ComplexDescriptorDataModule as ComplexDescriptorDataModuleType,
     )
     from src.model.vqvae_module import VQVAEModule as VQVAEModuleType
-    from src.tokenizers.protein import ProteinStructureVQVAE
+    from src.tokenizers.vqvae import TransformerVQVAE
 
 import marimo
 
@@ -154,8 +154,10 @@ def _(
     dm = ComplexDescriptorDataModule(config, data_config)
     dm.setup()
 
-    protein_test = dm.protein_test.to(device)
-    protein_train = dm.protein_train.to(device)
+    # Protein data is now list[Tensor] (per-pocket sequences)
+    # Flatten for residue-level analysis
+    protein_test = torch.cat(dm.protein_test).to(device)
+    protein_train = torch.cat(dm.protein_train).to(device)
     norm_stats = dm.norm_stats
     prot_mean = norm_stats["protein_mean"].to(device)
     prot_std = norm_stats["protein_std"].to(device)
@@ -199,78 +201,55 @@ def _(
     prot_mean: Tensor,
     prot_std: Tensor,
     protein_test: Tensor,
-    protein_vqvae: ProteinStructureVQVAE,
+    protein_vqvae: TransformerVQVAE,
     torch: types.ModuleType,
 ):
     @torch.no_grad()
-    def compare_continuous_vs_vq(
-        model: "ProteinStructureVQVAE",
+    def run_vq_reconstruction(
+        model: "TransformerVQVAE",
         data: "Tensor",
         batch_size: int = 4096,
     ):
-        all_continuous_recon = []
         all_vq_recon = []
         all_z = []
         all_z_quantized = []
 
         for i in range(0, len(data), batch_size):
             batch = data[i : i + batch_size]
-            z = model.encoder(batch)
-            quantized, _indices, _loss = model.codebook(z)
-
-            # Continuous: encoder -> decoder (skip quantization)
-            continuous_recon = model.decoder(z)
-            # VQ: encoder -> quantize -> decoder
-            vq_recon = model.decoder(quantized)
-
-            all_continuous_recon.append(continuous_recon)
-            all_vq_recon.append(vq_recon)
-            all_z.append(z)
+            # Get latent representations for analysis
+            x_seq = batch.unsqueeze(0)
+            h = model.input_proj(x_seq) + model.pos_encoding[: batch.shape[0]]
+            h = model.transformer_encoder(h)
+            z = model.latent_proj(h).squeeze(0)
+            z_float = z.float()
+            quantized, _indices, _ = model.codebook(z_float)
+            all_z.append(z_float)
             all_z_quantized.append(quantized)
 
-        return (
-            torch.cat(all_continuous_recon),
-            torch.cat(all_vq_recon),
-            torch.cat(all_z),
-            torch.cat(all_z_quantized),
-        )
+            # Full encode/decode for reconstruction
+            indices = model.encode(batch)
+            vq_recon = model.decode(indices)
+            all_vq_recon.append(vq_recon)
 
-    cont_recon, vq_recon, z_all, z_quantized_all = compare_continuous_vs_vq(
-        protein_vqvae, protein_test
+        return torch.cat(all_vq_recon), torch.cat(all_z), torch.cat(all_z_quantized)
+
+    vq_recon, z_all, z_quantized_all = run_vq_reconstruction(
+        protein_vqvae, protein_test,
     )
 
     # Normalized-space MSE
-    cont_mse_norm = (protein_test - cont_recon).pow(2).mean().item()
     vq_mse_norm = (protein_test - vq_recon).pow(2).mean().item()
 
     # Original-scale MSE
     orig = (protein_test * prot_std + prot_mean).cpu().numpy()
-    cont_orig = (cont_recon * prot_std + prot_mean).cpu().numpy()
     vq_orig = (vq_recon * prot_std + prot_mean).cpu().numpy()
-    cont_mse_orig = np.mean((orig - cont_orig) ** 2)
     vq_mse_orig = np.mean((orig - vq_orig) ** 2)
 
-    print("=== Continuous (no VQ) vs VQ reconstruction ===")
-    print(f"  Continuous MSE (norm):     {cont_mse_norm:.6f}")
-    print(f"  VQ MSE (norm):             {vq_mse_norm:.6f}")
-    print(f"  Ratio (VQ / Continuous):   {vq_mse_norm / cont_mse_norm:.2f}x")
-    print()
-    print(f"  Continuous RMSE (orig, Å): {np.sqrt(cont_mse_orig):.4f}")
-    print(f"  VQ RMSE (orig, Å):         {np.sqrt(vq_mse_orig):.4f}")
-    print()
-    ratio = vq_mse_norm / cont_mse_norm
-    if ratio > 2.0:  # noqa: PLR2004
-        print("  → 量子化が主なボトルネック")
-    elif ratio < 1.5:  # noqa: PLR2004
-        print("  → エンコーダ/デコーダ容量がボトルネック")
-    else:
-        print("  → 両方が同程度に寄与")
+    print("=== VQ reconstruction ===")
+    print(f"  VQ MSE (norm):   {vq_mse_norm:.6f}")
+    print(f"  VQ RMSE (orig):  {np.sqrt(vq_mse_orig):.4f}")
     return (
-        cont_mse_orig,
-        cont_orig,
-        cont_recon,
         orig,
-        ratio,
         vq_mse_orig,
         vq_orig,
         vq_recon,
@@ -287,16 +266,14 @@ def _(
 @app.cell(hide_code=True)
 def _(mo: types.ModuleType):
     mo.md(r"""
-    ## 3. 次元別の 3D RMSE 寄与
+    ## 3. 次元別の再構成誤差
 
-    9D 記述子の各次元が 3D 再構成 RMSE にどれだけ寄与するか。
+    12D バックボーン Z-matrix 記述子の各次元が再構成精度にどれだけ寄与するか。
 
-    - dim 0-2: CA 位置 (canonical frame) → ポケット全体のスケールに直接影響
-    - dim 3-5: N-CA オフセット → 局所的なバックボーン方向
-    - dim 6-8: C-CA オフセット → 局所的なバックボーン方向
-
-    CA 位置の誤差が支配的なら、ポケットの広がり（空間スケール）が問題。
-    オフセットの誤差が大きいなら、局所構造の再構成が困難。
+    各残基の 12D は 3 つのバックボーン原子 (N, CA, C) × 4D Z-matrix:
+    - dim 0-3: N 原子 (bond_len, bond_angle, sin_tor, cos_tor)
+    - dim 4-7: CA 原子 (bond_len, bond_angle, sin_tor, cos_tor)
+    - dim 8-11: C 原子 (bond_len, bond_angle, sin_tor, cos_tor)
     """)
 
 
@@ -308,50 +285,44 @@ def _(
     vq_orig: ndarray,
 ):
     dim_labels = [
-        "CA_x",
-        "CA_y",
-        "CA_z",
-        "N-CA_x",
-        "N-CA_y",
-        "N-CA_z",
-        "C-CA_x",
-        "C-CA_y",
-        "C-CA_z",
+        "N_d", "N_θ", "N_sin", "N_cos",
+        "CA_d", "CA_θ", "CA_sin", "CA_cos",
+        "C_d", "C_θ", "C_sin", "C_cos",
     ]
-    group_labels = ["CA position", "N-CA offset", "C-CA offset"]
+    group_labels = ["N atom", "CA atom", "C atom"]
 
     per_dim_mse = np.mean((orig - vq_orig) ** 2, axis=0)
     per_dim_rmse = np.sqrt(per_dim_mse)
 
-    # Group by CA / N-CA / C-CA
+    # Group by N / CA / C backbone atoms
     group_mse = [
-        per_dim_mse[0:3].sum(),
-        per_dim_mse[3:6].sum(),
-        per_dim_mse[6:9].sum(),
+        per_dim_mse[0:4].sum(),
+        per_dim_mse[4:8].sum(),
+        per_dim_mse[8:12].sum(),
     ]
     group_rmse = [np.sqrt(m) for m in group_mse]
 
     _fig, _axes = plt.subplots(1, 3, figsize=(16, 4))
 
     # Per-dimension MSE
-    colors = ["#e74c3c"] * 3 + ["#3498db"] * 3 + ["#2ecc71"] * 3
-    _axes[0].bar(range(9), per_dim_mse, color=colors)
-    _axes[0].set_xticks(range(9), dim_labels, rotation=45, ha="right", fontsize=8)
-    _axes[0].set_ylabel("MSE (Å²)")
-    _axes[0].set_title("Per-dimension MSE (original scale)")
+    colors = ["#e74c3c"] * 4 + ["#3498db"] * 4 + ["#2ecc71"] * 4
+    _axes[0].bar(range(12), per_dim_mse, color=colors)
+    _axes[0].set_xticks(range(12), dim_labels, rotation=45, ha="right", fontsize=8)
+    _axes[0].set_ylabel("MSE")
+    _axes[0].set_title("Per-dimension MSE (normalized scale)")
 
     # Per-dimension RMSE
-    _axes[1].bar(range(9), per_dim_rmse, color=colors)
-    _axes[1].set_xticks(range(9), dim_labels, rotation=45, ha="right", fontsize=8)
-    _axes[1].set_ylabel("RMSE (Å)")
-    _axes[1].set_title("Per-dimension RMSE (original scale)")
+    _axes[1].bar(range(12), per_dim_rmse, color=colors)
+    _axes[1].set_xticks(range(12), dim_labels, rotation=45, ha="right", fontsize=8)
+    _axes[1].set_ylabel("RMSE")
+    _axes[1].set_title("Per-dimension RMSE (normalized scale)")
 
     # Grouped RMSE
     bar_colors = ["#e74c3c", "#3498db", "#2ecc71"]
     _axes[2].bar(range(3), group_rmse, color=bar_colors)
     _axes[2].set_xticks(range(3), group_labels)
-    _axes[2].set_ylabel("RMSE (Å)")
-    _axes[2].set_title("Group RMSE (original scale)")
+    _axes[2].set_ylabel("RMSE")
+    _axes[2].set_title("Group RMSE (normalized scale)")
     for j, v in enumerate(group_rmse):
         _axes[2].text(j, v + 0.01, f"{v:.3f}", ha="center", fontsize=9)
 
@@ -463,19 +434,19 @@ def _(
     per_residue_mse = np.mean((orig - vq_orig) ** 2, axis=1)  # (N,)
     per_residue_rmse = np.sqrt(per_residue_mse)
 
-    # CA distance from centroid (in original scale, canonical frame)
-    ca_dist = np.sqrt(np.sum(orig[:, :3] ** 2, axis=1))  # CA_x^2 + CA_y^2 + CA_z^2
+    # N atom: first dim is bond length (or r for segment starts)
+    n_bond_len = orig[:, 0]
 
-    # N-CA bond length (original scale)
-    n_ca_len = np.sqrt(np.sum(orig[:, 3:6] ** 2, axis=1))
+    # CA atom: bond length N->CA
+    ca_bond_len = orig[:, 4]
 
     _fig, _axes = plt.subplots(1, 3, figsize=(16, 4))
 
-    # Error vs CA distance
-    _axes[0].scatter(ca_dist, per_residue_rmse, s=1, alpha=0.1)
-    _axes[0].set_xlabel("CA distance from centroid (Å)")
-    _axes[0].set_ylabel("Per-residue RMSE (Å)")
-    _axes[0].set_title("RMSE vs CA distance from centroid")
+    # Error vs N bond length (r for segment starts, C-N bond for continuations)
+    _axes[0].scatter(n_bond_len, per_residue_rmse, s=1, alpha=0.1)
+    _axes[0].set_xlabel("N atom bond length / r")
+    _axes[0].set_ylabel("Per-residue RMSE")
+    _axes[0].set_title("RMSE vs N bond length")
     # Add binned trend line
     bins = np.linspace(ca_dist.min(), np.percentile(ca_dist, 99), 20)
     bin_idx = np.digitize(ca_dist, bins)
@@ -493,8 +464,8 @@ def _(
     _axes[0].plot(bin_centers, bin_means, "r-", linewidth=2, label="binned mean")
     _axes[0].legend(fontsize=8)
 
-    # Error vs N-CA bond length
-    _axes[1].scatter(n_ca_len, per_residue_rmse, s=1, alpha=0.1)
+    # Error vs CA bond length (N->CA)
+    _axes[1].scatter(ca_bond_len, per_residue_rmse, s=1, alpha=0.1)
     _axes[1].set_xlabel("N-CA offset magnitude (Å)")
     _axes[1].set_ylabel("Per-residue RMSE (Å)")
     _axes[1].set_title("RMSE vs N-CA offset magnitude")
@@ -550,18 +521,22 @@ def _(
     np: types.ModuleType,
     plt: types.ModuleType,
     project_root: Path,
-    protein_vqvae: ProteinStructureVQVAE,
+    protein_vqvae: TransformerVQVAE,
     torch: types.ModuleType,
 ):
     from src.config import PocketExtractionConfig
     from src.data.descriptors import _parse_types_file
     from src.tokenizers.ligand import parse_sdf
-    from src.tokenizers.protein import PocketDescriptor, extract_pocket
+    from src.tokenizers.protein import (
+        BackboneZMatrixDescriptor,
+        _compute_canonical_frame,
+        extract_pocket,
+    )
 
     pocket_config = PocketExtractionConfig()
-    desc_calc = PocketDescriptor()
+    desc_calc = BackboneZMatrixDescriptor()
     types_file = project_root / "data" / "types" / "cdonly_it2_tt_v1.3_0_test0.types"
-    pairs = _parse_types_file(types_file)
+    entries = _parse_types_file(types_file)
     crossdocked_dir = project_root / "data" / "CrossDocked2020"
     p_mean = norm_stats["protein_mean"].to(device)
     p_std = norm_stats["protein_std"].to(device)
@@ -569,7 +544,7 @@ def _(
     N_SAMPLES = 300
     rng = np.random.default_rng(42)
     sample_indices = rng.choice(
-        len(pairs), size=min(N_SAMPLES * 5, len(pairs)), replace=False
+        len(entries), size=min(N_SAMPLES * 5, len(entries)), replace=False
     )
 
     complex_results = []
@@ -577,7 +552,7 @@ def _(
     for _idx in sample_indices:
         if n_done >= N_SAMPLES:
             break
-        rec_rel, lig_rel = pairs[_idx]
+        rec_rel, lig_rel, _pose_idx = entries[_idx]
         rec_path = crossdocked_dir / rec_rel
         lig_path = crossdocked_dir / lig_rel
         if not rec_path.exists() or not lig_path.exists():
@@ -594,41 +569,35 @@ def _(
             pocket_result = extract_pocket(rec_path, lig_coords, pocket_config)
             if pocket_result is None:
                 continue
-            backbone_orig, _seq = pocket_result
-            prot_desc, prot_meta = desc_calc.compute(backbone_orig)
+            backbone_orig, _seq, residue_ids = pocket_result
+            ca_coords_f = backbone_orig[:, 1].astype(np.float64)
+            centroid, rotation = _compute_canonical_frame(ca_coords_f)
+            pocket_frame = (centroid, rotation)
+            prot_desc, prot_meta = desc_calc.compute(
+                backbone_orig, residue_ids, pocket_frame=pocket_frame,
+            )
             n_res = len(prot_desc)
 
             # VQ reconstruction
             prot_t = torch.from_numpy(prot_desc).to(device)
             prot_norm = (prot_t - p_mean) / p_std
             with torch.no_grad():
-                z = protein_vqvae.encoder(prot_norm)
-                quantized, indices, _ = protein_vqvae.codebook(z)
-                vq_recon_norm = protein_vqvae.decoder(quantized)
-                # Continuous reconstruction
-                cont_recon_norm = protein_vqvae.decoder(z)
+                vq_indices = protein_vqvae.encode(prot_norm)
+                vq_recon_norm = protein_vqvae.decode(vq_indices)
 
             vq_desc = (vq_recon_norm * p_std + p_mean).cpu().numpy()
-            cont_desc = (cont_recon_norm * p_std + p_mean).cpu().numpy()
 
             # 3D coordinate reconstruction
-            backbone_vq = PocketDescriptor.descriptor_to_backbone_coords(
+            backbone_vq = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
                 vq_desc, prot_meta
-            )
-            backbone_cont = PocketDescriptor.descriptor_to_backbone_coords(
-                cont_desc, prot_meta
             )
 
             # Per-atom RMSE (all 3 backbone atoms per residue)
             vq_rmse = np.sqrt(np.mean((backbone_orig - backbone_vq) ** 2))
-            cont_rmse = np.sqrt(np.mean((backbone_orig - backbone_cont) ** 2))
 
             # CA-only RMSE
             ca_vq_rmse = np.sqrt(
                 np.mean((backbone_orig[:, 1] - backbone_vq[:, 1]) ** 2)
-            )
-            ca_cont_rmse = np.sqrt(
-                np.mean((backbone_orig[:, 1] - backbone_cont[:, 1]) ** 2)
             )
 
             # Spatial extent of pocket
@@ -639,11 +608,9 @@ def _(
                 {
                     "n_res": n_res,
                     "vq_rmse": vq_rmse,
-                    "cont_rmse": cont_rmse,
                     "ca_vq_rmse": ca_vq_rmse,
-                    "ca_cont_rmse": ca_cont_rmse,
                     "pocket_extent": pocket_extent,
-                    "indices": indices.cpu().numpy(),
+                    "indices": vq_indices.cpu().numpy(),
                 }
             )
             n_done += 1
@@ -654,24 +621,21 @@ def _(
 
     n_res_arr = np.array([r["n_res"] for r in complex_results])
     vq_rmse_arr = np.array([r["vq_rmse"] for r in complex_results])
-    cont_rmse_arr = np.array([r["cont_rmse"] for r in complex_results])
     ca_vq_rmse_arr = np.array([r["ca_vq_rmse"] for r in complex_results])
     extent_arr = np.array([r["pocket_extent"] for r in complex_results])
 
     _fig, _axes = plt.subplots(2, 2, figsize=(12, 10))
 
-    # VQ vs Continuous RMSE
-    _axes[0, 0].scatter(cont_rmse_arr, vq_rmse_arr, s=10, alpha=0.5)
-    lim = max(cont_rmse_arr.max(), vq_rmse_arr.max()) * 1.05
-    _axes[0, 0].plot([0, lim], [0, lim], "r--", linewidth=0.8)
-    _axes[0, 0].set_xlabel("Continuous RMSE (Å)")
-    _axes[0, 0].set_ylabel("VQ RMSE (Å)")
-    _axes[0, 0].set_title("VQ vs Continuous 3D RMSE per complex")
-    _axes[0, 0].set_aspect("equal", adjustable="datalim")
+    # RMSE distribution
+    _axes[0, 0].hist(vq_rmse_arr, bins=30, alpha=0.6, label="All backbone")
+    _axes[0, 0].hist(ca_vq_rmse_arr, bins=30, alpha=0.6, label="CA only")
+    _axes[0, 0].set_xlabel("RMSE (Å)")
+    _axes[0, 0].set_ylabel("Count")
+    _axes[0, 0].set_title("VQ 3D RMSE distribution")
+    _axes[0, 0].legend(fontsize=8)
 
     # RMSE vs pocket size
     _axes[0, 1].scatter(n_res_arr, vq_rmse_arr, s=10, alpha=0.5, label="VQ")
-    _axes[0, 1].scatter(n_res_arr, cont_rmse_arr, s=10, alpha=0.5, label="Continuous")
     _axes[0, 1].set_xlabel("Pocket size (# residues)")
     _axes[0, 1].set_ylabel("3D RMSE (Å)")
     _axes[0, 1].set_title("RMSE vs pocket size")
@@ -679,19 +643,16 @@ def _(
 
     # RMSE vs pocket spatial extent
     _axes[1, 0].scatter(extent_arr, vq_rmse_arr, s=10, alpha=0.5, label="VQ")
-    _axes[1, 0].scatter(extent_arr, cont_rmse_arr, s=10, alpha=0.5, label="Continuous")
     _axes[1, 0].set_xlabel("Pocket spatial extent (Å)")
     _axes[1, 0].set_ylabel("3D RMSE (Å)")
     _axes[1, 0].set_title("RMSE vs pocket spatial extent")
     _axes[1, 0].legend(fontsize=8)
 
-    # Histogram: VQ RMSE breakdown
-    _axes[1, 1].hist(vq_rmse_arr, bins=30, alpha=0.6, label="All backbone")
-    _axes[1, 1].hist(ca_vq_rmse_arr, bins=30, alpha=0.6, label="CA only")
-    _axes[1, 1].set_xlabel("RMSE (Å)")
-    _axes[1, 1].set_ylabel("Count")
-    _axes[1, 1].set_title("VQ 3D RMSE: all backbone vs CA only")
-    _axes[1, 1].legend(fontsize=8)
+    # CA RMSE vs pocket spatial extent
+    _axes[1, 1].scatter(extent_arr, ca_vq_rmse_arr, s=10, alpha=0.5)
+    _axes[1, 1].set_xlabel("Pocket spatial extent (Å)")
+    _axes[1, 1].set_ylabel("CA-only RMSE (Å)")
+    _axes[1, 1].set_title("CA-only RMSE vs pocket spatial extent")
 
     _fig.tight_layout()
 
@@ -700,13 +661,7 @@ def _(
         f"VQ RMSE         — mean: {vq_rmse_arr.mean():.3f}, median: {np.median(vq_rmse_arr):.3f}"
     )
     print(
-        f"Continuous RMSE — mean: {cont_rmse_arr.mean():.3f}, median: {np.median(cont_rmse_arr):.3f}"
-    )
-    print(
         f"CA-only VQ RMSE — mean: {ca_vq_rmse_arr.mean():.3f}, median: {np.median(ca_vq_rmse_arr):.3f}"
-    )
-    print(
-        f"Ratio VQ/Cont   — mean: {(vq_rmse_arr / np.clip(cont_rmse_arr, 1e-6, None)).mean():.2f}"
     )
     print(
         f"Corr(pocket_size, VQ RMSE): {np.corrcoef(n_res_arr, vq_rmse_arr)[0, 1]:.4f}"
@@ -740,7 +695,7 @@ def _(
     F: types.ModuleType,
     np: types.ModuleType,
     plt: types.ModuleType,
-    protein_vqvae: ProteinStructureVQVAE,
+    protein_vqvae: TransformerVQVAE,
     z_all: Tensor,
 ):
     # Codebook vectors (L2-normalized)
@@ -861,29 +816,23 @@ def _(
     protein_test: Tensor,
 ):
     dim_labels_full = [
-        "CA_x",
-        "CA_y",
-        "CA_z",
-        "N-CA_x",
-        "N-CA_y",
-        "N-CA_z",
-        "C-CA_x",
-        "C-CA_y",
-        "C-CA_z",
+        "N_d", "N_θ", "N_sin", "N_cos",
+        "CA_d", "CA_θ", "CA_sin", "CA_cos",
+        "C_d", "C_θ", "C_sin", "C_cos",
     ]
 
     _test_np = protein_test.cpu().numpy()  # normalized
     orig_np = orig  # original scale
 
-    _fig, _axes = plt.subplots(3, 3, figsize=(14, 12))
+    _fig, _axes = plt.subplots(3, 4, figsize=(18, 12))
 
-    for _i in range(9):
-        ax = _axes[_i // 3, _i % 3]
+    for _i in range(12):
+        ax = _axes[_i // 4, _i % 4]
         # Original scale distribution
         vals = orig_np[:, _i]
         ax.hist(vals, bins=100, edgecolor="none", alpha=0.7, density=True)
         ax.set_title(f"{dim_labels_full[_i]} (orig scale)")
-        ax.set_xlabel("Value (Å)")
+        ax.set_xlabel("Value")
         ax.set_ylabel("Density")
         stats_text = (
             f"μ={vals.mean():.2f} σ={vals.std():.2f}\n"
@@ -950,78 +899,48 @@ def _(
     np: types.ModuleType,
     plt: types.ModuleType,
     protein_test: Tensor,
-    cont_recon: Tensor,
     vq_recon: Tensor,
 ):
     dim_labels_norm = [
-        "CA_x",
-        "CA_y",
-        "CA_z",
-        "N-CA_x",
-        "N-CA_y",
-        "N-CA_z",
-        "C-CA_x",
-        "C-CA_y",
-        "C-CA_z",
+        "N_d", "N_θ", "N_sin", "N_cos",
+        "CA_d", "CA_θ", "CA_sin", "CA_cos",
+        "C_d", "C_θ", "C_sin", "C_cos",
     ]
 
     _test_np = protein_test.cpu().numpy()
-    _cont_np = cont_recon.cpu().numpy()
     _vq_np = vq_recon.cpu().numpy()
 
-    cont_per_dim_mse = np.mean((_test_np - _cont_np) ** 2, axis=0)
     vq_per_dim_mse = np.mean((_test_np - _vq_np) ** 2, axis=0)
-    quant_per_dim_mse = (
-        vq_per_dim_mse - cont_per_dim_mse
-    )  # quantization-only contribution
 
     _fig, _axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    x = np.arange(9)
-    w = 0.35
-    _axes[0].bar(
-        x - w / 2,
-        cont_per_dim_mse,
-        w,
-        label="Continuous (encoder capacity)",
-        color="#3498db",
-    )
-    _axes[0].bar(
-        x + w / 2,
-        vq_per_dim_mse,
-        w,
-        label="VQ (capacity + quantization)",
-        color="#e74c3c",
-    )
+    x = np.arange(12)
+    colors = ["#e74c3c"] * 4 + ["#3498db"] * 4 + ["#2ecc71"] * 4
+    _axes[0].bar(x, vq_per_dim_mse, color=colors)
     _axes[0].set_xticks(x, dim_labels_norm, rotation=45, ha="right", fontsize=8)
     _axes[0].set_ylabel("MSE (normalized)")
-    _axes[0].set_title("Per-dim MSE: Continuous vs VQ (normalized space)")
-    _axes[0].legend(fontsize=8)
+    _axes[0].set_title("Per-dim VQ MSE (normalized space)")
 
-    # Stacked: encoder error + quantization error
-    _axes[1].bar(x, cont_per_dim_mse, label="Encoder capacity error", color="#3498db")
+    # Group by atom type
+    group_mse = [
+        vq_per_dim_mse[0:4].mean(),
+        vq_per_dim_mse[4:8].mean(),
+        vq_per_dim_mse[8:12].mean(),
+    ]
     _axes[1].bar(
-        x,
-        np.maximum(quant_per_dim_mse, 0),
-        bottom=cont_per_dim_mse,
-        label="Quantization error",
-        color="#e74c3c",
-        alpha=0.7,
+        range(3), group_mse,
+        color=["#e74c3c", "#3498db", "#2ecc71"],
     )
-    _axes[1].set_xticks(x, dim_labels_norm, rotation=45, ha="right", fontsize=8)
-    _axes[1].set_ylabel("MSE (normalized)")
-    _axes[1].set_title("Error decomposition: encoder capacity + quantization")
-    _axes[1].legend(fontsize=8)
+    _axes[1].set_xticks(range(3), ["N atom", "CA atom", "C atom"])
+    _axes[1].set_ylabel("Mean MSE (normalized)")
+    _axes[1].set_title("Per-atom-type mean MSE")
 
     _fig.tight_layout()
 
     print("=== Per-dim MSE (normalized space) ===")
-    print(f"{'Dim':<10} {'Continuous':>12} {'VQ':>12} {'Quant-only':>12}")
+    print(f"{'Dim':<10} {'VQ MSE':>12}")
     for _i, _label in enumerate(dim_labels_norm):
-        print(
-            f"{_label:<10} {cont_per_dim_mse[_i]:12.6f} {vq_per_dim_mse[_i]:12.6f} "
-            f"{quant_per_dim_mse[_i]:12.6f}"
-        )
+        print(f"{_label:<10} {vq_per_dim_mse[_i]:12.6f}")
     _fig
     return
 

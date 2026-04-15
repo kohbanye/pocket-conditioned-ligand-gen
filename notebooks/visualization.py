@@ -18,8 +18,7 @@ if TYPE_CHECKING:
     )
     from src.model.vqvae_module import VQVAEModule as VQVAEModuleType
     from src.tokenizers.codebook import EMACodebook
-    from src.tokenizers.ligand import LigandVQVAE
-    from src.tokenizers.protein import ProteinStructureVQVAE
+    from src.tokenizers.vqvae import TransformerVQVAE
 
 import marimo
 
@@ -154,15 +153,15 @@ def _(
 @app.cell
 def _(
     ligand_test_molecules: list[Tensor],
-    ligand_vqvae: LigandVQVAE,
+    ligand_vqvae: TransformerVQVAE,
     protein_test: Tensor,
-    protein_vqvae: ProteinStructureVQVAE,
+    protein_vqvae: TransformerVQVAE,
     torch: types.ModuleType,
 ):
     # Run inference on test set
     @torch.no_grad()
     def run_vqvae_protein(
-        model: "ProteinStructureVQVAE", data: "Tensor", batch_size: int = 4096
+        model: "TransformerVQVAE", data: "Tensor", batch_size: int = 4096
     ):
         """Run protein VQ-VAE on flat residue data."""
         all_recon, all_indices, all_z = [], [], []
@@ -177,7 +176,7 @@ def _(
         return torch.cat(all_recon), torch.cat(all_indices), torch.cat(all_z)
 
     @torch.no_grad()
-    def run_vqvae_ligand(model: "LigandVQVAE", molecules: "list[Tensor]"):
+    def run_vqvae_ligand(model: "TransformerVQVAE", molecules: "list[Tensor]"):
         """Run ligand VQ-VAE per-molecule with transformer context."""
         all_recon, all_indices, all_z = [], [], []
         for mol in molecules:
@@ -573,24 +572,28 @@ def _(mo: types.ModuleType):
 @app.cell
 def _(
     device: torch.device,
-    ligand_vqvae: LigandVQVAE,
+    ligand_vqvae: TransformerVQVAE,
     norm_stats: dict[str, Tensor],
     np: types.ModuleType,
     plt: types.ModuleType,
     project_root: Path,
-    protein_vqvae: ProteinStructureVQVAE,
+    protein_vqvae: TransformerVQVAE,
     torch: types.ModuleType,
 ):
     from src.config import PocketExtractionConfig
     from src.data.descriptors import _parse_types_file
     from src.tokenizers.ligand import LigandDescriptor, parse_sdf
-    from src.tokenizers.protein import PocketDescriptor, extract_pocket
+    from src.tokenizers.protein import (
+        BackboneZMatrixDescriptor,
+        _compute_canonical_frame,
+        extract_pocket,
+    )
 
     pocket_config = PocketExtractionConfig()
-    protein_desc_calc = PocketDescriptor()
+    protein_desc_calc = BackboneZMatrixDescriptor()
     ligand_desc_calc = LigandDescriptor()
     types_file = project_root / "data" / "types" / "cdonly_it2_tt_v1.3_0_test0.types"
-    pairs = _parse_types_file(types_file)
+    entries = _parse_types_file(types_file)
     crossdocked_dir = project_root / "data" / "CrossDocked2020"
     prot_mean = norm_stats["protein_mean"].to(device)
     prot_std = norm_stats["protein_std"].to(device)
@@ -599,7 +602,7 @@ def _(
     N_SAMPLES = 200
     rng = np.random.default_rng(42)
     sample_indices = rng.choice(
-        len(pairs), size=min(N_SAMPLES * 5, len(pairs)), replace=False
+        len(entries), size=min(N_SAMPLES * 5, len(entries)), replace=False
     )
     prot_rmse_list = []
     lig_rmse_list = []
@@ -607,7 +610,7 @@ def _(
     for idx in sample_indices:
         if n_done >= N_SAMPLES:
             break
-        rec_rel, lig_rel = pairs[idx]
+        rec_rel, lig_rel, _pose_idx = entries[idx]
         rec_path = crossdocked_dir / rec_rel
         lig_path = crossdocked_dir / lig_rel
         if not rec_path.exists() or not lig_path.exists():
@@ -624,16 +627,20 @@ def _(
             pocket_result = extract_pocket(rec_path, lig_coords_orig, pocket_config)
             if pocket_result is None:
                 continue
-            backbone_coords_orig, _seq = pocket_result
-            prot_desc, prot_meta = protein_desc_calc.compute(backbone_coords_orig)
-            pocket_frame = (prot_meta["centroid"], prot_meta["rotation"])
+            backbone_coords_orig, _seq, residue_ids = pocket_result
+            ca_coords = backbone_coords_orig[:, 1].astype(np.float64)
+            centroid, rotation = _compute_canonical_frame(ca_coords)
+            pocket_frame = (centroid, rotation)
+            prot_desc, prot_meta = protein_desc_calc.compute(
+                backbone_coords_orig, residue_ids, pocket_frame=pocket_frame,
+            )
             prot_t = torch.from_numpy(prot_desc).to(device)
             prot_norm = (prot_t - prot_mean) / prot_std
             with torch.no_grad():
                 pi = protein_vqvae.encode(prot_norm)
                 prot_recon_norm = protein_vqvae.decode(pi)
             prot_recon_desc = (prot_recon_norm * prot_std + prot_mean).cpu().numpy()
-            backbone_recon = PocketDescriptor.descriptor_to_backbone_coords(
+            backbone_recon = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
                 prot_recon_desc, prot_meta
             )
             prot_rmse = np.sqrt(np.mean((backbone_coords_orig - backbone_recon) ** 2))
@@ -726,11 +733,11 @@ def _(mo: types.ModuleType):
 def _(
     config: VQVAETrainingConfigType,
     lig_z: Tensor,
-    ligand_vqvae: LigandVQVAE,
+    ligand_vqvae: TransformerVQVAE,
     np: types.ModuleType,
     plt: types.ModuleType,
     prot_z: Tensor,
-    protein_vqvae: ProteinStructureVQVAE,
+    protein_vqvae: TransformerVQVAE,
 ):
     import torch.nn.functional as F
     from sklearn.manifold import TSNE
@@ -802,11 +809,11 @@ def _(
     config: VQVAETrainingConfigType,
     lig_indices: Tensor,
     lig_metrics: dict[str, Any],
-    ligand_vqvae: LigandVQVAE,
+    ligand_vqvae: TransformerVQVAE,
     np: types.ModuleType,
     prot_indices: Tensor,
     prot_metrics: dict[str, Any],
-    protein_vqvae: ProteinStructureVQVAE,
+    protein_vqvae: TransformerVQVAE,
 ):
     import pandas as pd
 

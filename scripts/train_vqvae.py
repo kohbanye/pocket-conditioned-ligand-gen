@@ -4,6 +4,7 @@ import argparse
 import logging
 
 import lightning as L
+import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
@@ -18,8 +19,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-pairs", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
-    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--mol-batch-size", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument(
+        "--precision",
+        type=str,
+        default=None,
+        help="Training precision (bf16-mixed, 16-mixed, 32)",
+    )
     parser.add_argument(
         "--from-hub",
         action="store_true",
@@ -42,10 +50,14 @@ def main() -> None:
         data_config.max_pairs = args.max_pairs
     if args.max_epochs is not None:
         config.max_epochs = args.max_epochs
-    if args.batch_size is not None:
-        config.batch_size = args.batch_size
+    if args.mol_batch_size is not None:
+        config.mol_batch_size = args.mol_batch_size
     if args.num_workers is not None:
         config.num_workers = args.num_workers
+    if args.lr is not None:
+        config.learning_rate = args.lr
+    if args.precision is not None:
+        config.precision = args.precision
 
     hub_config = None
     if args.from_hub:
@@ -60,12 +72,16 @@ def main() -> None:
         hub_dm = HubCrossDockedDataModule(hub_config)
         hub_dm.prepare_data()
 
+    # Enable TF32 for A100/H100 (free ~3x speedup for float32 matmuls)
+    torch.set_float32_matmul_precision("high")
+
     dm = ComplexDescriptorDataModule(config, data_config, hub_config=hub_config)
     module = VQVAEModule(config)
 
     trainer = L.Trainer(
         max_epochs=config.max_epochs,
         accelerator="auto",
+        precision=config.precision,
         logger=WandbLogger(project="pocket-ligand-vqvae"),
         callbacks=[
             ModelCheckpoint(
