@@ -7,12 +7,15 @@ cache, and provides pair access via a Parquet manifest.
 from __future__ import annotations
 
 import logging
+import os
 import tarfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import TYPE_CHECKING, Never
 
 import lightning as L
 import pyarrow.parquet as pq
+from tqdm import tqdm
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -23,6 +26,21 @@ logger = logging.getLogger(__name__)
 
 # Sentinel file written after all shards have been extracted.
 _EXTRACTION_DONE = ".extraction_done"
+
+# Default number of parallel workers for extraction.
+_DEFAULT_EXTRACT_WORKERS = min(32, os.cpu_count() or 1)
+
+
+def _extract_tar(args: tuple[Path, Path, str]) -> int:
+    """Extract a single tar archive to *dest_dir* (runs in a worker process).
+
+    Returns the number of extracted members.
+    """
+    shard_path, dest_dir, mode = args
+    with tarfile.open(shard_path, mode) as tar:
+        members = tar.getmembers()
+        tar.extractall(dest_dir, members=members, filter="data")
+    return len(members)
 
 
 class HubCrossDockedDataModule(L.LightningDataModule):
@@ -74,9 +92,16 @@ class HubCrossDockedDataModule(L.LightningDataModule):
         receptor_archives = sorted((repo_dir / "receptors").glob("shard-*.tar.gz"))
         logger.info("Extracting %d receptor archive(s)", len(receptor_archives))
 
-        for archive in receptor_archives:
-            with tarfile.open(archive, "r:gz") as tar:
-                tar.extractall(self.receptors_dir, filter="data")
+        args = [(a, self.receptors_dir, "r:gz") for a in receptor_archives]
+        workers = min(_DEFAULT_EXTRACT_WORKERS, len(receptor_archives))
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_extract_tar, a) for a in args]
+            pbar = tqdm(total=len(futures), desc="Extracting receptors", unit="shard")
+            with pbar:
+                for fut in as_completed(futures):
+                    n = fut.result()
+                    pbar.set_postfix(last_files=n)
+                    pbar.update(1)
 
         done_marker.touch()
         logger.info("Receptors extracted to %s", self.receptors_dir)
@@ -92,9 +117,16 @@ class HubCrossDockedDataModule(L.LightningDataModule):
         ligand_shards = sorted((repo_dir / "ligands").glob("*.tar"))
         logger.info("Extracting %d ligand shard(s)", len(ligand_shards))
 
-        for shard in ligand_shards:
-            with tarfile.open(shard, "r") as tar:
-                tar.extractall(self.ligands_dir, filter="data")
+        args = [(s, self.ligands_dir, "r") for s in ligand_shards]
+        workers = min(_DEFAULT_EXTRACT_WORKERS, len(ligand_shards))
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_extract_tar, a) for a in args]
+            pbar = tqdm(total=len(futures), desc="Extracting ligands", unit="shard")
+            with pbar:
+                for fut in as_completed(futures):
+                    n = fut.result()
+                    pbar.set_postfix(last_files=n)
+                    pbar.update(1)
 
         done_marker.touch()
         logger.info("Ligands extracted to %s", self.ligands_dir)
