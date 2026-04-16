@@ -393,7 +393,7 @@ def _write_readme(output_dir: Path, num_pairs: int, num_receptors: int) -> None:
     readme = output_dir / "README.md"
     readme.write_text(f"""\
 ---
-license: cc-by-4.0
+license: cc0-1.0
 task_categories:
   - other
 tags:
@@ -405,7 +405,7 @@ size_categories:
   - 1M<n<10M
 ---
 
-# CrossDocked2020 — Raw Structures for Pocket-Conditioned Ligand Generation
+# CrossDocked2020
 
 Pre-processed CrossDocked2020 dataset containing raw receptor PDB and ligand
 SDF.gz files, organized for efficient loading.
@@ -448,7 +448,9 @@ Each shard is a tar file containing pairs of files per sample:
 
 ## Original Source
 
-[CrossDocked2020](http://bits.csb.pitt.edu/files/crossdock2020/) — Francoeur et al.
+Paul G. Francoeur, Tomohide Masuda, Jocelyn Sunseri, Andrew Jia,
+Richard B. Iovanisci, Ian Snyder, David R. Koes.
+*J. Chem. Inf. Model.* 2020, 60(9), p.4200-4215.
 """)
     logger.info("Wrote %s", readme)
 
