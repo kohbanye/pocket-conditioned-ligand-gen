@@ -25,7 +25,6 @@ from src.tokenizers.ligand import LigandDescriptor, parse_sdf
 from src.tokenizers.protein import (
     BackboneZMatrixDescriptor,
     _compute_canonical_frame,
-    extract_pocket,
     extract_pocket_from_candidates,
     precompute_pocket_candidates,
 )
@@ -39,6 +38,12 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
+
+# Shard-based caching constants.
+_DEFAULT_SHARD_SIZE = 50_000
+_SHARD_DIR_NAME = "shards"
+_SHARD_METADATA_FILE = "shard_metadata.pt"
+_NORMALIZATION_STATS_FILE = "normalization_stats.pt"
 
 # Per-worker state for multiprocessing (set by _worker_init).
 _worker_protein_desc: BackboneZMatrixDescriptor | None = None
@@ -170,63 +175,6 @@ def _load_pairs_from_manifest(
     return pairs, cache_dir
 
 
-def _get_ligand_coords_from_sdf(
-    sdf_path: Path,
-    pose_idx: int = 0,
-) -> np.ndarray | None:
-    """Extract heavy-atom coordinates from an SDF file for pocket extraction."""
-    molecules = parse_sdf(sdf_path)
-    if pose_idx >= len(molecules):
-        return None
-    mol = molecules[pose_idx]
-    heavy_atoms = [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"]
-    if not heavy_atoms:
-        return None
-    return np.array(heavy_atoms, dtype=np.float32)
-
-
-def _process_complex(  # noqa: PLR0913
-    rec_path: Path,
-    lig_path: Path,
-    pose_idx: int,
-    protein_desc: BackboneZMatrixDescriptor,
-    ligand_desc: LigandDescriptor,
-    pocket_config: PocketExtractionConfig,
-) -> tuple[np.ndarray, np.ndarray, list[str]] | None:
-    """Process one complex pose and return (protein_desc, ligand_desc, elements)."""
-    lig_coords = _get_ligand_coords_from_sdf(lig_path, pose_idx=pose_idx)
-    if lig_coords is None:
-        return None
-
-    pocket = extract_pocket(rec_path, lig_coords, pocket_config)
-    if pocket is None:
-        return None
-    backbone_coords, _pocket_seq, residue_ids = pocket
-
-    # Compute canonical frame from CA coords
-    ca_coords = backbone_coords[:, 1].astype(np.float64)
-    centroid, rotation = _compute_canonical_frame(ca_coords)
-    pocket_frame = (centroid, rotation)
-
-    prot_desc, _prot_metadata = protein_desc.compute(
-        backbone_coords, residue_ids, pocket_frame=pocket_frame,
-    )
-
-    molecules = parse_sdf(lig_path)
-    if pose_idx >= len(molecules):
-        return None
-    mol = molecules[pose_idx]
-    lig_desc_arr, elements, _lig_metadata = ligand_desc.compute(
-        mol["atoms"],
-        mol["bonds"],
-        pocket_frame=pocket_frame,
-    )
-    if len(lig_desc_arr) == 0:
-        return None
-
-    return prot_desc, lig_desc_arr, elements
-
-
 def _worker_init(pocket_config_dict: dict) -> None:
     """Initialize per-worker descriptor calculators (called once per process)."""
     global _worker_protein_desc, _worker_ligand_desc, _worker_pocket_config  # noqa: PLW0603
@@ -236,45 +184,6 @@ def _worker_init(pocket_config_dict: dict) -> None:
     _worker_protein_desc = BackboneZMatrixDescriptor()
     _worker_ligand_desc = LigandDescriptor()
     _worker_pocket_config = PocketExtractionConfig(**pocket_config_dict)
-
-
-def _worker_process_one(
-    args: tuple[str, str, int, str],
-) -> dict[str, np.ndarray | list[str]] | None:
-    """Process a single complex pose in a worker process.
-
-    *args* is ``(rec_path, lig_path, pose_idx, base_dir)``.  When
-    *base_dir* is empty, the paths are treated as absolute.
-    """
-    rec_str, lig_str, pose_idx, base_str = args
-    if base_str:
-        rec_full = Path(base_str) / rec_str
-        lig_full = Path(base_str) / lig_str
-    else:
-        rec_full = Path(rec_str)
-        lig_full = Path(lig_str)
-
-    if not rec_full.exists() or not lig_full.exists():
-        return None
-
-    try:
-        result = _process_complex(
-            rec_full,
-            lig_full,
-            pose_idx,
-            _worker_protein_desc,  # type: ignore[arg-type]
-            _worker_ligand_desc,  # type: ignore[arg-type]
-            _worker_pocket_config,  # type: ignore[arg-type]
-        )
-    except Exception:
-        logger.exception("Error processing %s / %s pose %d", rec_str, lig_str, pose_idx)
-        return None
-
-    if result is None:
-        return None
-
-    prot, lig, elems = result
-    return {"protein": prot, "ligand": lig, "elements": elems}
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +226,9 @@ def _process_pose(
     lig_coords = np.array(heavy, dtype=np.float32)
 
     pocket = extract_pocket_from_candidates(
-        precomputed, lig_coords, pocket_config,  # type: ignore[arg-type]
+        precomputed,
+        lig_coords,
+        pocket_config,  # type: ignore[arg-type]
     )
     if pocket is None:
         return None
@@ -328,7 +239,9 @@ def _process_pose(
     pocket_frame = (centroid, rotation)
 
     prot_desc_arr, _prot_meta = protein_desc.compute(
-        backbone_coords, residue_ids, pocket_frame=pocket_frame,
+        backbone_coords,
+        residue_ids,
+        pocket_frame=pocket_frame,
     )
     lig_desc_arr, elements, _lig_meta = ligand_desc.compute(
         mol["atoms"],
@@ -388,7 +301,10 @@ def _worker_process_receptor_group(
                 )
             except Exception:
                 logger.exception(
-                    "Error: %s / %s pose %d", rec_path, sdf_path, pose_idx,
+                    "Error: %s / %s pose %d",
+                    rec_path,
+                    sdf_path,
+                    pose_idx,
                 )
                 continue
             if result is not None:
@@ -397,21 +313,89 @@ def _worker_process_receptor_group(
     return results, total
 
 
-def _process_entries_from_abs(
+def _write_shard(
+    shard_dir: Path,
+    shard_idx: int,
+    data: list[dict[str, np.ndarray | list[str]]],
+) -> None:
+    """Write one shard file to disk."""
+    torch.save(data, shard_dir / f"shard_{shard_idx:04d}.pt")
+
+
+def _collect_grouped_results_sharded(
+    batch_results: Iterable[tuple[list[dict[str, np.ndarray | list[str]]], int]],
+    total_entries: int,
+    shard_dir: Path,
+    shard_size: int = _DEFAULT_SHARD_SIZE,
+) -> tuple[int, list[int], set[str]]:
+    """Collect results from grouped processing, writing shards incrementally.
+
+    Returns ``(total_count, shard_counts, unique_elements)`` where
+    *shard_counts* is the number of complexes in each shard file.
+    """
+    buffer: list[dict[str, np.ndarray | list[str]]] = []
+    shard_idx = 0
+    shard_counts: list[int] = []
+    total_count = 0
+    unique_elements: set[str] = set()
+
+    num_done = 0
+    num_skipped = 0
+
+    for group_results, group_total in batch_results:
+        buffer.extend(group_results)
+        group_skipped = group_total - len(group_results)
+        num_done += group_total
+        num_skipped += group_skipped
+
+        if num_done % 10000 < group_total or num_done == total_entries:
+            logger.info(
+                "Progress: %d / %d done (%d ok, %d skipped)",
+                num_done,
+                total_entries,
+                total_count + len(buffer),
+                num_skipped,
+            )
+
+        # Flush full shards
+        while len(buffer) >= shard_size:
+            shard_data = buffer[:shard_size]
+            buffer = buffer[shard_size:]
+            for cplx in shard_data:
+                unique_elements.update(cplx["elements"])  # type: ignore[arg-type]
+            _write_shard(shard_dir, shard_idx, shard_data)
+            shard_counts.append(len(shard_data))
+            total_count += len(shard_data)
+            shard_idx += 1
+            logger.info(
+                "Wrote shard %04d (%d complexes)",
+                shard_idx - 1,
+                shard_counts[-1],
+            )
+
+    # Flush remaining buffer
+    if buffer:
+        for cplx in buffer:
+            unique_elements.update(cplx["elements"])  # type: ignore[arg-type]
+        _write_shard(shard_dir, shard_idx, buffer)
+        shard_counts.append(len(buffer))
+        total_count += len(buffer)
+        logger.info("Wrote shard %04d (%d complexes)", shard_idx, shard_counts[-1])
+
+    logger.info("Done: %d processed, %d skipped", total_count, num_skipped)
+    return total_count, shard_counts, unique_elements
+
+
+def _process_entries_sharded(
     abs_entries: list[tuple[str, str, int]],
     pocket_config: PocketExtractionConfig,
+    shard_dir: Path,
     num_workers: int = 0,
-) -> list[dict[str, np.ndarray | list[str]]]:
-    """Process (receptor, ligand, pose_idx) entries into complex dicts.
+    shard_size: int = _DEFAULT_SHARD_SIZE,
+) -> tuple[int, list[int], set[str]]:
+    """Process entries and write shards incrementally.
 
-    Entries are grouped by receptor PDB so each file is parsed only once.
-    When *num_workers* > 0, processing runs in parallel using a
-    ``multiprocessing.Pool``.
-
-    Returns a list of dicts, each containing raw (un-normalized) descriptors:
-      - ``"protein"``: ``ndarray`` of shape ``(n_residues, 12)``
-      - ``"ligand"``: ``ndarray`` of shape ``(n_atoms, 4)``
-      - ``"elements"``: ``list[str]`` of per-atom element symbols
+    Returns ``(total_count, shard_counts, unique_elements)``.
     """
     from dataclasses import asdict  # noqa: PLC0415
 
@@ -438,83 +422,77 @@ def _process_entries_from_abs(
                 receptor_groups,
                 chunksize=4,
             )
-            return _collect_grouped_results(batch_results, total_entries)
+            return _collect_grouped_results_sharded(
+                batch_results,
+                total_entries,
+                shard_dir,
+                shard_size,
+            )
 
     _worker_init(pocket_config_dict)
-    batch_iter = (
-        _worker_process_receptor_group(group) for group in receptor_groups
+    batch_iter = (_worker_process_receptor_group(group) for group in receptor_groups)
+    return _collect_grouped_results_sharded(
+        batch_iter,
+        total_entries,
+        shard_dir,
+        shard_size,
     )
-    return _collect_grouped_results(batch_iter, total_entries)
 
 
-def _collect_grouped_results(
-    batch_results: Iterable[tuple[list[dict[str, np.ndarray | list[str]]], int]],
-    total_entries: int,
-) -> list[dict[str, np.ndarray | list[str]]]:
-    """Collect results from grouped receptor processing."""
-    complexes: list[dict[str, np.ndarray | list[str]]] = []
-    num_done = 0
-    num_skipped = 0
-
-    for group_results, group_total in batch_results:
-        complexes.extend(group_results)
-        group_skipped = group_total - len(group_results)
-        num_done += group_total
-        num_skipped += group_skipped
-
-        if num_done % 10000 < group_total or num_done == total_entries:
-            logger.info(
-                "Progress: %d / %d done (%d ok, %d skipped)",
-                num_done,
-                total_entries,
-                len(complexes),
-                num_skipped,
-            )
-
-    logger.info("Done: %d processed, %d skipped", len(complexes), num_skipped)
-    return complexes
-
-
-def _collect_results(
-    results: Iterable[dict[str, np.ndarray | list[str]] | None],
-    total: int,
-) -> list[dict[str, np.ndarray | list[str]]]:
-    """Collect results from an iterator, logging progress."""
-    complexes: list[dict[str, np.ndarray | list[str]]] = []
-    num_skipped = 0
-
-    for num_done, result in enumerate(results, 1):
-        if result is None:
-            num_skipped += 1
-        else:
-            complexes.append(result)
-
-        if num_done % 1000 == 0:
-            logger.info(
-                "Progress: %d / %d done (%d ok, %d skipped)",
-                num_done,
-                total,
-                len(complexes),
-                num_skipped,
-            )
-
-    logger.info("Done: %d processed, %d skipped", len(complexes), num_skipped)
-    return complexes
-
-
-def _save_complexes(
+def _save_shard_metadata(
     cache_dir: Path,
-    complexes: list[dict[str, np.ndarray | list[str]]],
+    total_count: int,
+    shard_counts: list[int],
+    unique_elements: set[str],
 ) -> None:
-    """Save per-complex descriptors and element vocabulary to cache."""
-    torch.save(complexes, cache_dir / "complexes.pt")
-
-    unique_elements = sorted(
-        {e for c in complexes for e in c["elements"]}  # type: ignore[union-attr]
+    """Save shard metadata and element vocabulary."""
+    metadata = {
+        "total_count": total_count,
+        "shard_counts": shard_counts,
+    }
+    torch.save(metadata, cache_dir / _SHARD_METADATA_FILE)
+    torch.save(sorted(unique_elements), cache_dir / "ligand_elements.pt")
+    logger.info(
+        "Cached %d complexes in %d shards",
+        total_count,
+        len(shard_counts),
     )
-    torch.save(unique_elements, cache_dir / "ligand_elements.pt")
 
-    logger.info("Cached %d complexes", len(complexes))
+
+def _iter_shards(
+    shard_dir: Path,
+    shard_counts: list[int],
+) -> Iterable[tuple[int, list[dict[str, np.ndarray | list[str]]]]]:
+    """Yield ``(global_offset, shard_data)`` for each shard file."""
+    global_offset = 0
+    for shard_idx, count in enumerate(shard_counts):
+        shard_path = shard_dir / f"shard_{shard_idx:04d}.pt"
+        shard_data: list[dict[str, np.ndarray | list[str]]] = torch.load(
+            shard_path,
+            weights_only=False,
+        )
+        yield global_offset, shard_data
+        del shard_data
+        global_offset += count
+
+
+def _welford_update_batch(
+    count: int,
+    mean: np.ndarray,
+    m2: np.ndarray,
+    batch: np.ndarray,
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """Merge a batch of observations into Welford accumulators (Chan's algorithm)."""
+    batch_count = len(batch)
+    if batch_count == 0:
+        return count, mean, m2
+    batch_mean = batch.mean(axis=0)
+    batch_var = batch.var(axis=0, ddof=0)
+    new_count = count + batch_count
+    delta = batch_mean - mean
+    new_mean = mean + delta * (batch_count / new_count)
+    new_m2 = m2 + batch_var * batch_count + delta**2 * (count * batch_count / new_count)
+    return new_count, new_mean, new_m2
 
 
 class MoleculeDataset(Dataset[Tensor]):
@@ -617,11 +595,15 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
     def prepare_data(self) -> None:
         """Compute descriptors from CrossDocked2020 and cache to disk."""
-        if (self.cache_dir / "complexes.pt").exists():
+        if (self.cache_dir / _SHARD_METADATA_FILE).exists() or (
+            self.cache_dir / "complexes.pt"
+        ).exists():
             logger.info("Descriptor cache already exists at %s", self.cache_dir)
             return
 
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        shard_dir = self.cache_dir / _SHARD_DIR_NAME
+        shard_dir.mkdir(parents=True, exist_ok=True)
 
         if self.hub_config is not None:
             pairs, cache_dir = _load_pairs_from_manifest(
@@ -648,26 +630,36 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
         logger.info("Processing %d complex poses", len(abs_entries))
 
-        complexes = _process_entries_from_abs(
+        total_count, shard_counts, unique_elements = _process_entries_sharded(
             abs_entries,
             self.training_config.pocket,
+            shard_dir=shard_dir,
             num_workers=self.training_config.num_workers,
         )
 
-        if not complexes:
+        if total_count == 0:
             msg = "No descriptors computed -- check data paths"
             raise RuntimeError(msg)
 
-        _save_complexes(self.cache_dir, complexes)
+        _save_shard_metadata(self.cache_dir, total_count, shard_counts, unique_elements)
 
     def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
         """Load cached descriptors and split into train/val/test at complex level."""
+        if (self.cache_dir / _SHARD_METADATA_FILE).exists():
+            self._setup_from_shards()
+        elif (self.cache_dir / "complexes.pt").exists():
+            self._setup_from_monolithic()
+        else:
+            msg = f"No descriptor cache found at {self.cache_dir}"
+            raise FileNotFoundError(msg)
+
+    def _setup_from_monolithic(self) -> None:
+        """Load from legacy monolithic ``complexes.pt`` cache."""
         complexes: list[dict[str, np.ndarray | list[str]]] = torch.load(
             self.cache_dir / "complexes.pt",
             weights_only=False,
         )
 
-        # --- Complex-level split ---
         n = len(complexes)
         rng = torch.Generator().manual_seed(self.data_config.random_state)
         perm = torch.randperm(n, generator=rng).tolist()
@@ -686,7 +678,6 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             n,
         )
 
-        # --- Compute normalization from train split only ---
         train_protein = np.concatenate(
             [complexes[i]["protein"] for i in train_indices],
             axis=0,  # type: ignore[arg-type]
@@ -706,8 +697,8 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             "ligand_mean": torch.from_numpy(ligand_mean),
             "ligand_std": torch.from_numpy(ligand_std),
         }
+        torch.save(self.norm_stats, self.cache_dir / _NORMALIZATION_STATS_FILE)
 
-        # --- Normalize and build per-split lists ---
         self.protein_train, self.ligand_train = _split_and_normalize(
             complexes, train_indices, protein_mean, protein_std, ligand_mean, ligand_std
         )
@@ -718,17 +709,115 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             complexes, test_indices, protein_mean, protein_std, ligand_mean, ligand_std
         )
 
+        self._log_split_sizes()
+
+    def _setup_from_shards(self) -> None:
+        """Stream-load shards with two passes: stats then normalization."""
+        metadata: dict = torch.load(
+            self.cache_dir / _SHARD_METADATA_FILE,
+            weights_only=False,
+        )
+        n = metadata["total_count"]
+        shard_counts: list[int] = metadata["shard_counts"]
+        shard_dir = self.cache_dir / _SHARD_DIR_NAME
+
+        # --- Deterministic complex-level split ---
+        rng = torch.Generator().manual_seed(self.data_config.random_state)
+        perm = torch.randperm(n, generator=rng).tolist()
+
+        n_test = int(n * self.data_config.test_size)
+        n_val = int(n * self.data_config.val_size)
+        train_set = set(perm[n_test + n_val :])
+        val_set = set(perm[n_test : n_test + n_val])
+        test_set = set(perm[:n_test])
+
+        logger.info(
+            "Complex-level split: %d train, %d val, %d test (total %d)",
+            len(train_set),
+            len(val_set),
+            len(test_set),
+            n,
+        )
+
+        # --- Pass 1: Compute normalization stats from train split (Welford) ---
+        prot_count = 0
+        prot_mean = np.zeros(12, dtype=np.float64)
+        prot_m2 = np.zeros(12, dtype=np.float64)
+        lig_count = 0
+        lig_mean = np.zeros(4, dtype=np.float64)
+        lig_m2 = np.zeros(4, dtype=np.float64)
+
+        for global_offset, shard_data in _iter_shards(shard_dir, shard_counts):
+            for local_idx, cplx in enumerate(shard_data):
+                if (global_offset + local_idx) not in train_set:
+                    continue
+                prot_count, prot_mean, prot_m2 = _welford_update_batch(
+                    prot_count,
+                    prot_mean,
+                    prot_m2,
+                    cplx["protein"].astype(np.float64),  # type: ignore[union-attr]
+                )
+                lig_count, lig_mean, lig_m2 = _welford_update_batch(
+                    lig_count,
+                    lig_mean,
+                    lig_m2,
+                    cplx["ligand"].astype(np.float64),  # type: ignore[union-attr]
+                )
+
+        protein_mean = prot_mean.astype(np.float32)
+        protein_std = (np.sqrt(prot_m2 / prot_count) + 1e-8).astype(np.float32)
+        ligand_mean = lig_mean.astype(np.float32)
+        ligand_std = (np.sqrt(lig_m2 / lig_count) + 1e-8).astype(np.float32)
+
+        self.norm_stats = {
+            "protein_mean": torch.from_numpy(protein_mean),
+            "protein_std": torch.from_numpy(protein_std),
+            "ligand_mean": torch.from_numpy(ligand_mean),
+            "ligand_std": torch.from_numpy(ligand_std),
+        }
+        torch.save(self.norm_stats, self.cache_dir / _NORMALIZATION_STATS_FILE)
+        logger.info("Pass 1 done: normalization stats computed from train split")
+
+        # --- Pass 2: Normalize and build per-split tensor lists ---
+        self.protein_train, self.ligand_train = [], []
+        self.protein_val, self.ligand_val = [], []
+        self.protein_test, self.ligand_test = [], []
+
+        for global_offset, shard_data in _iter_shards(shard_dir, shard_counts):
+            for local_idx, cplx in enumerate(shard_data):
+                global_idx = global_offset + local_idx
+                prot_t = torch.from_numpy(
+                    (cplx["protein"] - protein_mean) / protein_std,  # type: ignore[operator]
+                ).float()
+                lig_t = torch.from_numpy(
+                    (cplx["ligand"] - ligand_mean) / ligand_std,  # type: ignore[operator]
+                ).float()
+
+                if global_idx in train_set:
+                    self.protein_train.append(prot_t)
+                    self.ligand_train.append(lig_t)
+                elif global_idx in val_set:
+                    self.protein_val.append(prot_t)
+                    self.ligand_val.append(lig_t)
+                else:
+                    self.protein_test.append(prot_t)
+                    self.ligand_test.append(lig_t)
+
+        logger.info("Pass 2 done: normalized tensors built")
+        self._log_split_sizes()
+
+    def _log_split_sizes(self) -> None:
         logger.info(
             "Protein pockets: %d train, %d val, %d test",
-            len(self.protein_train),
-            len(self.protein_val),
-            len(self.protein_test),
+            len(self.protein_train),  # type: ignore[arg-type]
+            len(self.protein_val),  # type: ignore[arg-type]
+            len(self.protein_test),  # type: ignore[arg-type]
         )
         logger.info(
             "Ligand molecules: %d train, %d val, %d test",
-            len(self.ligand_train),
-            len(self.ligand_val),
-            len(self.ligand_test),
+            len(self.ligand_train),  # type: ignore[arg-type]
+            len(self.ligand_val),  # type: ignore[arg-type]
+            len(self.ligand_test),  # type: ignore[arg-type]
         )
 
     def _build_loader(
