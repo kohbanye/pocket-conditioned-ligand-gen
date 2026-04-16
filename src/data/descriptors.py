@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
 from torch import Tensor
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from src.tokenizers.ligand import LigandDescriptor, parse_sdf
 from src.tokenizers.protein import (
@@ -533,6 +533,71 @@ def collate_molecules(batch: list[Tensor]) -> tuple[Tensor, Tensor]:
     return padded, mask
 
 
+class ShardedMoleculeDataset(IterableDataset[Tensor]):
+    """Lazily streams normalized descriptors from on-disk shards.
+
+    Each shard file is loaded once per epoch per worker, avoiding the need
+    to hold all data in RAM simultaneously.
+    """
+
+    def __init__(  # noqa: PLR0913
+        self,
+        shard_dir: Path,
+        shard_plan: list[tuple[int, list[int]]],
+        key: str,
+        mean: np.ndarray,
+        std: np.ndarray,
+        *,
+        shuffle: bool = False,
+    ) -> None:
+        super().__init__()
+        self.shard_dir = shard_dir
+        self.shard_plan = shard_plan
+        self.key = key
+        self.mean = mean
+        self.std = std
+        self.shuffle = shuffle
+        self.length = sum(len(indices) for _, indices in shard_plan)
+
+    def __len__(self) -> int:
+        """Total number of items (used by Lightning for progress bars)."""
+        return self.length
+
+    def __iter__(self):  # noqa: ANN204
+        import random as _random  # noqa: PLC0415
+
+        worker_info = torch.utils.data.get_worker_info()
+        plan = self.shard_plan
+
+        if worker_info is not None:
+            # Round-robin partition of shards across workers
+            plan = [
+                plan[i]
+                for i in range(len(plan))
+                if i % worker_info.num_workers == worker_info.id
+            ]
+
+        if self.shuffle:
+            rng = _random.Random()  # noqa: S311
+            plan = [(si, list(li)) for si, li in plan]
+            rng.shuffle(plan)
+            for _, li in plan:
+                rng.shuffle(li)
+
+        for shard_idx, local_indices in plan:
+            shard_path = self.shard_dir / f"shard_{shard_idx:04d}.pt"
+            shard_data: list[dict[str, np.ndarray]] = torch.load(
+                shard_path,
+                weights_only=False,
+            )
+            for local_idx in local_indices:
+                desc = shard_data[local_idx][self.key]
+                yield torch.from_numpy(
+                    (desc - self.mean) / self.std,
+                ).float()
+            del shard_data
+
+
 def _split_and_normalize(  # noqa: PLR0913
     complexes: list[dict[str, np.ndarray | list[str]]],
     indices: list[int],
@@ -592,6 +657,12 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         self.ligand_val: list[Tensor] | None = None
         self.ligand_test: list[Tensor] | None = None
         self.norm_stats: dict[str, Tensor] | None = None
+
+        # Sharded lazy-loading state (set by _setup_from_shards)
+        self._train_plan: list[tuple[int, list[int]]] | None = None
+        self._val_plan: list[tuple[int, list[int]]] | None = None
+        self._test_plan: list[tuple[int, list[int]]] | None = None
+        self._shard_dir: Path | None = None
 
     def prepare_data(self) -> None:
         """Compute descriptors from CrossDocked2020 and cache to disk."""
@@ -778,35 +849,45 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         torch.save(self.norm_stats, self.cache_dir / _NORMALIZATION_STATS_FILE)
         logger.info("Pass 1 done: normalization stats computed from train split")
 
-        # --- Pass 2: Normalize and build per-split tensor lists ---
-        self.protein_train, self.ligand_train = [], []
-        self.protein_val, self.ligand_val = [], []
-        self.protein_test, self.ligand_test = [], []
+        # --- Build per-split shard plans (no full data load needed) ---
+        from collections import defaultdict  # noqa: PLC0415
 
-        for global_offset, shard_data in _iter_shards(shard_dir, shard_counts):
-            for local_idx, cplx in enumerate(shard_data):
+        train_by_shard: dict[int, list[int]] = defaultdict(list)
+        val_by_shard: dict[int, list[int]] = defaultdict(list)
+        test_by_shard: dict[int, list[int]] = defaultdict(list)
+
+        global_offset = 0
+        for shard_idx, count in enumerate(shard_counts):
+            for local_idx in range(count):
                 global_idx = global_offset + local_idx
-                prot_t = torch.from_numpy(
-                    (cplx["protein"] - protein_mean) / protein_std,  # type: ignore[operator]
-                ).float()
-                lig_t = torch.from_numpy(
-                    (cplx["ligand"] - ligand_mean) / ligand_std,  # type: ignore[operator]
-                ).float()
-
                 if global_idx in train_set:
-                    self.protein_train.append(prot_t)
-                    self.ligand_train.append(lig_t)
+                    train_by_shard[shard_idx].append(local_idx)
                 elif global_idx in val_set:
-                    self.protein_val.append(prot_t)
-                    self.ligand_val.append(lig_t)
+                    val_by_shard[shard_idx].append(local_idx)
                 else:
-                    self.protein_test.append(prot_t)
-                    self.ligand_test.append(lig_t)
+                    test_by_shard[shard_idx].append(local_idx)
+            global_offset += count
 
-        logger.info("Pass 2 done: normalized tensors built")
+        self._shard_dir = shard_dir
+        self._train_plan = sorted(train_by_shard.items())
+        self._val_plan = sorted(val_by_shard.items())
+        self._test_plan = sorted(test_by_shard.items())
+
+        logger.info("Shard plans built (no full data load needed)")
         self._log_split_sizes()
 
     def _log_split_sizes(self) -> None:
+        if self._train_plan is not None:
+            n_train = sum(len(li) for _, li in self._train_plan)
+            n_val = sum(len(li) for _, li in self._val_plan or [])
+            n_test = sum(len(li) for _, li in self._test_plan or [])
+            logger.info(
+                "Complexes: %d train, %d val, %d test",
+                n_train,
+                n_val,
+                n_test,
+            )
+            return
         logger.info(
             "Protein pockets: %d train, %d val, %d test",
             len(self.protein_train),  # type: ignore[arg-type]
@@ -837,59 +918,77 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             collate_fn=collate_molecules,
         )
 
-    def train_dataloader(self) -> CombinedLoader:
-        """Return train dataloaders for protein and ligand."""
-        if self.protein_train is None or self.ligand_train is None:
-            msg = "setup() must be called before train_dataloader()"
+    def _build_sharded_loader(
+        self,
+        shard_plan: list[tuple[int, list[int]]],
+        key: str,
+        *,
+        shuffle: bool,
+    ) -> DataLoader:
+        """Build a DataLoader backed by :class:`ShardedMoleculeDataset`."""
+        dataset = ShardedMoleculeDataset(
+            shard_dir=self._shard_dir,  # type: ignore[arg-type]
+            shard_plan=shard_plan,
+            key=key,
+            mean=self.norm_stats[f"{key}_mean"].numpy(),  # type: ignore[union-attr]
+            std=self.norm_stats[f"{key}_std"].numpy(),  # type: ignore[union-attr]
+            shuffle=shuffle,
+        )
+        nw = self.training_config.num_workers
+        return DataLoader(
+            dataset,
+            batch_size=self.training_config.mol_batch_size,
+            num_workers=nw,
+            persistent_workers=nw > 0,
+            pin_memory=True,
+            collate_fn=collate_molecules,
+        )
+
+    def _make_combined_loader(
+        self,
+        shard_plan: list[tuple[int, list[int]]] | None,
+        protein_mols: list[Tensor] | None,
+        ligand_mols: list[Tensor] | None,
+        *,
+        shuffle: bool,
+    ) -> CombinedLoader:
+        if shard_plan is not None:
+            return CombinedLoader(
+                {
+                    "protein": self._build_sharded_loader(
+                        shard_plan, "protein", shuffle=shuffle,
+                    ),
+                    "ligand": self._build_sharded_loader(
+                        shard_plan, "ligand", shuffle=shuffle,
+                    ),
+                },
+                mode="max_size_cycle",
+            )
+        if protein_mols is None or ligand_mols is None:
+            msg = "setup() must be called before creating dataloaders"
             raise RuntimeError(msg)
         return CombinedLoader(
             {
-                "protein": self._build_loader(
-                    self.protein_train,
-                    shuffle=True,
-                ),
-                "ligand": self._build_loader(
-                    self.ligand_train,
-                    shuffle=True,
-                ),
+                "protein": self._build_loader(protein_mols, shuffle=shuffle),
+                "ligand": self._build_loader(ligand_mols, shuffle=shuffle),
             },
             mode="max_size_cycle",
+        )
+
+    def train_dataloader(self) -> CombinedLoader:
+        """Return train dataloaders for protein and ligand."""
+        return self._make_combined_loader(
+            self._train_plan, self.protein_train, self.ligand_train, shuffle=True,
         )
 
     def val_dataloader(self) -> CombinedLoader:
         """Return validation dataloaders for protein and ligand."""
-        if self.protein_val is None or self.ligand_val is None:
-            msg = "setup() must be called before val_dataloader()"
-            raise RuntimeError(msg)
-        return CombinedLoader(
-            {
-                "protein": self._build_loader(
-                    self.protein_val,
-                    shuffle=False,
-                ),
-                "ligand": self._build_loader(
-                    self.ligand_val,
-                    shuffle=False,
-                ),
-            },
-            mode="max_size_cycle",
+        return self._make_combined_loader(
+            self._val_plan, self.protein_val, self.ligand_val, shuffle=False,
         )
 
     def test_dataloader(self) -> CombinedLoader:
         """Return test dataloaders for protein and ligand."""
-        if self.protein_test is None or self.ligand_test is None:
-            msg = "setup() must be called before test_dataloader()"
-            raise RuntimeError(msg)
-        return CombinedLoader(
-            {
-                "protein": self._build_loader(
-                    self.protein_test,
-                    shuffle=False,
-                ),
-                "ligand": self._build_loader(
-                    self.ligand_test,
-                    shuffle=False,
-                ),
-            },
-            mode="max_size_cycle",
+        return self._make_combined_loader(
+            self._test_plan, self.protein_test, self.ligand_test, shuffle=False,
         )
