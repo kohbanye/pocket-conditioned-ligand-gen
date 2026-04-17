@@ -43,7 +43,7 @@ class ProteinVQVAEConfig:
     hidden_dim: int = 256
     latent_dim: int = 16
     codebook_size: int = 2048
-    commitment_cost: float = 0.25
+    commitment_cost: float = 0.1
     ema_decay: float = 0.99
     # Transformer context parameters
     num_transformer_layers: int = 4

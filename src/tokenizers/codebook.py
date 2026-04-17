@@ -23,7 +23,7 @@ class EMACodebook(nn.Module):
         code_dim: int,
         ema_decay: float = 0.99,
         commitment_cost: float = 0.25,
-        dead_code_threshold: int = 2,
+        dead_code_threshold: float = 0.1,
     ) -> None:
         super().__init__()
         self.num_codes = num_codes
@@ -36,7 +36,6 @@ class EMACodebook(nn.Module):
         self.register_buffer("embedding", embedding)
         self.register_buffer("ema_cluster_size", torch.zeros(num_codes))
         self.register_buffer("ema_embedding_sum", embedding.clone())
-        self.register_buffer("usage_count", torch.zeros(num_codes, dtype=torch.long))
 
         # Learnable scale (log-parameterized for stability)
         self.log_scale = nn.Parameter(torch.tensor(0.0))
@@ -110,13 +109,14 @@ class EMACodebook(nn.Module):
 
         self.embedding.copy_(self.ema_embedding_sum / smoothed.unsqueeze(1))
 
-        # Track usage
-        self.usage_count.add_((batch_cluster_size > 0).long())
-
     def _restart_dead_codes(self, z_norm: Tensor) -> None:
-        """Replace unused codebook entries with random encoder outputs."""
-        dead_mask = self.usage_count < self.dead_code_threshold
-        num_dead = dead_mask.sum().item()
+        """Replace unused codebook entries with random encoder outputs.
+
+        Uses EMA cluster size as a "recent usage" signal so restarts keep firing
+        throughout training, not only in the first few steps.
+        """
+        dead_mask = self.ema_cluster_size < self.dead_code_threshold
+        num_dead = int(dead_mask.sum().item())
         if num_dead == 0:
             return
 
@@ -129,7 +129,6 @@ class EMACodebook(nn.Module):
         self.embedding[dead_indices] = replacements
         self.ema_embedding_sum[dead_indices] = replacements
         self.ema_cluster_size[dead_indices] = 1.0
-        self.usage_count[dead_indices] = 0
 
     def lookup(self, indices: Tensor) -> Tensor:
         """Look up codebook vectors by index (for decoding)."""

@@ -50,6 +50,7 @@ class TransformerVQVAE(nn.Module):
         z = config.latent_dim
 
         # Encoder
+        self.input_norm = nn.LayerNorm(d)
         self.input_proj = nn.Sequential(
             nn.Linear(d, h),
             nn.GELU(),
@@ -126,7 +127,7 @@ class TransformerVQVAE(nn.Module):
             mask = torch.ones(b, seq_len, dtype=torch.bool, device=x.device)
 
         # Encode
-        h = self.input_proj(x) + self.pos_encoding[:seq_len]
+        h = self.input_proj(self.input_norm(x)) + self.pos_encoding[:seq_len]
         h = self.transformer_encoder(h, src_key_padding_mask=~mask)
         z = self.latent_proj(h)  # (B, L, latent_dim)
 
@@ -173,7 +174,7 @@ class TransformerVQVAE(nn.Module):
             Codebook indices of shape ``(N,)``.
         """
         x_seq = x.unsqueeze(0)  # (1, N, D)
-        h = self.input_proj(x_seq) + self.pos_encoding[: x.shape[0]]
+        h = self.input_proj(self.input_norm(x_seq)) + self.pos_encoding[: x.shape[0]]
         h = self.transformer_encoder(h)
         z = self.latent_proj(h).squeeze(0)  # (N, latent_dim)
         _, indices, _ = self.codebook(z)
