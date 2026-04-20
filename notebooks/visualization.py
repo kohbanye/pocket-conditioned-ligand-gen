@@ -3,20 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import types
-    from pathlib import Path
-    from typing import Any
-
-    import torch
     from numpy import ndarray
     from torch import Tensor
 
-    from src.config import CrossDockedConfig as CrossDockedConfigType
-    from src.config import VQVAETrainingConfig as VQVAETrainingConfigType
-    from src.data.descriptors import (
-        ComplexDescriptorDataModule as ComplexDescriptorDataModuleType,
-    )
-    from src.model.vqvae_module import VQVAEModule as VQVAEModuleType
     from src.tokenizers.codebook import EMACodebook
     from src.tokenizers.vqvae import TransformerVQVAE
 
@@ -34,7 +23,7 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     # VQ-VAE Tokenizer Evaluation
 
@@ -47,6 +36,7 @@ def _(mo: types.ModuleType):
     4. Codebook 使用頻度の分布
     5. 潜在空間の可視化 (t-SNE)
     """)
+    return
 
 
 @app.cell
@@ -82,14 +72,15 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ## 1. Load checkpoint and data
     """)
+    return
 
 
 @app.cell
-def _(project_root: Path):
+def _(project_root):
     # --- Checkpoint path (edit here) ---
     # Best checkpoint is typically the one with lowest val/protein_recon.
     # List available checkpoints:
@@ -103,12 +94,15 @@ def _(project_root: Path):
         ckpts = sorted(project_root.rglob("*.ckpt"))
         for _p in ckpts[-5:]:
             print(_p.relative_to(project_root))
+    return
 
 
 @app.cell
-def _(VQVAEModule: type[VQVAEModuleType], torch: types.ModuleType):
+def _(VQVAEModule, torch):
     # Load the best checkpoint (pick the last one = lowest val loss)
-    CKPT_PATH = "/home/sakano/git/pocket-conditioned-ligand-gen/pocket-ligand-vqvae/42tfb6kx/checkpoints/vqvae-epoch=19-val/protein_recon=0.1512.ckpt"
+    # CKPT_PATH = "/home/sakano/git/pocket-conditioned-ligand-gen/pocket-ligand-vqvae/42tfb6kx/checkpoints/vqvae-epoch=19-val/protein_recon=0.1512.ckpt"
+    CKPT_PATH = "/home/sakano/git/pocket-conditioned-ligand-gen/pocket-ligand-vqvae/oqdbacxx/checkpoints/vqvae-epoch=26-val/protein_recon=0.0656.ckpt"
+
     print(f"Loading: {CKPT_PATH}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -124,12 +118,12 @@ def _(VQVAEModule: type[VQVAEModuleType], torch: types.ModuleType):
 
 @app.cell
 def _(
-    ComplexDescriptorDataModule: type[ComplexDescriptorDataModuleType],
-    CrossDockedConfig: type[CrossDockedConfigType],
-    VQVAETrainingConfig: type[VQVAETrainingConfigType],
-    device: torch.device,
-    project_root: Path,
-    torch: types.ModuleType,
+    ComplexDescriptorDataModule,
+    CrossDockedConfig,
+    VQVAETrainingConfig,
+    device,
+    project_root,
+    torch,
 ):
     # Load cached descriptors and prepare test split
     config = VQVAETrainingConfig()
@@ -137,56 +131,101 @@ def _(
     dm = ComplexDescriptorDataModule(config, data_config)
     dm.setup()
 
-    protein_test = dm.protein_test.to(device)
-    ligand_test_molecules = [mol.to(device) for mol in dm.ligand_test]
+    norm_stats = dm.norm_stats
+
+    # The full test split is ~2M complexes across 436 shards; loading it all
+    # takes the better part of an hour and is overkill for MSE / t-SNE
+    # statistics.  Cap the notebook at MAX_TEST_COMPLEXES by stopping early.
+    MAX_TEST_COMPLEXES = 2000
+
+    if dm.protein_test is None:
+        prot_mean_np = norm_stats["protein_mean"].numpy()
+        prot_std_np = norm_stats["protein_std"].numpy()
+        lig_mean_np = norm_stats["ligand_mean"].numpy()
+        lig_std_np = norm_stats["ligand_std"].numpy()
+
+        protein_test_pockets = []
+        ligand_test_molecules = []
+        # Read each test shard once and pull out both protein + ligand,
+        # so we don't pay 2x disk I/O across two separate iterators.
+        for shard_idx, local_indices in dm._test_plan:
+            if len(protein_test_pockets) >= MAX_TEST_COMPLEXES:
+                break
+            shard_path = dm._shard_dir / f"shard_{shard_idx:04d}.pt"
+            shard_data = torch.load(shard_path, weights_only=False)
+            for local_idx in local_indices:
+                if len(protein_test_pockets) >= MAX_TEST_COMPLEXES:
+                    break
+                cplx = shard_data[local_idx]
+                protein_test_pockets.append(
+                    torch.from_numpy(
+                        (cplx["protein"] - prot_mean_np) / prot_std_np,
+                    )
+                    .float()
+                    .to(device),
+                )
+                ligand_test_molecules.append(
+                    torch.from_numpy(
+                        (cplx["ligand"] - lig_mean_np) / lig_std_np,
+                    )
+                    .float()
+                    .to(device),
+                )
+            del shard_data
+    else:
+        protein_test_pockets = [
+            t.to(device) for t in dm.protein_test[:MAX_TEST_COMPLEXES]
+        ]
+        ligand_test_molecules = [
+            t.to(device) for t in dm.ligand_test[:MAX_TEST_COMPLEXES]
+        ]
+
+    protein_test_flat = torch.cat(protein_test_pockets)
     ligand_test_flat = torch.cat(ligand_test_molecules)
 
-    # Normalization stats (computed from train split)
-    norm_stats = dm.norm_stats
-    print(f"Protein test: {protein_test.shape}")
     print(
-        f"Ligand test:  {len(ligand_test_molecules)} molecules, {ligand_test_flat.shape[0]} atoms total"
+        f"Protein test: {len(protein_test_pockets)} pockets, "
+        f"{protein_test_flat.shape[0]} residues total"
     )
-    return config, ligand_test_flat, ligand_test_molecules, norm_stats, protein_test
+    print(
+        f"Ligand test:  {len(ligand_test_molecules)} molecules, "
+        f"{ligand_test_flat.shape[0]} atoms total"
+    )
+    return (
+        config,
+        ligand_test_flat,
+        ligand_test_molecules,
+        norm_stats,
+        protein_test_flat,
+        protein_test_pockets,
+    )
 
 
 @app.cell
 def _(
-    ligand_test_molecules: list[Tensor],
-    ligand_vqvae: TransformerVQVAE,
-    protein_test: Tensor,
-    protein_vqvae: TransformerVQVAE,
-    torch: types.ModuleType,
+    ligand_test_molecules,
+    ligand_vqvae,
+    protein_test_pockets,
+    protein_vqvae,
+    torch,
 ):
-    # Run inference on test set
+    # Both protein and ligand share the same TransformerVQVAE architecture and
+    # consume variable-length per-pocket / per-molecule sequences.
     @torch.no_grad()
-    def run_vqvae_protein(
-        model: "TransformerVQVAE", data: "Tensor", batch_size: int = 4096
-    ):
-        """Run protein VQ-VAE on flat residue data."""
+    def run_vqvae(model: "TransformerVQVAE", sequences: "list[Tensor]"):
+        """Run TransformerVQVAE per-sequence and collect recon/indices/z."""
         all_recon, all_indices, all_z = [], [], []
-        for i in range(0, len(data), batch_size):
-            batch = data[i : i + batch_size]
-            z = model.encoder(batch)
-            quantized, indices, _ = model.codebook(z)
-            recon = model.decoder(quantized)
-            all_recon.append(recon)
-            all_indices.append(indices)
-            all_z.append(z)
-        return torch.cat(all_recon), torch.cat(all_indices), torch.cat(all_z)
-
-    @torch.no_grad()
-    def run_vqvae_ligand(model: "TransformerVQVAE", molecules: "list[Tensor]"):
-        """Run ligand VQ-VAE per-molecule with transformer context."""
-        all_recon, all_indices, all_z = [], [], []
-        for mol in molecules:
-            x_seq = mol.unsqueeze(0)  # (1, N, D)
-            h = model.input_proj(x_seq) + model.pos_encoding[: mol.shape[0]]
+        for seq in sequences:
+            if seq.shape[0] == 0:
+                continue
+            x_seq = seq.unsqueeze(0)  # (1, N, D)
+            h = model.input_proj(model.input_norm(x_seq))
+            h = h + model.pos_encoding[: seq.shape[0]]
             h = model.transformer_encoder(h)
-            z = model.latent_proj(h).squeeze(0)  # (N, latent_dim)
-            quantized, indices, _ = model.codebook(z)
+            z = model.latent_norm(model.latent_proj(h)).squeeze(0)  # (N, latent_dim)
+            quantized, indices, _, _ = model.codebook(z)
             q_seq = model.latent_unproj(quantized).unsqueeze(0)
-            dec_in = q_seq + model.pos_encoding[: mol.shape[0]]
+            dec_in = q_seq + model.pos_encoding[: seq.shape[0]]
             dec_out = model.transformer_decoder(dec_in)
             recon = model.output_proj(dec_out).squeeze(0)  # (N, D)
             all_recon.append(recon)
@@ -194,10 +233,8 @@ def _(
             all_z.append(z)
         return torch.cat(all_recon), torch.cat(all_indices), torch.cat(all_z)
 
-    prot_recon, prot_indices, prot_z = run_vqvae_protein(protein_vqvae, protein_test)
-    lig_recon, lig_indices, lig_z = run_vqvae_ligand(
-        ligand_vqvae, ligand_test_molecules
-    )
+    prot_recon, prot_indices, prot_z = run_vqvae(protein_vqvae, protein_test_pockets)
+    lig_recon, lig_indices, lig_z = run_vqvae(ligand_vqvae, ligand_test_molecules)
 
     print("Inference done.")
     print(
@@ -210,22 +247,23 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ## 2. Reconstruction Error (MSE)
 
     正規化空間と元スケールの両方で再構成誤差を評価する。
     """)
+    return
 
 
 @app.cell
 def _(
-    lig_recon: Tensor,
-    ligand_test_flat: Tensor,
-    norm_stats: dict[str, Tensor],
-    np: types.ModuleType,
-    prot_recon: Tensor,
-    protein_test: Tensor,
+    lig_recon,
+    ligand_test_flat,
+    norm_stats,
+    np,
+    prot_recon,
+    protein_test_flat,
 ):
     def compute_mse_metrics(
         original: "Tensor",
@@ -266,7 +304,7 @@ def _(
         }
 
     prot_metrics = compute_mse_metrics(
-        protein_test,
+        protein_test_flat,
         prot_recon,
         "Protein",
         norm_stats["protein_mean"],
@@ -283,36 +321,43 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ### 2.1 Per-dimension MSE
 
-    Protein: dim 0–2 = CA position, dim 3–5 = N-CA offset, dim 6–8 = C-CA offset (canonical frame)
+    Protein: 12-D backbone Z-matrix (4 values × 3 atoms N/CA/C). 4 values per atom are
+    `(bond_length, bond_angle, sin_torsion, cos_torsion)` for continuation residues, or
+    pocket-frame-anchored spherical coords for segment-start residues.
     Ligand: dim 0 = bond length, dim 1 = bond angle, dim 2–3 = sin/cos dihedral
     """)
+    return
 
 
 @app.cell
-def _(lig_metrics: dict[str, Any], plt: types.ModuleType, prot_metrics: dict[str, Any]):
+def _(lig_metrics, plt, prot_metrics):
     _fig, _axes = plt.subplots(2, 2, figsize=(14, 8))
     prot_dim_labels = [
-        "CA_x",
-        "CA_y",
-        "CA_z",
-        "N-CA_x",
-        "N-CA_y",
-        "N-CA_z",
-        "C-CA_x",
-        "C-CA_y",
-        "C-CA_z",
+        "N_d",
+        "N_θ",
+        "N_sin",
+        "N_cos",
+        "CA_d",
+        "CA_θ",
+        "CA_sin",
+        "CA_cos",
+        "C_d",
+        "C_θ",
+        "C_sin",
+        "C_cos",
     ]
+    n_prot_dims = len(prot_dim_labels)
     # Protein — normalized
-    _axes[0, 0].bar(range(9), prot_metrics["per_dim_mse_norm"])
-    _axes[0, 0].set_xticks(range(9), prot_dim_labels, rotation=90, fontsize=7)
+    _axes[0, 0].bar(range(n_prot_dims), prot_metrics["per_dim_mse_norm"])
+    _axes[0, 0].set_xticks(range(n_prot_dims), prot_dim_labels, rotation=90, fontsize=7)
     _axes[0, 0].set_title("Protein — Per-dim MSE (normalized)")
     _axes[0, 0].set_ylabel("MSE")
-    _axes[0, 1].bar(range(9), prot_metrics["per_dim_mse_orig"])
-    _axes[0, 1].set_xticks(range(9), prot_dim_labels, rotation=90, fontsize=7)
+    _axes[0, 1].bar(range(n_prot_dims), prot_metrics["per_dim_mse_orig"])
+    _axes[0, 1].set_xticks(range(n_prot_dims), prot_dim_labels, rotation=90, fontsize=7)
     # Protein — original scale
     _axes[0, 1].set_title("Protein — Per-dim MSE (original scale)")
     _axes[0, 1].set_ylabel("MSE")
@@ -333,7 +378,7 @@ def _(lig_metrics: dict[str, Any], plt: types.ModuleType, prot_metrics: dict[str
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ## 3. Codebook Utilization & Perplexity
 
@@ -341,15 +386,11 @@ def _(mo: types.ModuleType):
     - **Utilization**: 使用されたコード数 / 全コード数 (1.0が理想)
     - **Perplexity**: exp(entropy)。均等利用時は codebook_size と一致
     """)
+    return
 
 
 @app.cell
-def _(
-    config: VQVAETrainingConfigType,
-    lig_indices: Tensor,
-    np: types.ModuleType,
-    prot_indices: Tensor,
-):
+def _(config, lig_indices, np, prot_indices):
     def codebook_stats(indices: "Tensor", codebook_size: int, name: str):
         """Compute and print codebook utilization metrics."""
         idx_np = indices.cpu().numpy()
@@ -382,20 +423,15 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ### 3.1 Codebook usage distribution
     """)
+    return
 
 
 @app.cell
-def _(
-    config: VQVAETrainingConfigType,
-    lig_counts: ndarray,
-    np: types.ModuleType,
-    plt: types.ModuleType,
-    prot_counts: ndarray,
-):
+def _(config, lig_counts, np, plt, prot_counts):
     _fig, _axes = plt.subplots(1, 2, figsize=(14, 4))
     prot_sorted = np.sort(prot_counts)[::-1]
     # Protein codebook usage — sorted descending
@@ -413,26 +449,21 @@ def _(
     _axes[1].set_yscale("log")
     _fig.tight_layout()
     _fig
+    return
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ## 4. Original vs Reconstructed scatter plots
 
     各次元で元の値 vs 再構成値をプロットし、対角線からのずれを確認する。元スケールで表示。
     """)
+    return
 
 
 @app.cell
-def _(
-    lig_dim_labels: list[str],
-    lig_metrics: dict[str, Any],
-    np: types.ModuleType,
-    plt: types.ModuleType,
-    prot_dim_labels: list[str],
-    prot_metrics: dict[str, Any],
-):
+def _(lig_dim_labels, lig_metrics, np, plt, prot_dim_labels, prot_metrics):
     def scatter_orig_vs_recon(
         orig: "ndarray",
         recon: "ndarray",
@@ -485,29 +516,24 @@ def _(
         lig_dim_labels,
         "Ligand: Original vs Reconstructed (original scale)",
     )
+    return
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ## 5. Reconstruction error distribution
 
     サンプルごとの再構成誤差の分布を確認し、外れ値の存在を把握する。
     """)
+    return
 
 
 @app.cell
-def _(
-    lig_recon: Tensor,
-    ligand_test_flat: Tensor,
-    np: types.ModuleType,
-    plt: types.ModuleType,
-    prot_recon: Tensor,
-    protein_test: Tensor,
-):
+def _(lig_recon, ligand_test_flat, np, plt, prot_recon, protein_test_flat):
     _fig, _axes = plt.subplots(1, 2, figsize=(12, 4))
     prot_per_sample = np.mean(
-        (protein_test.cpu().numpy() - prot_recon.cpu().numpy()) ** 2, axis=1
+        (protein_test_flat.cpu().numpy() - prot_recon.cpu().numpy()) ** 2, axis=1
     )
     lig_per_sample = np.mean(
         (ligand_test_flat.cpu().numpy() - lig_recon.cpu().numpy()) ** 2, axis=1
@@ -553,10 +579,11 @@ def _(
             print(f"  P{_p}: {np.percentile(mse_arr, _p):.6f}")
         print()
     _fig
+    return
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ## 5.5 3D Reconstruction RMSE (Å)
 
@@ -567,18 +594,19 @@ def _(mo: types.ModuleType):
 
     複数の複合体をサンプリングし、VQ-VAE の encode → decode → 記述子逆変換 → 3D座標 のパイプライン全体の精度を確認する。
     """)
+    return
 
 
 @app.cell
 def _(
-    device: torch.device,
-    ligand_vqvae: TransformerVQVAE,
-    norm_stats: dict[str, Tensor],
-    np: types.ModuleType,
-    plt: types.ModuleType,
-    project_root: Path,
-    protein_vqvae: TransformerVQVAE,
-    torch: types.ModuleType,
+    device,
+    ligand_vqvae,
+    norm_stats,
+    np,
+    plt,
+    project_root,
+    protein_vqvae,
+    torch,
 ):
     from src.config import PocketExtractionConfig
     from src.data.descriptors import _parse_types_file
@@ -632,7 +660,9 @@ def _(
             centroid, rotation = _compute_canonical_frame(ca_coords)
             pocket_frame = (centroid, rotation)
             prot_desc, prot_meta = protein_desc_calc.compute(
-                backbone_coords_orig, residue_ids, pocket_frame=pocket_frame,
+                backbone_coords_orig,
+                residue_ids,
+                pocket_frame=pocket_frame,
             )
             prot_t = torch.from_numpy(prot_desc).to(device)
             prot_norm = (prot_t - prot_mean) / prot_std
@@ -718,28 +748,21 @@ def _(
     _axes[1].legend(fontsize=8)
     _fig.tight_layout()
     _fig
+    return
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ## 6. Latent space visualization (t-SNE)
 
     Codebook ベクトルとエンコーダ出力を t-SNE で2次元に射影し、量子化の質を確認する。
     """)
+    return
 
 
 @app.cell
-def _(
-    config: VQVAETrainingConfigType,
-    lig_z: Tensor,
-    ligand_vqvae: TransformerVQVAE,
-    np: types.ModuleType,
-    plt: types.ModuleType,
-    prot_z: Tensor,
-    protein_vqvae: TransformerVQVAE,
-):
-    import torch.nn.functional as F
+def _(config, lig_z, ligand_vqvae, np, plt, prot_z, protein_vqvae):
     from sklearn.manifold import TSNE
 
     def plot_latent_tsne(
@@ -749,15 +772,17 @@ def _(
         name: str,
         n_samples: int = 5000,
     ) -> None:
-        """t-SNE visualization of encoder outputs and codebook vectors."""
-        z_norm = F.normalize(encoder_z, p=2, dim=-1).cpu().numpy()
-        cb_norm = (
-            F.normalize(codebook.embedding, p=2, dim=-1).cpu().detach().numpy()
-        )  # L2 normalize (same as codebook forward)
+        """t-SNE visualization of encoder outputs and codebook vectors.
+
+        Vectors are plotted as-is; the codebook does plain L2 nearest-neighbor
+        lookup on raw embeddings (encoder z is post-LayerNorm).
+        """
+        z_arr = encoder_z.cpu().numpy()
+        cb_arr = codebook.embedding.cpu().detach().numpy()
         rng = np.random.default_rng(42)
-        idx = rng.choice(len(z_norm), min(n_samples, len(z_norm)), replace=False)
-        z_sub = z_norm[idx]
-        combined = np.vstack([z_sub, cb_norm])  # Subsample encoder outputs
+        idx = rng.choice(len(z_arr), min(n_samples, len(z_arr)), replace=False)
+        z_sub = z_arr[idx]
+        combined = np.vstack([z_sub, cb_arr])  # Subsample encoder outputs
         tsne = TSNE(
             n_components=2, random_state=42, perplexity=min(30, len(combined) // 4)
         )
@@ -782,7 +807,7 @@ def _(
             linewidths=1,
             label="Codebook",
         )
-        ax.set_title(f"{name} — t-SNE of latent space (L2-normalized)")
+        ax.set_title(f"{name} — t-SNE of latent space")
         ax.legend(fontsize=9)
         ax.set_xticks([])
         ax.set_yticks([])
@@ -795,26 +820,19 @@ def _(
     plot_latent_tsne(
         lig_z, ligand_vqvae.codebook, config.ligand.codebook_size, "Ligand"
     )
+    return
 
 
 @app.cell(hide_code=True)
-def _(mo: types.ModuleType):
+def _(mo):
     mo.md(r"""
     ## 7. Summary table
     """)
+    return
 
 
 @app.cell
-def _(
-    config: VQVAETrainingConfigType,
-    lig_indices: Tensor,
-    lig_metrics: dict[str, Any],
-    ligand_vqvae: TransformerVQVAE,
-    np: types.ModuleType,
-    prot_indices: Tensor,
-    prot_metrics: dict[str, Any],
-    protein_vqvae: TransformerVQVAE,
-):
+def _(config, lig_indices, lig_metrics, np, prot_indices, prot_metrics):
     import pandas as pd
 
     prot_idx_np = prot_indices.cpu().numpy()
@@ -846,7 +864,6 @@ def _(
                 "Utilization",
                 "Perplexity",
                 "Perplexity (normalized)",
-                "Learnable scale (exp(log_scale))",
             ],
             "Protein": [
                 config.protein.codebook_size,
@@ -858,7 +875,6 @@ def _(
                 f"{len(np.unique(prot_idx_np)) / config.protein.codebook_size:.4f}",
                 f"{prot_ppl:.1f}",
                 f"{prot_ppl / config.protein.codebook_size:.4f}",
-                f"{protein_vqvae.codebook.log_scale.exp().item():.4f}",
             ],
             "Ligand": [
                 config.ligand.codebook_size,
@@ -870,12 +886,12 @@ def _(
                 f"{len(np.unique(lig_idx_np)) / config.ligand.codebook_size:.4f}",
                 f"{lig_ppl:.1f}",
                 f"{lig_ppl / config.ligand.codebook_size:.4f}",
-                f"{ligand_vqvae.codebook.log_scale.exp().item():.4f}",
             ],
         }
     )
 
     summary
+    return
 
 
 if __name__ == "__main__":

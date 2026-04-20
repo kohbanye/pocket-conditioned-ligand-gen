@@ -811,43 +811,48 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         )
 
         # --- Pass 1: Compute normalization stats from train split (Welford) ---
-        prot_count = 0
-        prot_mean = np.zeros(12, dtype=np.float64)
-        prot_m2 = np.zeros(12, dtype=np.float64)
-        lig_count = 0
-        lig_mean = np.zeros(4, dtype=np.float64)
-        lig_m2 = np.zeros(4, dtype=np.float64)
+        stats_path = self.cache_dir / _NORMALIZATION_STATS_FILE
+        if stats_path.exists():
+            self.norm_stats = torch.load(stats_path, weights_only=False)
+            logger.info("Loaded cached normalization stats from %s", stats_path)
+        else:
+            prot_count = 0
+            prot_mean = np.zeros(12, dtype=np.float64)
+            prot_m2 = np.zeros(12, dtype=np.float64)
+            lig_count = 0
+            lig_mean = np.zeros(4, dtype=np.float64)
+            lig_m2 = np.zeros(4, dtype=np.float64)
 
-        for global_offset, shard_data in _iter_shards(shard_dir, shard_counts):
-            for local_idx, cplx in enumerate(shard_data):
-                if (global_offset + local_idx) not in train_set:
-                    continue
-                prot_count, prot_mean, prot_m2 = _welford_update_batch(
-                    prot_count,
-                    prot_mean,
-                    prot_m2,
-                    cplx["protein"].astype(np.float64),  # type: ignore[union-attr]
-                )
-                lig_count, lig_mean, lig_m2 = _welford_update_batch(
-                    lig_count,
-                    lig_mean,
-                    lig_m2,
-                    cplx["ligand"].astype(np.float64),  # type: ignore[union-attr]
-                )
+            for global_offset, shard_data in _iter_shards(shard_dir, shard_counts):
+                for local_idx, cplx in enumerate(shard_data):
+                    if (global_offset + local_idx) not in train_set:
+                        continue
+                    prot_count, prot_mean, prot_m2 = _welford_update_batch(
+                        prot_count,
+                        prot_mean,
+                        prot_m2,
+                        cplx["protein"].astype(np.float64),  # type: ignore[union-attr]
+                    )
+                    lig_count, lig_mean, lig_m2 = _welford_update_batch(
+                        lig_count,
+                        lig_mean,
+                        lig_m2,
+                        cplx["ligand"].astype(np.float64),  # type: ignore[union-attr]
+                    )
 
-        protein_mean = prot_mean.astype(np.float32)
-        protein_std = (np.sqrt(prot_m2 / prot_count) + 1e-8).astype(np.float32)
-        ligand_mean = lig_mean.astype(np.float32)
-        ligand_std = (np.sqrt(lig_m2 / lig_count) + 1e-8).astype(np.float32)
+            protein_mean = prot_mean.astype(np.float32)
+            protein_std = (np.sqrt(prot_m2 / prot_count) + 1e-8).astype(np.float32)
+            ligand_mean = lig_mean.astype(np.float32)
+            ligand_std = (np.sqrt(lig_m2 / lig_count) + 1e-8).astype(np.float32)
 
-        self.norm_stats = {
-            "protein_mean": torch.from_numpy(protein_mean),
-            "protein_std": torch.from_numpy(protein_std),
-            "ligand_mean": torch.from_numpy(ligand_mean),
-            "ligand_std": torch.from_numpy(ligand_std),
-        }
-        torch.save(self.norm_stats, self.cache_dir / _NORMALIZATION_STATS_FILE)
-        logger.info("Pass 1 done: normalization stats computed from train split")
+            self.norm_stats = {
+                "protein_mean": torch.from_numpy(protein_mean),
+                "protein_std": torch.from_numpy(protein_std),
+                "ligand_mean": torch.from_numpy(ligand_mean),
+                "ligand_std": torch.from_numpy(ligand_std),
+            }
+            torch.save(self.norm_stats, stats_path)
+            logger.info("Pass 1 done: normalization stats computed from train split")
 
         # --- Build per-split shard plans (no full data load needed) ---
         from collections import defaultdict  # noqa: PLC0415
