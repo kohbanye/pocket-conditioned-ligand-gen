@@ -70,6 +70,7 @@ class TransformerVQVAE(nn.Module):
             num_layers=config.num_transformer_layers,
         )
         self.latent_proj = nn.Linear(h, z)
+        self.latent_norm = nn.LayerNorm(z)
 
         # Decoder
         self.latent_unproj = nn.Linear(z, h)
@@ -129,12 +130,18 @@ class TransformerVQVAE(nn.Module):
         # Encode
         h = self.input_proj(self.input_norm(x)) + self.pos_encoding[:seq_len]
         h = self.transformer_encoder(h, src_key_padding_mask=~mask)
-        z = self.latent_proj(h)  # (B, L, latent_dim)
+        z = self.latent_norm(self.latent_proj(h))  # (B, L, latent_dim)
 
         # Quantize per-position (only real elements)
         # Cast to float32 for codebook (EMA updates need full precision)
         z_real = z[mask].float()  # (N_real, latent_dim)
-        quantized_real, indices_real, commitment_loss = self.codebook(z_real)
+        quantized_real, indices_real, commitment_loss, codebook_diag = self.codebook(
+            z_real,
+        )
+
+        # Encoder output diversity: std across tokens, averaged over latent dims.
+        # Collapses toward 0 when encoder maps all inputs to the same point.
+        z_diversity = z_real.detach().std(dim=0).mean()
 
         # Scatter quantized vectors back to (B, L, latent_dim)
         quantized = torch.zeros_like(z)
@@ -154,14 +161,22 @@ class TransformerVQVAE(nn.Module):
         x_hat = self.output_proj(dec_out)  # (B, L, descriptor_dim)
 
         # Masked reconstruction loss
-        diff = (x - x_hat)[mask]  # (N_real, descriptor_dim)
-        reconstruction_loss = diff.pow(2).mean()
+        diff_sq = (x - x_hat)[mask].pow(2)  # (N_real, descriptor_dim)
+        reconstruction_loss = diff_sq.mean()
+        # Per-token mean squared error; max spots pathological single samples
+        # even when the batch mean looks fine.
+        recon_max = diff_sq.detach().mean(dim=-1).max()
 
         return {
             "reconstructed": x_hat,
             "indices": indices,
             "commitment_loss": commitment_loss,
             "reconstruction_loss": reconstruction_loss,
+            "diagnostics": {
+                **codebook_diag,
+                "z_diversity": z_diversity,
+                "recon_max": recon_max,
+            },
         }
 
     def encode(self, x: Tensor) -> Tensor:
@@ -176,8 +191,8 @@ class TransformerVQVAE(nn.Module):
         x_seq = x.unsqueeze(0)  # (1, N, D)
         h = self.input_proj(self.input_norm(x_seq)) + self.pos_encoding[: x.shape[0]]
         h = self.transformer_encoder(h)
-        z = self.latent_proj(h).squeeze(0)  # (N, latent_dim)
-        _, indices, _ = self.codebook(z)
+        z = self.latent_norm(self.latent_proj(h)).squeeze(0)  # (N, latent_dim)
+        _, indices, _, _ = self.codebook(z)
         return indices
 
     def decode(self, indices: Tensor) -> Tensor:

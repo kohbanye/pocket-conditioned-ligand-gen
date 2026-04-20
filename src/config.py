@@ -75,7 +75,7 @@ class LigandVQVAEConfig:
 class VQVAETrainingConfig:
     """Config for joint VQ-VAE training."""
 
-    learning_rate: float = 1e-3
+    learning_rate: float = 3e-4
     mol_batch_size: int = 4096
     max_epochs: int = 100
     num_workers: int = 16

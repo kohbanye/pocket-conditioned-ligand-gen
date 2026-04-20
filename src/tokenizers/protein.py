@@ -797,7 +797,7 @@ class ProteinStructureVQVAE(nn.Module):
             reconstruction_loss.
         """
         z = self.encoder(x)
-        quantized, indices, commitment_loss = self.codebook(z)
+        quantized, indices, commitment_loss, _ = self.codebook(z)
         reconstructed = self.decoder(quantized)
         reconstruction_loss = (x - reconstructed).pow(2).mean()
 
@@ -811,7 +811,7 @@ class ProteinStructureVQVAE(nn.Module):
     def encode(self, x: Tensor) -> Tensor:
         """Encode descriptors to codebook indices."""
         z = self.encoder(x)
-        _, indices, _ = self.codebook(z)
+        _, indices, _, _ = self.codebook(z)
         return indices
 
     def decode(self, indices: Tensor) -> Tensor:
