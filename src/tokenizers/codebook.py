@@ -61,9 +61,7 @@ class EMACodebook(nn.Module):
                 self._ema_update(z, indices)
                 num_restarted = self._restart_dead_codes(z)
 
-        commitment_loss = (
-            self.commitment_cost * (z - quantized.detach()).pow(2).mean()
-        )
+        commitment_loss = self.commitment_cost * (z - quantized.detach()).pow(2).mean()
 
         # Straight-through estimator: copy gradients from quantized to z
         quantized = z + (quantized - z).detach()
@@ -72,9 +70,7 @@ class EMACodebook(nn.Module):
             "ema_cluster_size_min": self.ema_cluster_size.min(),
             "ema_cluster_size_mean": self.ema_cluster_size.mean(),
             "ema_cluster_size_max": self.ema_cluster_size.max(),
-            "num_dead_codes": (
-                self.ema_cluster_size < self.dead_code_threshold
-            ).sum(),
+            "num_dead_codes": (self.ema_cluster_size < self.dead_code_threshold).sum(),
             "z_pre_norm_mean": z_pre_norm.mean(),
             "z_pre_norm_max": z_pre_norm.max(),
             "num_restarted": num_restarted,

@@ -175,9 +175,7 @@ def extract_pocket_from_candidates(
     selected = selected[final_order].tolist()
 
     backbone_coords = precomputed.backbone_coords[selected]
-    pocket_seq = "".join(
-        AA_3TO1[precomputed.residue_names[i]] for i in selected
-    )
+    pocket_seq = "".join(AA_3TO1[precomputed.residue_names[i]] for i in selected)
     residue_ids = [
         (precomputed.chain_ids[i], precomputed.residue_indices[i]) for i in selected
     ]
@@ -449,7 +447,11 @@ class BackboneZMatrixDescriptor:
                 if k == 0:
                     # --- Segment start: pocket-frame anchored ---
                     self._encode_segment_start(
-                        descriptors, idx, n_pos, ca_pos, c_pos,
+                        descriptors,
+                        idx,
+                        n_pos,
+                        ca_pos,
+                        c_pos,
                     )
                 else:
                     # --- Continuation: Z-matrix referencing prev ---
@@ -458,9 +460,14 @@ class BackboneZMatrixDescriptor:
                     prev_ca = wc[prev, 1]
                     prev_c = wc[prev, 2]
                     self._encode_continuation(
-                        descriptors, idx,
-                        n_pos, ca_pos, c_pos,
-                        prev_n, prev_ca, prev_c,
+                        descriptors,
+                        idx,
+                        n_pos,
+                        ca_pos,
+                        c_pos,
+                        prev_n,
+                        prev_ca,
+                        prev_c,
                     )
 
         metadata: dict[str, Any] = {
@@ -518,7 +525,10 @@ class BackboneZMatrixDescriptor:
         angle_ca_c_n = bond_angle(prev_ca, prev_c, n_pos)
         psi_prev = dihedral_angle(prev_n, prev_ca, prev_c, n_pos)
         descriptors[idx, 0:4] = [
-            d_c_n, angle_ca_c_n, np.sin(psi_prev), np.cos(psi_prev),
+            d_c_n,
+            angle_ca_c_n,
+            np.sin(psi_prev),
+            np.cos(psi_prev),
         ]
 
         # CA(i): bond N(i)->CA(i), angle C(i-1)-N(i)-CA(i),

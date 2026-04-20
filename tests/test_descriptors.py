@@ -546,7 +546,7 @@ def _make_realistic_backbone(num_residues: int = 10) -> np.ndarray:
     # Ideal backbone geometry
     d_n_ca = 1.458  # N-CA bond
     d_ca_c = 1.525  # CA-C bond
-    d_c_n = 1.329   # C-N peptide bond
+    d_c_n = 1.329  # C-N peptide bond
     angle_ca_c_n = np.radians(116.2)
     angle_c_n_ca = np.radians(121.7)
     angle_n_ca_c = np.radians(111.2)
@@ -557,11 +557,13 @@ def _make_realistic_backbone(num_residues: int = 10) -> np.ndarray:
     coords[0, 0] = [0.0, 0.0, 0.0]  # N
     coords[0, 1] = [d_n_ca, 0.0, 0.0]  # CA
     # C: placed at bond angle from N-CA
-    coords[0, 2] = coords[0, 1] + d_ca_c * np.array([
-        -np.cos(np.pi - angle_n_ca_c),
-        np.sin(np.pi - angle_n_ca_c),
-        0.0,
-    ])
+    coords[0, 2] = coords[0, 1] + d_ca_c * np.array(
+        [
+            -np.cos(np.pi - angle_n_ca_c),
+            np.sin(np.pi - angle_n_ca_c),
+            0.0,
+        ]
+    )
 
     rng = np.random.default_rng(42)
     for i in range(1, num_residues):
@@ -576,20 +578,36 @@ def _make_realistic_backbone(num_residues: int = 10) -> np.ndarray:
 
         # Place N(i) using NeRF: dihedral N(i-1)-CA(i-1)-C(i-1)-N(i)
         from src.tokenizers.geometry import place_atom  # noqa: PLC0415
+
         n_pos = place_atom(
-            prev_n, prev_ca, prev_c, d_c_n, angle_ca_c_n, psi_prev,
+            prev_n,
+            prev_ca,
+            prev_c,
+            d_c_n,
+            angle_ca_c_n,
+            psi_prev,
         )
         coords[i, 0] = n_pos
 
         # Place CA(i): dihedral CA(i-1)-C(i-1)-N(i)-CA(i)
         ca_pos = place_atom(
-            prev_ca, prev_c, n_pos, d_n_ca, angle_c_n_ca, omega,
+            prev_ca,
+            prev_c,
+            n_pos,
+            d_n_ca,
+            angle_c_n_ca,
+            omega,
         )
         coords[i, 1] = ca_pos
 
         # Place C(i): dihedral C(i-1)-N(i)-CA(i)-C(i)
         c_pos = place_atom(
-            prev_c, n_pos, ca_pos, d_ca_c, angle_n_ca_c, phi,
+            prev_c,
+            n_pos,
+            ca_pos,
+            d_ca_c,
+            angle_n_ca_c,
+            phi,
         )
         coords[i, 2] = c_pos
 
@@ -605,7 +623,8 @@ class TestBackboneZMatrixDescriptor:
 
         descriptors, metadata = desc.compute(backbone, residue_ids)
         reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
-            descriptors, metadata,
+            descriptors,
+            metadata,
         )
 
         np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
@@ -615,15 +634,23 @@ class TestBackboneZMatrixDescriptor:
         backbone = _make_realistic_backbone(10)
         # Simulate non-contiguous: residues 0-3 and 7-9 (gap at 4-6)
         residue_ids = [
-            ("A", 10), ("A", 11), ("A", 12), ("A", 13),
-            ("A", 20), ("A", 21), ("A", 22),
-            ("B", 5), ("B", 6), ("B", 7),
+            ("A", 10),
+            ("A", 11),
+            ("A", 12),
+            ("A", 13),
+            ("A", 20),
+            ("A", 21),
+            ("A", 22),
+            ("B", 5),
+            ("B", 6),
+            ("B", 7),
         ]
         desc = BackboneZMatrixDescriptor()
 
         descriptors, metadata = desc.compute(backbone, residue_ids)
         reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
-            descriptors, metadata,
+            descriptors,
+            metadata,
         )
 
         np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
@@ -702,7 +729,8 @@ class TestBackboneZMatrixDescriptor:
         assert result.shape == (1, 12)
 
         reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
-            result, metadata,
+            result,
+            metadata,
         )
         np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
 
@@ -716,7 +744,8 @@ class TestBackboneZMatrixDescriptor:
         assert result.shape == (2, 12)
 
         reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
-            result, metadata,
+            result,
+            metadata,
         )
         np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
 
@@ -730,11 +759,14 @@ class TestBackboneZMatrixDescriptor:
 
         desc = BackboneZMatrixDescriptor()
         result, metadata = desc.compute(
-            backbone, residue_ids, pocket_frame=pocket_frame,
+            backbone,
+            residue_ids,
+            pocket_frame=pocket_frame,
         )
 
         reconstructed = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
-            result, metadata,
+            result,
+            metadata,
         )
         np.testing.assert_allclose(reconstructed, backbone, atol=1e-4)
 
@@ -757,9 +789,7 @@ class TestBackboneZMatrixDescriptor:
                     cos_tor = result[idx, base + 3]
 
                     # Bond lengths should be ~1.3-1.6 Angstrom
-                    assert 1.0 < bond_len < 2.0, (
-                        f"Bond length {bond_len} out of range"
-                    )
+                    assert 1.0 < bond_len < 2.0, f"Bond length {bond_len} out of range"
                     # Bond angles should be reasonable (~1.5-2.5 rad)
                     assert 1.0 < bond_angle < 3.0, (
                         f"Bond angle {bond_angle} out of range"

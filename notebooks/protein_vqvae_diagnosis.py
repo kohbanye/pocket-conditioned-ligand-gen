@@ -234,7 +234,8 @@ def _(
         return torch.cat(all_vq_recon), torch.cat(all_z), torch.cat(all_z_quantized)
 
     vq_recon, z_all, z_quantized_all = run_vq_reconstruction(
-        protein_vqvae, protein_test,
+        protein_vqvae,
+        protein_test,
     )
 
     # Normalized-space MSE
@@ -285,9 +286,18 @@ def _(
     vq_orig: ndarray,
 ):
     dim_labels = [
-        "N_d", "N_θ", "N_sin", "N_cos",
-        "CA_d", "CA_θ", "CA_sin", "CA_cos",
-        "C_d", "C_θ", "C_sin", "C_cos",
+        "N_d",
+        "N_θ",
+        "N_sin",
+        "N_cos",
+        "CA_d",
+        "CA_θ",
+        "CA_sin",
+        "CA_cos",
+        "C_d",
+        "C_θ",
+        "C_sin",
+        "C_cos",
     ]
     group_labels = ["N atom", "CA atom", "C atom"]
 
@@ -574,7 +584,9 @@ def _(
             centroid, rotation = _compute_canonical_frame(ca_coords_f)
             pocket_frame = (centroid, rotation)
             prot_desc, prot_meta = desc_calc.compute(
-                backbone_orig, residue_ids, pocket_frame=pocket_frame,
+                backbone_orig,
+                residue_ids,
+                pocket_frame=pocket_frame,
             )
             n_res = len(prot_desc)
 
@@ -816,9 +828,18 @@ def _(
     protein_test: Tensor,
 ):
     dim_labels_full = [
-        "N_d", "N_θ", "N_sin", "N_cos",
-        "CA_d", "CA_θ", "CA_sin", "CA_cos",
-        "C_d", "C_θ", "C_sin", "C_cos",
+        "N_d",
+        "N_θ",
+        "N_sin",
+        "N_cos",
+        "CA_d",
+        "CA_θ",
+        "CA_sin",
+        "CA_cos",
+        "C_d",
+        "C_θ",
+        "C_sin",
+        "C_cos",
     ]
 
     _test_np = protein_test.cpu().numpy()  # normalized
@@ -902,9 +923,18 @@ def _(
     vq_recon: Tensor,
 ):
     dim_labels_norm = [
-        "N_d", "N_θ", "N_sin", "N_cos",
-        "CA_d", "CA_θ", "CA_sin", "CA_cos",
-        "C_d", "C_θ", "C_sin", "C_cos",
+        "N_d",
+        "N_θ",
+        "N_sin",
+        "N_cos",
+        "CA_d",
+        "CA_θ",
+        "CA_sin",
+        "CA_cos",
+        "C_d",
+        "C_θ",
+        "C_sin",
+        "C_cos",
     ]
 
     _test_np = protein_test.cpu().numpy()
@@ -928,7 +958,8 @@ def _(
         vq_per_dim_mse[8:12].mean(),
     ]
     _axes[1].bar(
-        range(3), group_mse,
+        range(3),
+        group_mse,
         color=["#e74c3c", "#3498db", "#2ecc71"],
     )
     _axes[1].set_xticks(range(3), ["N atom", "CA atom", "C atom"])

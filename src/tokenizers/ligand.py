@@ -607,7 +607,6 @@ class LigandDescriptor:
         return coords
 
 
-
 class LigandTokenizer:
     """High-level ligand tokenizer combining descriptors and VQ-VAE."""
 

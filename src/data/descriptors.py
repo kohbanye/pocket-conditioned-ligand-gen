@@ -961,10 +961,14 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             return CombinedLoader(
                 {
                     "protein": self._build_sharded_loader(
-                        shard_plan, "protein", shuffle=shuffle,
+                        shard_plan,
+                        "protein",
+                        shuffle=shuffle,
                     ),
                     "ligand": self._build_sharded_loader(
-                        shard_plan, "ligand", shuffle=shuffle,
+                        shard_plan,
+                        "ligand",
+                        shuffle=shuffle,
                     ),
                 },
                 mode="max_size_cycle",
@@ -983,17 +987,26 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
     def train_dataloader(self) -> CombinedLoader:
         """Return train dataloaders for protein and ligand."""
         return self._make_combined_loader(
-            self._train_plan, self.protein_train, self.ligand_train, shuffle=True,
+            self._train_plan,
+            self.protein_train,
+            self.ligand_train,
+            shuffle=True,
         )
 
     def val_dataloader(self) -> CombinedLoader:
         """Return validation dataloaders for protein and ligand."""
         return self._make_combined_loader(
-            self._val_plan, self.protein_val, self.ligand_val, shuffle=False,
+            self._val_plan,
+            self.protein_val,
+            self.ligand_val,
+            shuffle=False,
         )
 
     def test_dataloader(self) -> CombinedLoader:
         """Return test dataloaders for protein and ligand."""
         return self._make_combined_loader(
-            self._test_plan, self.protein_test, self.ligand_test, shuffle=False,
+            self._test_plan,
+            self.protein_test,
+            self.ligand_test,
+            shuffle=False,
         )

@@ -204,7 +204,9 @@ def _(
     # Compute protein descriptors → VQ-VAE tokens
     protein_desc_calc = BackboneZMatrixDescriptor()
     prot_desc_raw, prot_meta = protein_desc_calc.compute(
-        backbone_coords, residue_ids, pocket_frame=pocket_frame,
+        backbone_coords,
+        residue_ids,
+        pocket_frame=pocket_frame,
     )
 
     prot_t = torch.from_numpy(prot_desc_raw).to(device)
@@ -924,8 +926,12 @@ def _(
             pr_desc = (
                 pr * norm_stats["protein_std"] + norm_stats["protein_mean"]
             ).numpy()
-            bb_orig = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(pd_raw, pm)
-            bb_recon = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(pr_desc, pm)
+            bb_orig = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
+                pd_raw, pm
+            )
+            bb_recon = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
+                pr_desc, pm
+            )
             prot_rmsds.append(np.sqrt(np.mean((bb_orig - bb_recon) ** 2)))
 
             # Ligand

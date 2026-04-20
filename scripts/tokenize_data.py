@@ -106,7 +106,9 @@ def _tokenize_complex(
 
     # Protein structure tokens (12D backbone Z-matrix)
     prot_desc, _prot_meta = ctx.protein_desc.compute(
-        backbone_coords, residue_ids, pocket_frame=pocket_frame,
+        backbone_coords,
+        residue_ids,
+        pocket_frame=pocket_frame,
     )
     prot_t = torch.from_numpy(prot_desc).to(ctx.device)
     prot_t = (prot_t - ctx.protein_mean) / ctx.protein_std
