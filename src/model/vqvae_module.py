@@ -6,13 +6,44 @@ from typing import TYPE_CHECKING
 
 import lightning as L
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from src.tokenizers.vqvae import TransformerVQVAE
 
 if TYPE_CHECKING:
     from src.config import VQVAETrainingConfig
+
+
+class TaskWeighting(nn.Module):
+    """Kendall & Gal (2018) uncertainty weighting for two scalar losses.
+
+    Parameterises each task's observation noise as ``s = log σ²`` (a single
+    learnable scalar). The combined objective
+    ``exp(-s_r) * recon + s_r + exp(-s_c) * coord + s_c`` has a unique
+    stationary point at ``exp(-s_i) = 1 / L_i``, so the weight of each task
+    is automatically matched to its current loss scale — no sweep needed.
+
+    Notes on scope:
+        * Only used when ``coord_loss_enabled`` is True. When disabled, the
+          caller should fall back to a plain ``recon + commitment`` sum so
+          ``s_c`` does not drift to -∞ under identically-zero ``coord``.
+        * The commitment loss is *not* routed through this module: its
+          weight is tied to codebook semantics (not task balance).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.log_var_recon = nn.Parameter(torch.zeros(()))
+        self.log_var_coord = nn.Parameter(torch.zeros(()))
+
+    def forward(self, recon: Tensor, coord: Tensor) -> Tensor:
+        return (
+            torch.exp(-self.log_var_recon) * recon
+            + self.log_var_recon
+            + torch.exp(-self.log_var_coord) * coord
+            + self.log_var_coord
+        )
 
 
 class VQVAEModule(L.LightningModule):
@@ -31,12 +62,79 @@ class VQVAEModule(L.LightningModule):
         self.protein_vqvae = TransformerVQVAE(config.protein)
         self.ligand_vqvae = TransformerVQVAE(config.ligand)
 
+        # Per-model uncertainty weighting (only active when coord loss is on).
+        self.protein_task_weighting = TaskWeighting()
+        self.ligand_task_weighting = TaskWeighting()
+
         # Track codebook usage for utilization metrics
         self.automatic_optimization = False
 
+    # ------------------------------------------------------------------
+    # Lifecycle: inject descriptor normalization stats into each VQ-VAE
+    # so the coord loss can denormalize descriptors back to Å.
+    # ------------------------------------------------------------------
+
+    def on_fit_start(self) -> None:
+        self._inject_normalization_stats()
+
+    def on_validation_start(self) -> None:
+        self._inject_normalization_stats()
+
+    def on_test_start(self) -> None:
+        self._inject_normalization_stats()
+
+    def _inject_normalization_stats(self) -> None:
+        """Push ``norm_stats`` from the DataModule into each VQ-VAE buffer."""
+        dm = getattr(self.trainer, "datamodule", None)
+        stats = getattr(dm, "norm_stats", None) if dm is not None else None
+        if stats is None:
+            return
+        if "protein_mean" in stats and "protein_std" in stats:
+            self.protein_vqvae.set_normalization(
+                stats["protein_mean"],
+                stats["protein_std"],
+            )
+        if "ligand_mean" in stats and "ligand_std" in stats:
+            self.ligand_vqvae.set_normalization(
+                stats["ligand_mean"],
+                stats["ligand_std"],
+            )
+
+    # ------------------------------------------------------------------
+    # Batch unpacking helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _unpack(
+        entry: tuple,
+    ) -> tuple[Tensor, Tensor, Tensor | None]:
+        """Accept (x, mask) or (x, aux, mask). Returns (x, mask, aux)."""
+        if len(entry) == 2:  # noqa: PLR2004
+            x, mask = entry
+            return x, mask, None
+        if len(entry) == 3:  # noqa: PLR2004
+            x, aux, mask = entry
+            return x, mask, aux
+        msg = f"Unexpected batch tuple length: {len(entry)}"
+        raise ValueError(msg)
+
+    def _combine_losses(
+        self,
+        task_weighting: TaskWeighting,
+        out: dict[str, Tensor],
+        *,
+        coord_loss_enabled: bool,
+    ) -> Tensor:
+        """Combine recon + coord (via TaskWeighting) + commitment."""
+        recon = out["reconstruction_loss"]
+        commit = out["commitment_loss"]
+        if coord_loss_enabled:
+            return task_weighting(recon, out["coord_loss"]) + commit
+        return recon + commit
+
     def training_step(
         self,
-        batch: dict[str, tuple[Tensor, Tensor]],
+        batch: dict[str, tuple],
         batch_idx: int,  # noqa: ARG002
     ) -> None:
         opt = self.optimizers()
@@ -47,26 +145,40 @@ class VQVAEModule(L.LightningModule):
 
         total_loss = torch.tensor(0.0, device=self.device)
 
-        # Protein VQ-VAE (sequence batch with mask)
+        # Protein VQ-VAE (sequence batch with mask, optional aux)
         if "protein" in batch:
-            prot_x, prot_mask = batch["protein"]
-            prot_out = self.protein_vqvae(prot_x, mask=prot_mask)
-            prot_loss = prot_out["reconstruction_loss"] + prot_out["commitment_loss"]
+            prot_x, prot_mask, prot_aux = self._unpack(batch["protein"])
+            prot_out = self.protein_vqvae(prot_x, mask=prot_mask, aux=prot_aux)
+            prot_loss = self._combine_losses(
+                self.protein_task_weighting,
+                prot_out,
+                coord_loss_enabled=self.config.protein.coord_loss_enabled,
+            )
             total_loss = total_loss + prot_loss
             self.log("train/protein_recon", prot_out["reconstruction_loss"])
             self.log("train/protein_commit", prot_out["commitment_loss"])
+            if self.config.protein.coord_loss_enabled:
+                self._log_task_weighting("train/protein", self.protein_task_weighting)
+                self.log("train/protein_coord", prot_out["coord_loss"])
             real_indices = prot_out["indices"][prot_mask]
             self._log_utilization("train/protein", real_indices)
             self._log_diagnostics("train/protein", prot_out["diagnostics"])
 
-        # Ligand VQ-VAE (sequence batch with mask)
+        # Ligand VQ-VAE (sequence batch with mask, optional aux)
         if "ligand" in batch:
-            lig_x, lig_mask = batch["ligand"]
-            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask)
-            lig_loss = lig_out["reconstruction_loss"] + lig_out["commitment_loss"]
+            lig_x, lig_mask, lig_aux = self._unpack(batch["ligand"])
+            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask, aux=lig_aux)
+            lig_loss = self._combine_losses(
+                self.ligand_task_weighting,
+                lig_out,
+                coord_loss_enabled=self.config.ligand.coord_loss_enabled,
+            )
             total_loss = total_loss + lig_loss
             self.log("train/ligand_recon", lig_out["reconstruction_loss"])
             self.log("train/ligand_commit", lig_out["commitment_loss"])
+            if self.config.ligand.coord_loss_enabled:
+                self._log_task_weighting("train/ligand", self.ligand_task_weighting)
+                self.log("train/ligand_coord", lig_out["coord_loss"])
             real_indices = lig_out["indices"][lig_mask]
             self._log_utilization("train/ligand", real_indices)
             self._log_diagnostics("train/ligand", lig_out["diagnostics"])
@@ -88,51 +200,57 @@ class VQVAEModule(L.LightningModule):
 
     def validation_step(
         self,
-        batch: dict[str, tuple[Tensor, Tensor]],
+        batch: dict[str, tuple],
         batch_idx: int,  # noqa: ARG002
     ) -> None:
         if "protein" in batch:
-            prot_x, prot_mask = batch["protein"]
-            prot_out = self.protein_vqvae(prot_x, mask=prot_mask)
+            prot_x, prot_mask, prot_aux = self._unpack(batch["protein"])
+            prot_out = self.protein_vqvae(prot_x, mask=prot_mask, aux=prot_aux)
             self.log(
                 "val/protein_recon",
                 prot_out["reconstruction_loss"],
                 sync_dist=True,
             )
             self.log("val/protein_commit", prot_out["commitment_loss"], sync_dist=True)
+            if self.config.protein.coord_loss_enabled:
+                self.log("val/protein_coord", prot_out["coord_loss"], sync_dist=True)
             real_indices = prot_out["indices"][prot_mask]
             self._log_utilization("val/protein", real_indices)
             self._log_diagnostics("val/protein", prot_out["diagnostics"])
 
         if "ligand" in batch:
-            lig_x, lig_mask = batch["ligand"]
-            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask)
+            lig_x, lig_mask, lig_aux = self._unpack(batch["ligand"])
+            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask, aux=lig_aux)
             self.log("val/ligand_recon", lig_out["reconstruction_loss"], sync_dist=True)
             self.log("val/ligand_commit", lig_out["commitment_loss"], sync_dist=True)
+            if self.config.ligand.coord_loss_enabled:
+                self.log("val/ligand_coord", lig_out["coord_loss"], sync_dist=True)
             real_indices = lig_out["indices"][lig_mask]
             self._log_utilization("val/ligand", real_indices)
             self._log_diagnostics("val/ligand", lig_out["diagnostics"])
 
     def test_step(
         self,
-        batch: dict[str, tuple[Tensor, Tensor]],
+        batch: dict[str, tuple],
         batch_idx: int,  # noqa: ARG002
     ) -> None:
         if "protein" in batch:
-            prot_x, prot_mask = batch["protein"]
-            prot_out = self.protein_vqvae(prot_x, mask=prot_mask)
+            prot_x, prot_mask, prot_aux = self._unpack(batch["protein"])
+            prot_out = self.protein_vqvae(prot_x, mask=prot_mask, aux=prot_aux)
             self.log(
                 "test/protein_recon",
                 prot_out["reconstruction_loss"],
                 sync_dist=True,
             )
             self.log("test/protein_commit", prot_out["commitment_loss"], sync_dist=True)
+            if self.config.protein.coord_loss_enabled:
+                self.log("test/protein_coord", prot_out["coord_loss"], sync_dist=True)
             real_indices = prot_out["indices"][prot_mask]
             self._log_utilization("test/protein", real_indices)
 
         if "ligand" in batch:
-            lig_x, lig_mask = batch["ligand"]
-            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask)
+            lig_x, lig_mask, lig_aux = self._unpack(batch["ligand"])
+            lig_out = self.ligand_vqvae(lig_x, mask=lig_mask, aux=lig_aux)
             self.log(
                 "test/ligand_recon",
                 lig_out["reconstruction_loss"],
@@ -143,8 +261,17 @@ class VQVAEModule(L.LightningModule):
                 lig_out["commitment_loss"],
                 sync_dist=True,
             )
+            if self.config.ligand.coord_loss_enabled:
+                self.log("test/ligand_coord", lig_out["coord_loss"], sync_dist=True)
             real_indices = lig_out["indices"][lig_mask]
             self._log_utilization("test/ligand", real_indices)
+
+    def _log_task_weighting(self, prefix: str, weighting: TaskWeighting) -> None:
+        """Log uncertainty-weighting scalars: log σ² and effective task weights."""
+        self.log(f"{prefix}_log_sigma_recon", weighting.log_var_recon.detach())
+        self.log(f"{prefix}_log_sigma_coord", weighting.log_var_coord.detach())
+        self.log(f"{prefix}_recon_weight", torch.exp(-weighting.log_var_recon.detach()))
+        self.log(f"{prefix}_coord_weight", torch.exp(-weighting.log_var_coord.detach()))
 
     def _log_utilization(self, prefix: str, indices: Tensor) -> None:
         """Log codebook utilization and perplexity."""

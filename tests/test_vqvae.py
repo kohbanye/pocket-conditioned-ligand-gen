@@ -75,6 +75,8 @@ class TestTransformerLigandVQVAE:
             "num_attention_heads": 4,
             "transformer_feedforward_dim": 128,
             "max_seq_len": 64,
+            # These tests exercise the descriptor path only.
+            "coord_loss_enabled": False,
         }
         defaults.update(kwargs)
         return LigandVQVAEConfig(**defaults)
@@ -224,6 +226,7 @@ class TestVQVAEModuleBatchFormat:
                 num_attention_heads=4,
                 transformer_feedforward_dim=64,
                 max_seq_len=32,
+                coord_loss_enabled=False,
             ),
             ligand=LigandVQVAEConfig(
                 hidden_dim=32,
@@ -233,6 +236,7 @@ class TestVQVAEModuleBatchFormat:
                 num_attention_heads=4,
                 transformer_feedforward_dim=64,
                 max_seq_len=32,
+                coord_loss_enabled=False,
             ),
         )
         module = VQVAEModule(config)

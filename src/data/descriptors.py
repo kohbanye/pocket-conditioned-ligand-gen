@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+from typing import ClassVar
+
 import lightning as L
 import numpy as np
 import torch
@@ -44,6 +46,10 @@ _DEFAULT_SHARD_SIZE = 50_000
 _SHARD_DIR_NAME = "shards"
 _SHARD_METADATA_FILE = "shard_metadata.pt"
 _NORMALIZATION_STATS_FILE = "normalization_stats.pt"
+# Bumped when the shard payload schema changes. v2 adds per-entry
+# ``ligand_refs`` (DFS-position Z-matrix refs) and ``protein_segment_start``
+# (bool per residue) used by the 3D coord-reconstruction loss.
+_SHARD_SCHEMA_VERSION = 2
 
 # Per-worker state for multiprocessing (set by _worker_init).
 _worker_protein_desc: BackboneZMatrixDescriptor | None = None
@@ -212,6 +218,36 @@ def _group_entries_by_receptor(
     ]
 
 
+def _refs_orig_to_dfs(
+    refs_orig: list[tuple[int, int, int]],
+    order: list[int],
+) -> np.ndarray:
+    """Rewrite ``(parent, angle_ref, dihedral_ref)`` from original-atom indices
+    to DFS-position indices. ``-1`` stays ``-1``.
+
+    ``_reconstruct_coords_ligand`` gathers from a DFS-ordered coord tensor,
+    so the refs stored in shards must be in DFS-position space.
+    """
+    order_inv = np.full(len(order), -1, dtype=np.int32)
+    for dfs_pos, orig in enumerate(order):
+        order_inv[orig] = dfs_pos
+    out = np.full((len(refs_orig), 3), -1, dtype=np.int32)
+    for pos, triple in enumerate(refs_orig):
+        for j, orig_idx in enumerate(triple):
+            out[pos, j] = -1 if orig_idx == -1 else int(order_inv[orig_idx])
+    return out
+
+
+def _segments_to_starts(segments: list[tuple[int, int]], length: int) -> np.ndarray:
+    """Convert ``[(seg_start, seg_end), ...]`` into a ``(length,)`` bool mask
+    that is True at each residue that begins a new segment."""
+    out = np.zeros(length, dtype=bool)
+    for seg_start, _seg_end in segments:
+        if 0 <= seg_start < length:
+            out[seg_start] = True
+    return out
+
+
 def _process_pose(
     mol: dict,
     precomputed: object,
@@ -238,12 +274,12 @@ def _process_pose(
     centroid, rotation = _compute_canonical_frame(ca_coords)
     pocket_frame = (centroid, rotation)
 
-    prot_desc_arr, _prot_meta = protein_desc.compute(
+    prot_desc_arr, prot_meta = protein_desc.compute(
         backbone_coords,
         residue_ids,
         pocket_frame=pocket_frame,
     )
-    lig_desc_arr, elements, _lig_meta = ligand_desc.compute(
+    lig_desc_arr, elements, lig_meta = ligand_desc.compute(
         mol["atoms"],
         mol["bonds"],
         pocket_frame=pocket_frame,
@@ -251,7 +287,19 @@ def _process_pose(
     if len(lig_desc_arr) == 0:
         return None
 
-    return {"protein": prot_desc_arr, "ligand": lig_desc_arr, "elements": elements}
+    ligand_refs = _refs_orig_to_dfs(lig_meta["refs"], lig_meta["order"])
+    protein_segment_start = _segments_to_starts(
+        prot_meta["segments"],
+        len(prot_desc_arr),
+    )
+
+    return {
+        "protein": prot_desc_arr,
+        "ligand": lig_desc_arr,
+        "elements": elements,
+        "ligand_refs": ligand_refs,
+        "protein_segment_start": protein_segment_start,
+    }
 
 
 def _worker_process_receptor_group(
@@ -449,13 +497,15 @@ def _save_shard_metadata(
     metadata = {
         "total_count": total_count,
         "shard_counts": shard_counts,
+        "schema_version": _SHARD_SCHEMA_VERSION,
     }
     torch.save(metadata, cache_dir / _SHARD_METADATA_FILE)
     torch.save(sorted(unique_elements), cache_dir / "ligand_elements.pt")
     logger.info(
-        "Cached %d complexes in %d shards",
+        "Cached %d complexes in %d shards (schema v%d)",
         total_count,
         len(shard_counts),
+        _SHARD_SCHEMA_VERSION,
     )
 
 
@@ -511,13 +561,9 @@ class MoleculeDataset(Dataset[Tensor]):
 def collate_molecules(batch: list[Tensor]) -> tuple[Tensor, Tensor]:
     """Pad variable-length molecules and create attention mask.
 
-    Args:
-        batch: List of tensors, each ``(N_atoms_i, descriptor_dim)``.
-
-    Returns:
-        Tuple of ``(padded, mask)`` where *padded* has shape
-        ``(B, max_len, descriptor_dim)`` and *mask* is a boolean tensor
-        of shape ``(B, max_len)`` (``True`` for real atoms).
+    Legacy 2-tuple collator used when no auxiliary metadata is threaded
+    through (e.g. protein path without segment starts, or descriptor-only
+    tests). Returns ``(padded, mask)``.
     """
     max_len = max(mol.shape[0] for mol in batch)
     descriptor_dim = batch[0].shape[1]
@@ -533,12 +579,67 @@ def collate_molecules(batch: list[Tensor]) -> tuple[Tensor, Tensor]:
     return padded, mask
 
 
-class ShardedMoleculeDataset(IterableDataset[Tensor]):
-    """Lazily streams normalized descriptors from on-disk shards.
+def collate_ligand_with_refs(
+    batch: list[tuple[Tensor, Tensor]],
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Pad ligand descriptors and DFS-position refs.
 
-    Each shard file is loaded once per epoch per worker, avoiding the need
-    to hold all data in RAM simultaneously.
+    Each batch entry is ``(desc (N, 4), refs (N, 3))``. Refs are padded with
+    ``-1`` to mark invalid slots. Returns ``(padded_desc, padded_refs, mask)``.
     """
+    max_len = max(desc.shape[0] for desc, _ in batch)
+    descriptor_dim = batch[0][0].shape[1]
+
+    padded = torch.zeros(len(batch), max_len, descriptor_dim)
+    refs = torch.full((len(batch), max_len, 3), -1, dtype=torch.long)
+    mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
+
+    for i, (desc, ref) in enumerate(batch):
+        n = desc.shape[0]
+        padded[i, :n] = desc
+        refs[i, :n] = ref.to(torch.long)
+        mask[i, :n] = True
+
+    return padded, refs, mask
+
+
+def collate_protein_with_segments(
+    batch: list[tuple[Tensor, Tensor]],
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Pad protein descriptors and segment-start flags.
+
+    Each batch entry is ``(desc (L, 12), segment_start (L,))``. Segment
+    starts are padded with False. Returns
+    ``(padded_desc, padded_segment_start, mask)``.
+    """
+    max_len = max(desc.shape[0] for desc, _ in batch)
+    descriptor_dim = batch[0][0].shape[1]
+
+    padded = torch.zeros(len(batch), max_len, descriptor_dim)
+    segment_start = torch.zeros(len(batch), max_len, dtype=torch.bool)
+    mask = torch.zeros(len(batch), max_len, dtype=torch.bool)
+
+    for i, (desc, seg) in enumerate(batch):
+        n = desc.shape[0]
+        padded[i, :n] = desc
+        segment_start[i, :n] = seg.to(torch.bool)
+        mask[i, :n] = True
+
+    return padded, segment_start, mask
+
+
+class ShardedMoleculeDataset(IterableDataset):
+    """Lazily streams normalized descriptors (+ auxiliary metadata) from shards.
+
+    Yields ``(desc, aux)`` tuples per entry. For the ``"ligand"`` key,
+    ``aux`` is the DFS-position refs tensor ``(N, 3)`` int64. For the
+    ``"protein"`` key, ``aux`` is the segment-start bool tensor ``(L,)``.
+    """
+
+    AUX_KEY: ClassVar[dict[str, str]] = {
+        "ligand": "ligand_refs",
+        "protein": "protein_segment_start",
+    }
 
     def __init__(  # noqa: PLR0913
         self,
@@ -551,9 +652,13 @@ class ShardedMoleculeDataset(IterableDataset[Tensor]):
         shuffle: bool = False,
     ) -> None:
         super().__init__()
+        if key not in self.AUX_KEY:
+            msg = f"Unsupported shard key: {key!r}"
+            raise ValueError(msg)
         self.shard_dir = shard_dir
         self.shard_plan = shard_plan
         self.key = key
+        self.aux_key = self.AUX_KEY[key]
         self.mean = mean
         self.std = std
         self.shuffle = shuffle
@@ -591,10 +696,19 @@ class ShardedMoleculeDataset(IterableDataset[Tensor]):
                 weights_only=False,
             )
             for local_idx in local_indices:
-                desc = shard_data[local_idx][self.key]
-                yield torch.from_numpy(
-                    (desc - self.mean) / self.std,
-                ).float()
+                entry = shard_data[local_idx]
+                desc = entry[self.key]
+                desc_t = torch.from_numpy((desc - self.mean) / self.std).float()
+                aux = entry.get(self.aux_key)
+                if aux is None:
+                    msg = (
+                        f"Shard entry missing {self.aux_key!r}; the cache "
+                        "predates schema v2. Delete the descriptor_cache "
+                        "directory and re-run prepare_data."
+                    )
+                    raise RuntimeError(msg)
+                aux_t = torch.from_numpy(np.asarray(aux))
+                yield desc_t, aux_t
             del shard_data
 
 
@@ -725,7 +839,24 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             raise FileNotFoundError(msg)
 
     def _setup_from_monolithic(self) -> None:
-        """Load from legacy monolithic ``complexes.pt`` cache."""
+        """Load from legacy monolithic ``complexes.pt`` cache.
+
+        Note: the monolithic path does not thread ligand_refs /
+        protein_segment_start through its collator, so coord-loss training
+        is unsupported from this cache format. It remains only for
+        read-only inspection of pre-shard caches.
+        """
+        coord_on = (
+            self.training_config.protein.coord_loss_enabled
+            or self.training_config.ligand.coord_loss_enabled
+        )
+        if coord_on:
+            msg = (
+                f"Monolithic cache at {self.cache_dir}/complexes.pt is not "
+                "compatible with coord_loss_enabled=True. Delete it and "
+                "re-run prepare_data to regenerate shards (schema v2)."
+            )
+            raise RuntimeError(msg)
         complexes: list[dict[str, np.ndarray | list[str]]] = torch.load(
             self.cache_dir / "complexes.pt",
             weights_only=False,
@@ -782,12 +913,22 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
         self._log_split_sizes()
 
-    def _setup_from_shards(self) -> None:
+    def _setup_from_shards(self) -> None:  # noqa: PLR0915
         """Stream-load shards with two passes: stats then normalization."""
         metadata: dict = torch.load(
             self.cache_dir / _SHARD_METADATA_FILE,
             weights_only=False,
         )
+        cached_version = int(metadata.get("schema_version", 1))
+        if cached_version < _SHARD_SCHEMA_VERSION:
+            msg = (
+                f"Shard cache at {self.cache_dir} is schema v{cached_version} "
+                f"(expected v{_SHARD_SCHEMA_VERSION}). The 3D coord-reconstruction "
+                "loss needs per-entry 'ligand_refs' and 'protein_segment_start', "
+                "which older caches don't carry. Delete the descriptor_cache "
+                "directory and re-run prepare_data to regenerate shards."
+            )
+            raise RuntimeError(msg)
         n = metadata["total_count"]
         shard_counts: list[int] = metadata["shard_counts"]
         shard_dir = self.cache_dir / _SHARD_DIR_NAME
@@ -940,13 +1081,18 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             shuffle=shuffle,
         )
         nw = self.training_config.num_workers
+        collate_fn = (
+            collate_ligand_with_refs
+            if key == "ligand"
+            else collate_protein_with_segments
+        )
         return DataLoader(
             dataset,
             batch_size=self.training_config.mol_batch_size,
             num_workers=nw,
             persistent_workers=nw > 0,
             pin_memory=True,
-            collate_fn=collate_molecules,
+            collate_fn=collate_fn,
         )
 
     def _make_combined_loader(

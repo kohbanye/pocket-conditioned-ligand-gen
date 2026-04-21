@@ -185,6 +185,116 @@ def spherical_to_cartesian(
 
 
 # ---------------------------------------------------------------------------
+# Batched differentiable torch ports (used by the coord-reconstruction loss)
+# ---------------------------------------------------------------------------
+
+
+def spherical_to_cartesian_batched(
+    r: Tensor,
+    theta: Tensor,
+    sin_phi: Tensor,
+    cos_phi: Tensor,
+) -> Tensor:
+    """Batched ``(r, theta, sin phi, cos phi)`` → Cartesian ``(..., 3)``.
+
+    Inputs broadcast over the leading dims; caller is responsible for
+    projecting ``(sin_phi, cos_phi)`` onto the unit circle.
+    """
+    sin_theta = torch.sin(theta)
+    cos_theta = torch.cos(theta)
+    x = r * sin_theta * cos_phi
+    y = r * sin_theta * sin_phi
+    z = r * cos_theta
+    return torch.stack([x, y, z], dim=-1)
+
+
+def canonical_virtual_ref_batched(
+    angle_ref_pos: Tensor,
+    parent_pos: Tensor,
+) -> Tensor:
+    """Batched canonical virtual dihedral reference (``(..., 3)`` → ``(..., 3)``).
+
+    Matches :func:`canonical_virtual_ref`: selects an axis not parallel to
+    the parent→angle-ref bond direction. Zero-length bond falls back to
+    the z-axis offset (same as the numpy branch).
+    """
+    bond = parent_pos - angle_ref_pos
+    bond_norm_sq = (bond * bond).sum(dim=-1, keepdim=True)
+    bond_norm = bond_norm_sq.clamp_min(_EPS * _EPS).sqrt()
+    bond_hat = bond / bond_norm
+
+    z_axis = angle_ref_pos.new_tensor([0.0, 0.0, 1.0])
+    x_axis = angle_ref_pos.new_tensor([1.0, 0.0, 0.0])
+    use_x = bond_hat[..., 2:3].abs() > 0.9  # noqa: PLR2004
+    axis = torch.where(use_x, x_axis, z_axis)
+    return angle_ref_pos + axis
+
+
+def place_atom_batched(  # noqa: PLR0913
+    ref_a: Tensor,
+    ref_b: Tensor,
+    ref_c: Tensor,
+    bond_length: Tensor,
+    angle: Tensor,
+    sin_tau: Tensor,
+    cos_tau: Tensor,
+) -> Tensor:
+    """Batched differentiable NeRF placement.
+
+    ``ref_a``, ``ref_b``, ``ref_c`` are ``(..., 3)`` positions
+    (dihedral_ref, angle_ref, parent). Scalars ``bond_length``, ``angle``,
+    ``sin_tau``, ``cos_tau`` have shape ``(...)``. Caller projects
+    ``(sin_tau, cos_tau)`` onto the unit circle. Matches
+    :func:`place_atom` numerically.
+    """
+    v1 = ref_b - ref_c
+    v1_norm_sq = (v1 * v1).sum(dim=-1, keepdim=True)
+    v1_norm = v1_norm_sq.clamp_min(_EPS * _EPS).sqrt()
+    v1_hat = v1 / v1_norm
+
+    v2 = ref_a - ref_b
+    n = torch.linalg.cross(v1_hat, v2, dim=-1)
+    n_norm_sq = (n * n).sum(dim=-1, keepdim=True)
+
+    # Degenerate-cross-product fallback: pick a perpendicular axis
+    # that is not parallel to v1_hat.
+    x_axis = v1.new_tensor([1.0, 0.0, 0.0])
+    y_axis = v1.new_tensor([0.0, 1.0, 0.0])
+    use_x = v1_hat[..., 0:1].abs() < 0.9  # noqa: PLR2004
+    perp = torch.where(use_x, x_axis, y_axis)
+    n_fallback = torch.linalg.cross(v1_hat, perp, dim=-1)
+
+    use_fallback = n_norm_sq < (_EPS * _EPS)
+    n_selected = torch.where(use_fallback, n_fallback, n)
+    n_sel_norm_sq = (n_selected * n_selected).sum(dim=-1, keepdim=True)
+    n_hat = n_selected / n_sel_norm_sq.clamp_min(_EPS * _EPS).sqrt()
+
+    m = torch.linalg.cross(n_hat, v1_hat, dim=-1)
+
+    cos_ang = torch.cos(angle).unsqueeze(-1)
+    sin_ang = torch.sin(angle).unsqueeze(-1)
+    s_tau = sin_tau.unsqueeze(-1)
+    c_tau = cos_tau.unsqueeze(-1)
+    bl = bond_length.unsqueeze(-1)
+
+    return ref_c + bl * (
+        cos_ang * v1_hat + sin_ang * c_tau * m + sin_ang * s_tau * n_hat
+    )
+
+
+def project_unit_circle(sin_v: Tensor, cos_v: Tensor) -> tuple[Tensor, Tensor]:
+    """Project ``(sin, cos)`` onto the unit circle to stabilise NeRF inputs.
+
+    Network outputs are not constrained to ``sin² + cos² = 1``; feeding
+    unnormalised values into :func:`place_atom_batched` produces
+    out-of-scale placements. Safe under autograd.
+    """
+    norm_sq = sin_v * sin_v + cos_v * cos_v
+    norm = norm_sq.clamp_min(_EPS * _EPS).sqrt()
+    return sin_v / norm, cos_v / norm
+
+
+# ---------------------------------------------------------------------------
 # Positional encoding
 # ---------------------------------------------------------------------------
 

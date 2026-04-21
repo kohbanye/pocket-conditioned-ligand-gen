@@ -43,7 +43,7 @@ class ProteinVQVAEConfig:
     hidden_dim: int = 256
     latent_dim: int = 16
     codebook_size: int = 2048
-    commitment_cost: float = 0.1
+    commitment_cost: float = 0.25
     ema_decay: float = 0.99
     # Transformer context parameters
     num_transformer_layers: int = 4
@@ -51,6 +51,10 @@ class ProteinVQVAEConfig:
     transformer_feedforward_dim: int = 512
     transformer_dropout: float = 0.1
     max_seq_len: int = 256
+    # 3D coord-reconstruction loss
+    coord_loss_enabled: bool = True
+    coord_loss_kind: str = "protein_backbone"
+    coord_loss_bond_length_min: float = 0.5
 
 
 @dataclass
@@ -69,6 +73,10 @@ class LigandVQVAEConfig:
     transformer_feedforward_dim: int = 512
     transformer_dropout: float = 0.1
     max_seq_len: int = 256
+    # 3D coord-reconstruction loss
+    coord_loss_enabled: bool = True
+    coord_loss_kind: str = "ligand"
+    coord_loss_bond_length_min: float = 0.5
 
 
 @dataclass
