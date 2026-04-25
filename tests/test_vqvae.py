@@ -1,5 +1,6 @@
 """Tests for VQ-VAE components: collation, LigandVQVAE and ProteinVQVAE."""
 
+import pytest
 import torch
 
 from src.config import LigandVQVAEConfig, ProteinVQVAEConfig, VQVAETrainingConfig
@@ -210,6 +211,121 @@ class TestProteinVQVAE:
         # Decoder should have 3 Linear layers
         linear_layers = [m for m in model.decoder if isinstance(m, torch.nn.Linear)]
         assert len(linear_layers) == 3
+
+
+class TestCircleLoss:
+    """Unit-circle penalty wired into TransformerVQVAE.forward()."""
+
+    def _make_model(self, descriptor_dim: int = 4) -> LigandVQVAE:
+        config = LigandVQVAEConfig(
+            descriptor_dim=descriptor_dim,
+            hidden_dim=32,
+            latent_dim=8,
+            codebook_size=16,
+            num_transformer_layers=1,
+            num_attention_heads=4,
+            transformer_feedforward_dim=64,
+            max_seq_len=16,
+            coord_loss_enabled=False,
+        )
+        return LigandVQVAE(config)
+
+    def test_circle_loss_present_in_output(self) -> None:
+        model = self._make_model()
+        model.eval()
+        x = torch.randn(2, 5, 4)
+        mask = torch.ones(2, 5, dtype=torch.bool)
+        with torch.no_grad():
+            out = model(x, mask=mask)
+        assert "circle_loss" in out
+        assert out["circle_loss"].shape == ()
+        assert out["circle_loss"].item() >= 0.0
+
+    def test_circle_loss_zero_on_unit_circle(self) -> None:
+        """When sin² + cos² == 1 identically, penalty is ~0 despite noisy x_hat."""
+        model = self._make_model()
+        model.eval()
+        # Drive x_hat toward unit-circle sin/cos by feeding unit-circle x with
+        # identity-ish normalization: mean=0, std=1 means denorm == input.
+        mean = torch.zeros(4)
+        std = torch.ones(4)
+        model.set_normalization(mean, std)
+
+        x_hat = torch.zeros(2, 5, 4)
+        x_hat[..., 2] = 1.0  # sin
+        x_hat[..., 3] = 0.0  # cos
+        mask = torch.ones(2, 5, dtype=torch.bool)
+        loss = model._compute_circle_loss(x_hat, mask)  # noqa: SLF001
+        assert loss.item() == 0.0
+
+    def test_circle_loss_positive_off_circle(self) -> None:
+        model = self._make_model()
+        model.eval()
+        model.set_normalization(torch.zeros(4), torch.ones(4))
+        x_hat = torch.zeros(2, 5, 4)
+        x_hat[..., 2] = 2.0  # sin too big
+        x_hat[..., 3] = 2.0  # cos too big
+        mask = torch.ones(2, 5, dtype=torch.bool)
+        loss = model._compute_circle_loss(x_hat, mask)  # noqa: SLF001
+        # (2² + 2² - 1)² = 7² = 49
+        assert loss.item() == 49.0
+
+
+class TestCoordLossRamp:
+    """Warmup ramp for coord loss inside VQVAEModule._combine_losses."""
+
+    def _make_module(self, warmup: int) -> VQVAEModule:
+        config = VQVAETrainingConfig(
+            coord_loss_warmup_epochs=warmup,
+            protein=ProteinVQVAEConfig(
+                descriptor_dim=12,
+                hidden_dim=16,
+                latent_dim=8,
+                codebook_size=8,
+                num_transformer_layers=1,
+                num_attention_heads=2,
+                transformer_feedforward_dim=32,
+                max_seq_len=8,
+                coord_loss_enabled=True,
+            ),
+            ligand=LigandVQVAEConfig(
+                hidden_dim=16,
+                latent_dim=8,
+                codebook_size=8,
+                num_transformer_layers=1,
+                num_attention_heads=2,
+                transformer_feedforward_dim=32,
+                max_seq_len=8,
+                coord_loss_enabled=True,
+            ),
+        )
+        return VQVAEModule(config)
+
+    def test_no_warmup_yields_ramp_one(self) -> None:
+        module = self._make_module(warmup=0)
+        # current_epoch defaults to 0 without a Trainer; warmup=0 bypasses it.
+        assert module._coord_loss_ramp() == 1.0  # noqa: SLF001
+
+    def test_warmup_linear_ramp(self, monkeypatch: "pytest.MonkeyPatch") -> None:
+        module = self._make_module(warmup=10)
+        # Patch the read-only LightningModule.current_epoch property at the
+        # class level so the ramp formula sees a real epoch number.
+        monkeypatch.setattr(
+            type(module),
+            "current_epoch",
+            property(lambda _self: 0),
+        )
+        # Epoch 0 → (0 + 1) / 10 = 0.1
+        assert module._coord_loss_ramp() == pytest.approx(0.1)  # noqa: SLF001
+
+    def test_warmup_plateau_at_one(self, monkeypatch: "pytest.MonkeyPatch") -> None:
+        module = self._make_module(warmup=2)
+        monkeypatch.setattr(
+            type(module),
+            "current_epoch",
+            property(lambda _self: 5),
+        )
+        assert module._coord_loss_ramp() == 1.0  # noqa: SLF001
 
 
 class TestVQVAEModuleBatchFormat:

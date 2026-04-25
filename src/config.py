@@ -55,6 +55,11 @@ class ProteinVQVAEConfig:
     coord_loss_enabled: bool = True
     coord_loss_kind: str = "protein_backbone"
     coord_loss_bond_length_min: float = 0.5
+    # Unit-circle penalty on (sin tau, cos tau) slots of the denormalized
+    # descriptor: lambda * sum((s^2 + c^2 - 1)^2). Keeps decoder outputs on
+    # the unit circle -- otherwise the NeRF step sees drifting phases and
+    # angle error accumulates through the backbone. Set 0 to disable.
+    circle_loss_weight: float = 0.0
 
 
 @dataclass
@@ -77,6 +82,7 @@ class LigandVQVAEConfig:
     coord_loss_enabled: bool = True
     coord_loss_kind: str = "ligand"
     coord_loss_bond_length_min: float = 0.5
+    circle_loss_weight: float = 0.0
 
 
 @dataclass
@@ -88,6 +94,18 @@ class VQVAETrainingConfig:
     max_epochs: int = 100
     num_workers: int = 16
     precision: str = "bf16-mixed"
+    # Linear ramp of ``coord_loss`` from 0 → 1 over the first N epochs.  With
+    # ``TaskWeighting`` the combined objective is unstable when ``coord`` is
+    # orders of magnitude larger than ``recon`` at init, so we hold it at 0
+    # until ``recon`` has had a chance to decrease.  During the ramp phase
+    # (and when 0) we bypass ``TaskWeighting`` so ``log_var_coord`` does not
+    # drift to -∞.  0 disables the warmup (ramp = 1 from epoch 0).
+    coord_loss_warmup_epochs: int = 0
+    # When True, force (sin, cos) slots to mean=0, std=1 in the descriptor
+    # normalization stats so the unit-circle constraint ``s² + c² = 1`` is
+    # preserved in the network's input/output space.  Requires the cached
+    # ``normalization_stats.pt`` to be deleted so it is recomputed.
+    skip_sincos_normalization: bool = False
     protein: ProteinVQVAEConfig = field(default_factory=ProteinVQVAEConfig)
     ligand: LigandVQVAEConfig = field(default_factory=LigandVQVAEConfig)
     pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)

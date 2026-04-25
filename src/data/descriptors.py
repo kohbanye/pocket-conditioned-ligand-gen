@@ -913,7 +913,7 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
         self._log_split_sizes()
 
-    def _setup_from_shards(self) -> None:  # noqa: PLR0915
+    def _setup_from_shards(self) -> None:  # noqa: C901, PLR0915
         """Stream-load shards with two passes: stats then normalization."""
         metadata: dict = torch.load(
             self.cache_dir / _SHARD_METADATA_FILE,
@@ -985,6 +985,32 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             protein_std = (np.sqrt(prot_m2 / prot_count) + 1e-8).astype(np.float32)
             ligand_mean = lig_mean.astype(np.float32)
             ligand_std = (np.sqrt(lig_m2 / lig_count) + 1e-8).astype(np.float32)
+
+            if getattr(self.training_config, "skip_sincos_normalization", False):
+                # Descriptor layout is (d, θ, sin τ, cos τ) repeated per atom
+                # group, so sin/cos live at every 4th slot starting at offset
+                # 2 and 3.  Forcing mean=0, std=1 there preserves the unit
+                # circle through the network's normalization pipeline.
+                sincos_idx = np.concatenate(
+                    [
+                        np.arange(2, protein_mean.shape[0], 4),
+                        np.arange(3, protein_mean.shape[0], 4),
+                    ],
+                )
+                protein_mean[sincos_idx] = 0.0
+                protein_std[sincos_idx] = 1.0
+                sincos_idx_l = np.concatenate(
+                    [
+                        np.arange(2, ligand_mean.shape[0], 4),
+                        np.arange(3, ligand_mean.shape[0], 4),
+                    ],
+                )
+                ligand_mean[sincos_idx_l] = 0.0
+                ligand_std[sincos_idx_l] = 1.0
+                logger.info(
+                    "skip_sincos_normalization=True: overrode sin/cos "
+                    "slots to mean=0, std=1",
+                )
 
             self.norm_stats = {
                 "protein_mean": torch.from_numpy(protein_mean),

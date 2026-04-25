@@ -200,6 +200,12 @@ class TransformerVQVAE(nn.Module):
         # even when the batch mean looks fine.
         recon_max = diff_sq.detach().mean(dim=-1).max()
 
+        # Unit-circle penalty on (sin τ, cos τ) slots of the denormalized
+        # x_hat.  Descriptor MSE alone does not constrain s² + c² = 1, so
+        # the NeRF reconstruction downstream sees drifting phases and angle
+        # error accumulates.  Caller decides the weight.
+        circle_loss = self._compute_circle_loss(x_hat, mask)
+
         # 3D coord-reconstruction loss (optional). Compares NeRF-reconstructed
         # coords from x against those from x_hat, both denormalized into Å.
         coord_loss = x.new_zeros(())
@@ -213,6 +219,7 @@ class TransformerVQVAE(nn.Module):
             "commitment_loss": commitment_loss,
             "reconstruction_loss": reconstruction_loss,
             "coord_loss": coord_loss,
+            "circle_loss": circle_loss,
             "diagnostics": {
                 **codebook_diag,
                 **coord_diag,
@@ -220,6 +227,24 @@ class TransformerVQVAE(nn.Module):
                 "recon_max": recon_max,
             },
         }
+
+    def _compute_circle_loss(self, x_hat: Tensor, mask: Tensor) -> Tensor:
+        """Denormalized unit-circle penalty: ``mean((s^2 + c^2 - 1)^2)``.
+
+        Extracts the sin/cos slots (every 4th descriptor starting at offset
+        2 / 3) of ``x_hat`` in the original-descriptor scale and returns the
+        mean squared deviation from the unit circle, restricted to real
+        tokens.  Zero when the mask is empty.
+        """
+        mean = self._desc_mean.to(x_hat.dtype)
+        std = self._desc_std.to(x_hat.dtype)
+        x_hat_denorm = x_hat * std + mean
+        raw_s = x_hat_denorm[..., 2::4]
+        raw_c = x_hat_denorm[..., 3::4]
+        circle_dev_sq = ((raw_s.pow(2) + raw_c.pow(2)) - 1.0).pow(2)
+        if not mask.any():
+            return x_hat.new_zeros(())
+        return circle_dev_sq[mask].mean()
 
     def _compute_coord_loss(
         self,

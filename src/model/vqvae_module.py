@@ -118,19 +118,59 @@ class VQVAEModule(L.LightningModule):
         msg = f"Unexpected batch tuple length: {len(entry)}"
         raise ValueError(msg)
 
+    def _coord_loss_ramp(self) -> float:
+        """Linear 0→1 ramp over ``coord_loss_warmup_epochs``.
+
+        During warmup (including epoch 0 when ``warmup > 0``) we bypass
+        ``TaskWeighting`` entirely — see the class docstring note about
+        ``s_c`` drifting to -∞ when coord is identically zero.
+        """
+        warmup = self.config.coord_loss_warmup_epochs
+        if warmup <= 0:
+            return 1.0
+        return min(1.0, (self.current_epoch + 1) / warmup)
+
     def _combine_losses(
         self,
         task_weighting: TaskWeighting,
         out: dict[str, Tensor],
         *,
         coord_loss_enabled: bool,
+        circle_loss_weight: float,
     ) -> Tensor:
-        """Combine recon + coord (via TaskWeighting) + commitment."""
+        """Combine recon (+ coord via TaskWeighting) + commit + λ·circle.
+
+        The ``TaskWeighting`` path is only taken once the coord ramp reaches
+        1.0: during warmup we add ``ramp·coord`` directly so the learnable
+        ``log_var_coord`` does not see an (initially) near-zero task.
+        """
         recon = out["reconstruction_loss"]
         commit = out["commitment_loss"]
+        circle = out.get("circle_loss", recon.new_zeros(()))
+
         if coord_loss_enabled:
-            return task_weighting(recon, out["coord_loss"]) + commit
-        return recon + commit
+            ramp = self._coord_loss_ramp()
+            if ramp >= 1.0:
+                base = task_weighting(recon, out["coord_loss"])
+            else:
+                # Plain additive during warmup (avoids TaskWeighting's
+                # ``log_var_coord`` drifting to -inf under near-zero coord).
+                # ``log_var_{recon,coord}`` are not referenced on this path,
+                # so DDP would flag them unused — touch them with a zero
+                # coefficient to keep them in the autograd graph.
+                unused_ref = 0.0 * (
+                    task_weighting.log_var_recon + task_weighting.log_var_coord
+                )
+                base = recon + ramp * out["coord_loss"] + unused_ref
+        else:
+            # coord_loss disabled — TaskWeighting entirely unused. Same DDP
+            # workaround: reference its parameters with zero weight.
+            unused_ref = 0.0 * (
+                task_weighting.log_var_recon + task_weighting.log_var_coord
+            )
+            base = recon + unused_ref
+
+        return base + commit + circle_loss_weight * circle
 
     def training_step(
         self,
@@ -153,10 +193,12 @@ class VQVAEModule(L.LightningModule):
                 self.protein_task_weighting,
                 prot_out,
                 coord_loss_enabled=self.config.protein.coord_loss_enabled,
+                circle_loss_weight=self.config.protein.circle_loss_weight,
             )
             total_loss = total_loss + prot_loss
             self.log("train/protein_recon", prot_out["reconstruction_loss"])
             self.log("train/protein_commit", prot_out["commitment_loss"])
+            self.log("train/protein_circle", prot_out["circle_loss"])
             if self.config.protein.coord_loss_enabled:
                 self._log_task_weighting("train/protein", self.protein_task_weighting)
                 self.log("train/protein_coord", prot_out["coord_loss"])
@@ -172,16 +214,20 @@ class VQVAEModule(L.LightningModule):
                 self.ligand_task_weighting,
                 lig_out,
                 coord_loss_enabled=self.config.ligand.coord_loss_enabled,
+                circle_loss_weight=self.config.ligand.circle_loss_weight,
             )
             total_loss = total_loss + lig_loss
             self.log("train/ligand_recon", lig_out["reconstruction_loss"])
             self.log("train/ligand_commit", lig_out["commitment_loss"])
+            self.log("train/ligand_circle", lig_out["circle_loss"])
             if self.config.ligand.coord_loss_enabled:
                 self._log_task_weighting("train/ligand", self.ligand_task_weighting)
                 self.log("train/ligand_coord", lig_out["coord_loss"])
             real_indices = lig_out["indices"][lig_mask]
             self._log_utilization("train/ligand", real_indices)
             self._log_diagnostics("train/ligand", lig_out["diagnostics"])
+
+        self.log("train/coord_loss_ramp", self._coord_loss_ramp())
 
         self.log("train/total_loss", total_loss, prog_bar=True)
 
@@ -212,6 +258,7 @@ class VQVAEModule(L.LightningModule):
                 sync_dist=True,
             )
             self.log("val/protein_commit", prot_out["commitment_loss"], sync_dist=True)
+            self.log("val/protein_circle", prot_out["circle_loss"], sync_dist=True)
             if self.config.protein.coord_loss_enabled:
                 self.log("val/protein_coord", prot_out["coord_loss"], sync_dist=True)
             real_indices = prot_out["indices"][prot_mask]
@@ -223,6 +270,7 @@ class VQVAEModule(L.LightningModule):
             lig_out = self.ligand_vqvae(lig_x, mask=lig_mask, aux=lig_aux)
             self.log("val/ligand_recon", lig_out["reconstruction_loss"], sync_dist=True)
             self.log("val/ligand_commit", lig_out["commitment_loss"], sync_dist=True)
+            self.log("val/ligand_circle", lig_out["circle_loss"], sync_dist=True)
             if self.config.ligand.coord_loss_enabled:
                 self.log("val/ligand_coord", lig_out["coord_loss"], sync_dist=True)
             real_indices = lig_out["indices"][lig_mask]
