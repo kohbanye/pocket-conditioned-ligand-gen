@@ -1,17 +1,6 @@
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from numpy import ndarray
-    from torch import Tensor
-
-    from src.tokenizers.codebook import EMACodebook
-    from src.tokenizers.vqvae import TransformerVQVAE
-
 import marimo
 
-__generated_with = "0.23.1"
+__generated_with = "0.23.2"
 app = marimo.App()
 
 
@@ -99,9 +88,15 @@ def _(project_root):
 
 @app.cell
 def _(VQVAEModule, torch):
-    # Load the best checkpoint (pick the last one = lowest val loss)
-    # CKPT_PATH = "/home/sakano/git/pocket-conditioned-ligand-gen/pocket-ligand-vqvae/42tfb6kx/checkpoints/vqvae-epoch=19-val/protein_recon=0.1512.ckpt"
-    CKPT_PATH = "/home/sakano/git/pocket-conditioned-ligand-gen/pocket-ligand-vqvae/oqdbacxx/checkpoints/vqvae-epoch=26-val/protein_recon=0.0656.ckpt"
+    import os
+
+    # Override via `VQVAE_CKPT` env var so a single notebook can be exported
+    # per run without editing source in between. Falls back to the baseline
+    # (yggua4f0) used in the original evaluation.
+    CKPT_PATH = os.environ.get(
+        "VQVAE_CKPT",
+        "/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/pocket-ligand-vqvae/yggua4f0/checkpoints/vqvae-epoch=99-val/protein_recon=0.1316.ckpt",
+    )
 
     print(f"Loading: {CKPT_PATH}")
 
@@ -126,9 +121,17 @@ def _(
     torch,
 ):
     # Load cached descriptors and prepare test split
+    import os as _os
+    from pathlib import Path as _Path
+
     config = VQVAETrainingConfig()
     data_config = CrossDockedConfig(data_dir=project_root / "data")
     dm = ComplexDescriptorDataModule(config, data_config)
+    # Override the cache dir so B2 (v2 cache + skip_sincos stats) can be
+    # evaluated against the matching shards/stats.  Defaults to the v1 cache.
+    _cache_override = _os.environ.get("VQVAE_CACHE_DIR")
+    if _cache_override:
+        dm.cache_dir = _Path(_cache_override)
     dm.setup()
 
     norm_stats = dm.norm_stats
@@ -585,12 +588,17 @@ def _(lig_recon, ligand_test_flat, np, plt, prot_recon, protein_test_flat):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 5.5 3D Reconstruction RMSE (Å)
+    ## 5.5 3D Reconstruction RMSD (Å)
 
-    記述子空間での再構成誤差ではなく、実際の3次元座標に復元した上でのRMSEを評価する。
+    記述子空間での再構成誤差ではなく、実際の3次元座標に復元した上での RMSD を評価する。
 
-    - **Protein**: backbone (N, CA, C) 座標の RMSE
-    - **Ligand**: 重原子座標の RMSE
+    - **Protein**: backbone (N, CA, C) 座標の RMSD
+    - **Ligand**: 重原子座標の RMSD
+
+    2 種類の RMSD を並べて報告する:
+
+    - **Per-atom (superposition なし)**: pocket frame を共有しているため、segment-start のズレや NeRF 累積による剛体シフトがそのまま出る。生成 pipeline 全体の精度。
+    - **Kabsch-aligned**: 原子集合を剛体 (回転 + 並進) でベストフィットさせた後の RMSD。内部変形 (conformer shape) の再現精度のみを反映する。
 
     複数の複合体をサンプリングし、VQ-VAE の encode → decode → 記述子逆変換 → 3D座標 のパイプライン全体の精度を確認する。
     """)
@@ -608,8 +616,9 @@ def _(
     protein_vqvae,
     torch,
 ):
+    import pyarrow.parquet as pq
+
     from src.config import PocketExtractionConfig
-    from src.data.descriptors import _parse_types_file
     from src.tokenizers.ligand import LigandDescriptor, parse_sdf
     from src.tokenizers.protein import (
         BackboneZMatrixDescriptor,
@@ -617,12 +626,44 @@ def _(
         extract_pocket,
     )
 
+    def kabsch_rmsd(p: np.ndarray, q: np.ndarray) -> float:
+        """Per-atom RMSD after optimal rigid-body alignment of q onto p (Kabsch).
+
+        Both inputs shape (N, 3). Returns RMSD in the same units.
+        """
+        p_c = p - p.mean(axis=0)
+        q_c = q - q.mean(axis=0)
+        h = q_c.T @ p_c
+        u, _, vt = np.linalg.svd(h)
+        d = np.sign(np.linalg.det(vt.T @ u.T))
+        rot = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
+        q_aligned = q_c @ rot.T
+        return float(np.sqrt(np.mean(np.sum((p_c - q_aligned) ** 2, axis=-1))))
+
     pocket_config = PocketExtractionConfig()
     protein_desc_calc = BackboneZMatrixDescriptor()
     ligand_desc_calc = LigandDescriptor()
-    types_file = project_root / "data" / "types" / "cdonly_it2_tt_v1.3_0_test0.types"
-    entries = _parse_types_file(types_file)
-    crossdocked_dir = project_root / "data" / "CrossDocked2020"
+    # Use the HuggingFace hub cache manifest instead of the CrossDocked2020
+    # types/ tree (which isn't present on this machine).
+    hub_cache_dir = project_root / "data" / "hub_cache"
+    manifest_path = hub_cache_dir / "repo" / "manifest.parquet"
+    receptor_dir = hub_cache_dir / "receptors"
+    ligand_dir = hub_cache_dir / "ligands"
+    manifest_df = pq.read_table(manifest_path).to_pandas()
+    # Filter to the cdonly test split for fold 0 — matches the original
+    # cdonly_*_test0.types file that this cell used to read.
+    test_df = manifest_df[
+        (manifest_df["source_type"] == "cdonly")
+        & (manifest_df["cdonly_fold0"] == "test")
+    ].reset_index(drop=True)
+    entries = [
+        (
+            f"{row.complex_dir}/{row.receptor_pdb}",
+            f"{row.pair_idx:07d}.sdf.gz",
+            0,
+        )
+        for row in test_df.itertuples(index=False)
+    ]
     prot_mean = norm_stats["protein_mean"].to(device)
     prot_std = norm_stats["protein_std"].to(device)
     lig_mean = norm_stats["ligand_mean"].to(device)
@@ -632,15 +673,17 @@ def _(
     sample_indices = rng.choice(
         len(entries), size=min(N_SAMPLES * 5, len(entries)), replace=False
     )
-    prot_rmse_list = []
-    lig_rmse_list = []
+    prot_rmsd_list = []
+    prot_rmsd_aligned_list = []
+    lig_rmsd_list = []
+    lig_rmsd_aligned_list = []
     n_done = 0
     for idx in sample_indices:
         if n_done >= N_SAMPLES:
             break
         rec_rel, lig_rel, _pose_idx = entries[idx]
-        rec_path = crossdocked_dir / rec_rel
-        lig_path = crossdocked_dir / lig_rel
+        rec_path = receptor_dir / rec_rel
+        lig_path = ligand_dir / lig_rel
         if not rec_path.exists() or not lig_path.exists():
             continue
         try:
@@ -673,8 +716,15 @@ def _(
             backbone_recon = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
                 prot_recon_desc, prot_meta
             )
-            prot_rmse = np.sqrt(np.mean((backbone_coords_orig - backbone_recon) ** 2))
-            prot_rmse_list.append(prot_rmse)
+            prot_rmsd = np.sqrt(
+                np.mean(np.sum((backbone_coords_orig - backbone_recon) ** 2, axis=-1))
+            )
+            prot_rmsd_list.append(prot_rmsd)
+            prot_flat_orig = backbone_coords_orig.reshape(-1, 3).astype(np.float64)
+            prot_flat_recon = backbone_recon.reshape(-1, 3).astype(np.float64)
+            prot_rmsd_aligned_list.append(
+                kabsch_rmsd(prot_flat_orig, prot_flat_recon)
+            )
             lig_desc, _elements, lig_meta = ligand_desc_calc.compute(
                 mol["atoms"], mol["bonds"], pocket_frame=pocket_frame
             )
@@ -693,59 +743,71 @@ def _(
             lig_coords_orig_arr = np.array(
                 [(a[1], a[2], a[3]) for a in heavy_atoms], dtype=np.float64
             )
-            lig_rmse = np.sqrt(np.mean((lig_coords_orig_arr - lig_coords_recon) ** 2))
-            lig_rmse_list.append(lig_rmse)
+            lig_rmsd = np.sqrt(
+                np.mean(
+                    np.sum((lig_coords_orig_arr - lig_coords_recon) ** 2, axis=-1)
+                )
+            )
+            lig_rmsd_list.append(lig_rmsd)
+            lig_rmsd_aligned_list.append(
+                kabsch_rmsd(lig_coords_orig_arr, lig_coords_recon.astype(np.float64))
+            )
             n_done += 1
         except Exception:  # noqa: BLE001, S112
             continue
-    prot_rmse_arr = np.array(prot_rmse_list)
-    lig_rmse_arr = np.array(lig_rmse_list)
-    print(f"Evaluated {len(prot_rmse_arr)} complexes")
+    prot_rmsd_arr = np.array(prot_rmsd_list)
+    prot_rmsd_aligned_arr = np.array(prot_rmsd_aligned_list)
+    lig_rmsd_arr = np.array(lig_rmsd_list)
+    lig_rmsd_aligned_arr = np.array(lig_rmsd_aligned_list)
+    print(f"Evaluated {len(prot_rmsd_arr)} complexes")
     print()
-    print("Protein backbone RMSE (Å):")
-    print(f"  Mean:   {prot_rmse_arr.mean():.4f}")
-    print(f"  Median: {np.median(prot_rmse_arr):.4f}")
-    print(f"  Std:    {prot_rmse_arr.std():.4f}")
+
+    def _print_rmsd_stats(name: str, arr: np.ndarray) -> None:
+        print(f"{name}:")
+        print(f"  Mean:   {arr.mean():.4f}")
+        print(f"  Median: {np.median(arr):.4f}")
+        print(f"  Std:    {arr.std():.4f}")
+
+    _print_rmsd_stats("Protein backbone RMSD — per-atom (Å)", prot_rmsd_arr)
     print()
-    print("Ligand heavy-atom RMSE (Å):")
-    print(f"  Mean:   {lig_rmse_arr.mean():.4f}")
-    print(f"  Median: {np.median(lig_rmse_arr):.4f}")
-    print(f"  Std:    {lig_rmse_arr.std():.4f}")
-    _fig, _axes = plt.subplots(1, 2, figsize=(12, 4))
-    _axes[0].hist(prot_rmse_arr, bins=50, edgecolor="none", alpha=0.8)
-    _axes[0].axvline(
-        np.median(prot_rmse_arr),
-        color="r",
-        linestyle="--",
-        label=f"median={np.median(prot_rmse_arr):.3f} Å",
+    _print_rmsd_stats(
+        "Protein backbone RMSD — Kabsch-aligned (Å)", prot_rmsd_aligned_arr
     )
-    _axes[0].axvline(
-        prot_rmse_arr.mean(),
-        color="orange",
-        linestyle="--",
-        label=f"mean={prot_rmse_arr.mean():.3f} Å",
+    print()
+    _print_rmsd_stats("Ligand heavy-atom RMSD — per-atom (Å)", lig_rmsd_arr)
+    print()
+    _print_rmsd_stats(
+        "Ligand heavy-atom RMSD — Kabsch-aligned (Å)", lig_rmsd_aligned_arr
     )
-    _axes[0].set_xlabel("RMSE (Å)")
-    _axes[0].set_ylabel("Count")
-    _axes[0].set_title("Protein backbone 3D RMSE")
-    _axes[0].legend(fontsize=8)
-    _axes[1].hist(lig_rmse_arr, bins=50, edgecolor="none", alpha=0.8)
-    _axes[1].axvline(
-        np.median(lig_rmse_arr),
-        color="r",
-        linestyle="--",
-        label=f"median={np.median(lig_rmse_arr):.3f} Å",
+
+    def _plot_rmsd_hist(ax, arr: np.ndarray, title: str) -> None:
+        ax.hist(arr, bins=50, edgecolor="none", alpha=0.8)
+        ax.axvline(
+            np.median(arr),
+            color="r",
+            linestyle="--",
+            label=f"median={np.median(arr):.3f} Å",
+        )
+        ax.axvline(
+            arr.mean(),
+            color="orange",
+            linestyle="--",
+            label=f"mean={arr.mean():.3f} Å",
+        )
+        ax.set_xlabel("RMSD (Å)")
+        ax.set_ylabel("Count")
+        ax.set_title(title)
+        ax.legend(fontsize=8)
+
+    _fig, _axes = plt.subplots(2, 2, figsize=(12, 8))
+    _plot_rmsd_hist(_axes[0, 0], prot_rmsd_arr, "Protein backbone — per-atom")
+    _plot_rmsd_hist(
+        _axes[0, 1], prot_rmsd_aligned_arr, "Protein backbone — Kabsch-aligned"
     )
-    _axes[1].axvline(
-        lig_rmse_arr.mean(),
-        color="orange",
-        linestyle="--",
-        label=f"mean={lig_rmse_arr.mean():.3f} Å",
+    _plot_rmsd_hist(_axes[1, 0], lig_rmsd_arr, "Ligand heavy-atom — per-atom")
+    _plot_rmsd_hist(
+        _axes[1, 1], lig_rmsd_aligned_arr, "Ligand heavy-atom — Kabsch-aligned"
     )
-    _axes[1].set_xlabel("RMSE (Å)")
-    _axes[1].set_ylabel("Count")
-    _axes[1].set_title("Ligand heavy-atom 3D RMSE")
-    _axes[1].legend(fontsize=8)
     _fig.tight_layout()
     _fig
     return
