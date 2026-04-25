@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+from pathlib import Path
 
 import lightning as L
 import torch
@@ -15,7 +16,7 @@ from src.model.vqvae_module import VQVAEModule
 logging.basicConfig(level=logging.INFO)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-pairs", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
@@ -41,6 +42,35 @@ def main() -> None:
         default=None,
         help="Types categories to use (e.g. cdonly it0)",
     )
+    parser.add_argument(
+        "--circle-loss-weight",
+        type=float,
+        default=None,
+        help="Weight λ for the unit-circle penalty on sin/cos slots (both models).",
+    )
+    parser.add_argument(
+        "--coord-loss-warmup-epochs",
+        type=int,
+        default=None,
+        help="Linear ramp of coord loss from 0 → 1 over the first N epochs.",
+    )
+    parser.add_argument(
+        "--skip-sincos-norm",
+        action="store_true",
+        help="Force sin/cos descriptor slots to mean=0, std=1 (preserves unit circle).",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Wandb run name.",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Override descriptor cache directory (e.g. data/descriptor_cache_v2).",
+    )
     args = parser.parse_args()
 
     config = VQVAETrainingConfig()
@@ -58,6 +88,13 @@ def main() -> None:
         config.learning_rate = args.lr
     if args.precision is not None:
         config.precision = args.precision
+    if args.circle_loss_weight is not None:
+        config.protein.circle_loss_weight = args.circle_loss_weight
+        config.ligand.circle_loss_weight = args.circle_loss_weight
+    if args.coord_loss_warmup_epochs is not None:
+        config.coord_loss_warmup_epochs = args.coord_loss_warmup_epochs
+    if args.skip_sincos_norm:
+        config.skip_sincos_normalization = True
 
     hub_config = None
     if args.from_hub:
@@ -76,13 +113,15 @@ def main() -> None:
     torch.set_float32_matmul_precision("high")
 
     dm = ComplexDescriptorDataModule(config, data_config, hub_config=hub_config)
+    if args.cache_dir is not None:
+        dm.cache_dir = args.cache_dir
     module = VQVAEModule(config)
 
     trainer = L.Trainer(
         max_epochs=config.max_epochs,
         accelerator="auto",
         precision=config.precision,
-        logger=WandbLogger(project="pocket-ligand-vqvae"),
+        logger=WandbLogger(project="pocket-ligand-vqvae", name=args.run_name),
         callbacks=[
             ModelCheckpoint(
                 monitor="val/protein_recon",
