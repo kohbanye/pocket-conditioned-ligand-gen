@@ -48,6 +48,16 @@ def _():
 
     # '%matplotlib inline' command supported automatically in marimo
     plt.rcParams["figure.dpi"] = 120
+    # Bump global font sizes so plots stay legible when pasted into slides.
+    plt.rcParams.update({
+        "font.size": 14,
+        "axes.titlesize": 16,
+        "axes.labelsize": 14,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 12,
+        "figure.titlesize": 18,
+    })
     return (
         ComplexDescriptorDataModule,
         CrossDockedConfig,
@@ -338,7 +348,7 @@ def _(mo):
 
 @app.cell
 def _(lig_metrics, plt, prot_metrics):
-    _fig, _axes = plt.subplots(2, 2, figsize=(14, 8))
+    _fig, _axes = plt.subplots(2, 2, figsize=(16, 10))
     prot_dim_labels = [
         "N_d",
         "N_θ",
@@ -356,22 +366,22 @@ def _(lig_metrics, plt, prot_metrics):
     n_prot_dims = len(prot_dim_labels)
     # Protein — normalized
     _axes[0, 0].bar(range(n_prot_dims), prot_metrics["per_dim_mse_norm"])
-    _axes[0, 0].set_xticks(range(n_prot_dims), prot_dim_labels, rotation=90, fontsize=7)
+    _axes[0, 0].set_xticks(range(n_prot_dims), prot_dim_labels, rotation=90, fontsize=12)
     _axes[0, 0].set_title("Protein — Per-dim MSE (normalized)")
     _axes[0, 0].set_ylabel("MSE")
     _axes[0, 1].bar(range(n_prot_dims), prot_metrics["per_dim_mse_orig"])
-    _axes[0, 1].set_xticks(range(n_prot_dims), prot_dim_labels, rotation=90, fontsize=7)
+    _axes[0, 1].set_xticks(range(n_prot_dims), prot_dim_labels, rotation=90, fontsize=12)
     # Protein — original scale
     _axes[0, 1].set_title("Protein — Per-dim MSE (original scale)")
     _axes[0, 1].set_ylabel("MSE")
     lig_dim_labels = ["bond_len", "bond_angle", "sin_dih", "cos_dih"]
     _axes[1, 0].bar(range(4), lig_metrics["per_dim_mse_norm"])
-    _axes[1, 0].set_xticks(range(4), lig_dim_labels, rotation=90, fontsize=7)
+    _axes[1, 0].set_xticks(range(4), lig_dim_labels, rotation=0, fontsize=12)
     # Ligand — normalized
     _axes[1, 0].set_title("Ligand — Per-dim MSE (normalized)")
     _axes[1, 0].set_ylabel("MSE")
     _axes[1, 1].bar(range(4), lig_metrics["per_dim_mse_orig"])
-    _axes[1, 1].set_xticks(range(4), lig_dim_labels, rotation=90, fontsize=7)
+    _axes[1, 1].set_xticks(range(4), lig_dim_labels, rotation=0, fontsize=12)
     _axes[1, 1].set_title("Ligand — Per-dim MSE (original scale)")
     _axes[1, 1].set_ylabel("MSE")
     # Ligand — original scale
@@ -435,7 +445,7 @@ def _(mo):
 
 @app.cell
 def _(config, lig_counts, np, plt, prot_counts):
-    _fig, _axes = plt.subplots(1, 2, figsize=(14, 4))
+    _fig, _axes = plt.subplots(1, 2, figsize=(16, 5))
     prot_sorted = np.sort(prot_counts)[::-1]
     # Protein codebook usage — sorted descending
     _axes[0].bar(range(len(prot_sorted)), prot_sorted, width=1.0)
@@ -489,21 +499,21 @@ def _(lig_dim_labels, lig_metrics, np, plt, prot_dim_labels, prot_metrics):
                 n_dims - 1,
             ]
         n_plots = len(selected)
-        _fig, _axes = plt.subplots(1, n_plots, figsize=(3.5 * n_plots, 3.2))
+        _fig, _axes = plt.subplots(1, n_plots, figsize=(4.5 * n_plots, 4.2))
         if n_plots == 1:
             _axes = [_axes]
         rng = np.random.default_rng(42)
         idx = rng.choice(len(orig), min(max_points, len(orig)), replace=False)
         for ax, dim in zip(_axes, selected, strict=False):
-            ax.scatter(orig[idx, dim], recon[idx, dim], s=1, alpha=0.3)
+            ax.scatter(orig[idx, dim], recon[idx, dim], s=2, alpha=0.3)
             lo = min(orig[idx, dim].min(), recon[idx, dim].min())
             hi = max(orig[idx, dim].max(), recon[idx, dim].max())
-            ax.plot([lo, hi], [lo, hi], "r--", linewidth=0.8)
+            ax.plot([lo, hi], [lo, hi], "r--", linewidth=1.0)
             ax.set_xlabel("Original")
             ax.set_ylabel("Reconstructed")
-            ax.set_title(dim_labels[dim], fontsize=9)
+            ax.set_title(dim_labels[dim], fontsize=14)
             ax.set_aspect("equal", adjustable="datalim")  # Subsample for plotting
-        _fig.suptitle(title, fontsize=12)
+        _fig.suptitle(title, fontsize=18)
         _fig.tight_layout()
         plt.show()
 
@@ -534,7 +544,7 @@ def _(mo):
 
 @app.cell
 def _(lig_recon, ligand_test_flat, np, plt, prot_recon, protein_test_flat):
-    _fig, _axes = plt.subplots(1, 2, figsize=(12, 4))
+    _fig, _axes = plt.subplots(1, 2, figsize=(14, 5))
     prot_per_sample = np.mean(
         (protein_test_flat.cpu().numpy() - prot_recon.cpu().numpy()) ** 2, axis=1
     )
@@ -557,7 +567,7 @@ def _(lig_recon, ligand_test_flat, np, plt, prot_recon, protein_test_flat):
     _axes[0].set_xlabel("Per-sample MSE")
     _axes[0].set_ylabel("Count")
     _axes[0].set_title("Protein — Per-sample MSE distribution")
-    _axes[0].legend(fontsize=8)
+    _axes[0].legend()
     _axes[1].hist(lig_per_sample, bins=100, edgecolor="none", alpha=0.8)
     _axes[1].axvline(
         np.median(lig_per_sample),
@@ -574,7 +584,7 @@ def _(lig_recon, ligand_test_flat, np, plt, prot_recon, protein_test_flat):
     _axes[1].set_xlabel("Per-sample MSE")
     _axes[1].set_ylabel("Count")
     _axes[1].set_title("Ligand — Per-sample MSE distribution")
-    _axes[1].legend(fontsize=8)
+    _axes[1].legend()
     _fig.tight_layout()
     for name, mse_arr in [("Protein", prot_per_sample), ("Ligand", lig_per_sample)]:
         print(f"{name} per-sample MSE percentiles:")
@@ -626,11 +636,8 @@ def _(
         extract_pocket,
     )
 
-    def kabsch_rmsd(p: np.ndarray, q: np.ndarray) -> float:
-        """Per-atom RMSD after optimal rigid-body alignment of q onto p (Kabsch).
-
-        Both inputs shape (N, 3). Returns RMSD in the same units.
-        """
+    def kabsch_align(p: np.ndarray, q: np.ndarray):
+        """Align q onto p with Kabsch; return centered p, aligned q, and RMSD."""
         p_c = p - p.mean(axis=0)
         q_c = q - q.mean(axis=0)
         h = q_c.T @ p_c
@@ -638,7 +645,12 @@ def _(
         d = np.sign(np.linalg.det(vt.T @ u.T))
         rot = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
         q_aligned = q_c @ rot.T
-        return float(np.sqrt(np.mean(np.sum((p_c - q_aligned) ** 2, axis=-1))))
+        rmsd = float(np.sqrt(np.mean(np.sum((p_c - q_aligned) ** 2, axis=-1))))
+        return p_c, q_aligned, rmsd
+
+    def kabsch_rmsd(p: np.ndarray, q: np.ndarray) -> float:
+        """Per-atom RMSD after optimal rigid-body alignment of q onto p (Kabsch)."""
+        return kabsch_align(p, q)[2]
 
     pocket_config = PocketExtractionConfig()
     protein_desc_calc = BackboneZMatrixDescriptor()
@@ -668,7 +680,7 @@ def _(
     prot_std = norm_stats["protein_std"].to(device)
     lig_mean = norm_stats["ligand_mean"].to(device)
     lig_std = norm_stats["ligand_std"].to(device)
-    N_SAMPLES = 200
+    N_SAMPLES = 2000
     rng = np.random.default_rng(42)
     sample_indices = rng.choice(
         len(entries), size=min(N_SAMPLES * 5, len(entries)), replace=False
@@ -677,6 +689,11 @@ def _(
     prot_rmsd_aligned_list = []
     lig_rmsd_list = []
     lig_rmsd_aligned_list = []
+    # Joint (protein backbone + ligand heavy atoms aligned together) — measures
+    # how well the *relative* protein/ligand pose is preserved end-to-end.
+    joint_rmsd_list = []
+    prot_in_joint_rmsd_list = []
+    lig_in_joint_rmsd_list = []
     n_done = 0
     for idx in sample_indices:
         if n_done >= N_SAMPLES:
@@ -719,12 +736,9 @@ def _(
             prot_rmsd = np.sqrt(
                 np.mean(np.sum((backbone_coords_orig - backbone_recon) ** 2, axis=-1))
             )
-            prot_rmsd_list.append(prot_rmsd)
             prot_flat_orig = backbone_coords_orig.reshape(-1, 3).astype(np.float64)
             prot_flat_recon = backbone_recon.reshape(-1, 3).astype(np.float64)
-            prot_rmsd_aligned_list.append(
-                kabsch_rmsd(prot_flat_orig, prot_flat_recon)
-            )
+            prot_rmsd_aligned = kabsch_rmsd(prot_flat_orig, prot_flat_recon)
             lig_desc, _elements, lig_meta = ligand_desc_calc.compute(
                 mol["atoms"], mol["bonds"], pocket_frame=pocket_frame
             )
@@ -748,10 +762,42 @@ def _(
                     np.sum((lig_coords_orig_arr - lig_coords_recon) ** 2, axis=-1)
                 )
             )
-            lig_rmsd_list.append(lig_rmsd)
-            lig_rmsd_aligned_list.append(
-                kabsch_rmsd(lig_coords_orig_arr, lig_coords_recon.astype(np.float64))
+            lig_rmsd_aligned = kabsch_rmsd(
+                lig_coords_orig_arr, lig_coords_recon.astype(np.float64)
             )
+            # Joint-aligned: stack protein backbone + ligand heavy atoms as one
+            # rigid body, Kabsch-fit, then split the residual to see how much
+            # of the error sits in each component when the *complex* is best-fit.
+            n_prot_atoms = len(prot_flat_orig)
+            joint_orig = np.vstack([prot_flat_orig, lig_coords_orig_arr])
+            joint_recon = np.vstack(
+                [prot_flat_recon, lig_coords_recon.astype(np.float64)]
+            )
+            joint_orig_c, joint_recon_aligned, joint_rmsd = kabsch_align(
+                joint_orig, joint_recon
+            )
+            prot_diff_joint = (
+                joint_orig_c[:n_prot_atoms] - joint_recon_aligned[:n_prot_atoms]
+            )
+            lig_diff_joint = (
+                joint_orig_c[n_prot_atoms:] - joint_recon_aligned[n_prot_atoms:]
+            )
+            prot_in_joint_rmsd = float(
+                np.sqrt(np.mean(np.sum(prot_diff_joint ** 2, axis=-1)))
+            )
+            lig_in_joint_rmsd = float(
+                np.sqrt(np.mean(np.sum(lig_diff_joint ** 2, axis=-1)))
+            )
+            # Append everything atomically: a partial failure above drops the
+            # whole complex instead of leaving protein/ligand list lengths
+            # mismatched.
+            prot_rmsd_list.append(prot_rmsd)
+            prot_rmsd_aligned_list.append(prot_rmsd_aligned)
+            lig_rmsd_list.append(lig_rmsd)
+            lig_rmsd_aligned_list.append(lig_rmsd_aligned)
+            joint_rmsd_list.append(joint_rmsd)
+            prot_in_joint_rmsd_list.append(prot_in_joint_rmsd)
+            lig_in_joint_rmsd_list.append(lig_in_joint_rmsd)
             n_done += 1
         except Exception:  # noqa: BLE001, S112
             continue
@@ -759,6 +805,9 @@ def _(
     prot_rmsd_aligned_arr = np.array(prot_rmsd_aligned_list)
     lig_rmsd_arr = np.array(lig_rmsd_list)
     lig_rmsd_aligned_arr = np.array(lig_rmsd_aligned_list)
+    joint_rmsd_arr = np.array(joint_rmsd_list)
+    prot_in_joint_rmsd_arr = np.array(prot_in_joint_rmsd_list)
+    lig_in_joint_rmsd_arr = np.array(lig_in_joint_rmsd_list)
     print(f"Evaluated {len(prot_rmsd_arr)} complexes")
     print()
 
@@ -780,7 +829,7 @@ def _(
         "Ligand heavy-atom RMSD — Kabsch-aligned (Å)", lig_rmsd_aligned_arr
     )
 
-    def _plot_rmsd_hist(ax, arr: np.ndarray, title: str) -> None:
+    def plot_rmsd_hist(ax, arr: np.ndarray, title: str) -> None:
         ax.hist(arr, bins=50, edgecolor="none", alpha=0.8)
         ax.axvline(
             np.median(arr),
@@ -797,17 +846,74 @@ def _(
         ax.set_xlabel("RMSD (Å)")
         ax.set_ylabel("Count")
         ax.set_title(title)
-        ax.legend(fontsize=8)
+        ax.legend()
 
-    _fig, _axes = plt.subplots(2, 2, figsize=(12, 8))
-    _plot_rmsd_hist(_axes[0, 0], prot_rmsd_arr, "Protein backbone — per-atom")
-    _plot_rmsd_hist(
+    _fig, _axes = plt.subplots(2, 2, figsize=(14, 10))
+    plot_rmsd_hist(_axes[0, 0], prot_rmsd_arr, "Protein backbone — per-atom")
+    plot_rmsd_hist(
         _axes[0, 1], prot_rmsd_aligned_arr, "Protein backbone — Kabsch-aligned"
     )
-    _plot_rmsd_hist(_axes[1, 0], lig_rmsd_arr, "Ligand heavy-atom — per-atom")
-    _plot_rmsd_hist(
+    plot_rmsd_hist(_axes[1, 0], lig_rmsd_arr, "Ligand heavy-atom — per-atom")
+    plot_rmsd_hist(
         _axes[1, 1], lig_rmsd_aligned_arr, "Ligand heavy-atom — Kabsch-aligned"
     )
+    _fig.tight_layout()
+    _fig
+    return (
+        joint_rmsd_arr,
+        lig_in_joint_rmsd_arr,
+        plot_rmsd_hist,
+        prot_in_joint_rmsd_arr,
+    )
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 5.6 Complex-aligned RMSD (Å)
+
+    タンパク質バックボーン + リガンド重原子を **1 つの剛体** として連結し、
+    複合体ごとにまとめて Kabsch アライメントしたあとの RMSD を見る。
+
+    - **Whole complex**: アライメント後の全原子 RMSD。複合体ポーズ全体の再現精度。
+    - **Protein in joint frame**: 同じ joint アライメント後の、タンパク質側だけの残差 RMSD。
+    - **Ligand in joint frame**: 同じ joint アライメント後の、リガンド側だけの残差 RMSD。
+      タンパク質を基準に固定したときの、リガンドの相対ポーズずれ。
+    """)
+    return
+
+
+@app.cell
+def _(
+    joint_rmsd_arr,
+    lig_in_joint_rmsd_arr,
+    np,
+    plot_rmsd_hist,
+    plt,
+    prot_in_joint_rmsd_arr,
+):
+    def _print_joint_stats(name: str, arr: np.ndarray) -> None:
+        print(f"{name}:")
+        print(f"  Mean:   {arr.mean():.4f}")
+        print(f"  Median: {np.median(arr):.4f}")
+        print(f"  Std:    {arr.std():.4f}")
+
+    _print_joint_stats("Whole-complex RMSD — joint Kabsch (Å)", joint_rmsd_arr)
+    print()
+    _print_joint_stats(
+        "Protein component in joint frame (Å)", prot_in_joint_rmsd_arr
+    )
+    print()
+    _print_joint_stats(
+        "Ligand component in joint frame (Å)", lig_in_joint_rmsd_arr
+    )
+
+    _fig, _axes = plt.subplots(1, 3, figsize=(18, 5))
+    plot_rmsd_hist(_axes[0], joint_rmsd_arr, "Whole complex — joint Kabsch")
+    plot_rmsd_hist(
+        _axes[1], prot_in_joint_rmsd_arr, "Protein in joint frame"
+    )
+    plot_rmsd_hist(_axes[2], lig_in_joint_rmsd_arr, "Ligand in joint frame")
     _fig.tight_layout()
     _fig
     return
@@ -851,26 +957,26 @@ def _(config, lig_z, ligand_vqvae, np, plt, prot_z, protein_vqvae):
         embedded = tsne.fit_transform(combined)
         z_emb = embedded[: len(z_sub)]
         cb_emb = embedded[len(z_sub) :]
-        _fig, ax = plt.subplots(figsize=(8, 6))  # Combine for t-SNE
+        _fig, ax = plt.subplots(figsize=(10, 8))  # Combine for t-SNE
         ax.scatter(
             z_emb[:, 0],
             z_emb[:, 1],
-            s=1,
-            alpha=0.2,
+            s=4,
+            alpha=0.3,
             c="steelblue",
             label="Encoder output",
         )
         ax.scatter(
             cb_emb[:, 0],
             cb_emb[:, 1],
-            s=30,
+            s=40,
             c="red",
             marker="x",
-            linewidths=1,
+            linewidths=1.2,
             label="Codebook",
         )
         ax.set_title(f"{name} — t-SNE of latent space")
-        ax.legend(fontsize=9)
+        ax.legend()
         ax.set_xticks([])
         ax.set_yticks([])
         _fig.tight_layout()
