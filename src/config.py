@@ -8,6 +8,9 @@ class HubDatasetConfig:
 
     repo_id: str = "sakano/crossdocked2020"
     cache_dir: Path = Path("data/hub_cache")
+    # Selects the manifest column ``{source_type}_fold{fold}`` used to assign
+    # the official CrossDocked2020 train/test split when ``_setup_from_shards``
+    # builds the descriptor split.
     fold: int = 0
     source_types: list[str] = field(default_factory=lambda: ["cdonly"])
     revision: str | None = None
@@ -21,8 +24,15 @@ class CrossDockedConfig:
     types_tarball: str = "CrossDocked2020_v1.3_types.tgz"
     batch_size: int = 32
     num_workers: int = 4
+    # Ignored when ``hub_config`` is set: the test set is the manifest
+    # ``{source_type}_fold{fold}`` == "test" entries.  Used only by the legacy
+    # types-file path which still does a fully-random split.
     test_size: float = 0.1
+    # Fraction of the (train + val) pool sampled for validation.  On the hub
+    # path the pool is the manifest fold's "train" entries; on the legacy
+    # types-file path it is the whole dataset.
     val_size: float = 0.1
+    # Seed for the train/val carve-out RNG (and the legacy random split).
     random_state: int = 42
     max_pairs: int | None = None
 
