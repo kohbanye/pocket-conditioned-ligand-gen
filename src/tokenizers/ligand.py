@@ -167,10 +167,12 @@ def _build_rdkit_mol(
         Chem.SanitizeMol(final_mol)
     except Exception:  # noqa: BLE001
         # Best-effort: keep the unsanitised mol so we can still read element
-        # symbols and approximate features. Aromaticity / ring info will be
-        # less reliable but the descriptor still encodes a valid atom.
+        # symbols and approximate features. ``FastFindRings`` is required
+        # so ``GetRingInfo`` works on the unsanitised mol; without it
+        # ``IsAtomInRingOfSize`` raises "RingInfo not initialized".
         try:
             final_mol.UpdatePropertyCache(strict=False)
+            Chem.FastFindRings(final_mol)
         except Exception:  # noqa: BLE001
             return None
     return final_mol
