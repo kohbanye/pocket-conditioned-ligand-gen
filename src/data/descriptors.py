@@ -48,8 +48,10 @@ _SHARD_METADATA_FILE = "shard_metadata.pt"
 _NORMALIZATION_STATS_FILE = "normalization_stats.pt"
 # Bumped when the shard payload schema changes. v2 adds per-entry
 # ``ligand_refs`` (DFS-position Z-matrix refs) and ``protein_segment_start``
-# (bool per residue) used by the 3D coord-reconstruction loss.
-_SHARD_SCHEMA_VERSION = 2
+# (bool per residue) used by the 3D coord-reconstruction loss. v3 adds
+# per-entry ``pair_idx`` (int32 manifest row id) used by ``_setup_from_shards``
+# to look up the official CrossDocked2020 fold assignment per entry.
+_SHARD_SCHEMA_VERSION = 3
 
 # Per-worker state for multiprocessing (set by _worker_init).
 _worker_protein_desc: BackboneZMatrixDescriptor | None = None
@@ -141,17 +143,19 @@ def _parse_all_types_files(
 def _load_pairs_from_manifest(
     hub_config: HubDatasetConfig,
     max_pairs: int | None = None,
-) -> tuple[list[tuple[str, str]], Path]:
+) -> tuple[list[tuple[str, str, int]], Path]:
     """Load pairs from a HuggingFace Hub manifest.
 
     Returns ``(pairs, base_dir)`` where *pairs* are
-    ``(receptor_rel_path, ligand_rel_path)`` and *base_dir* is the
-    root directory that both paths are relative to.
+    ``(receptor_rel_path, ligand_rel_path, pair_idx)`` and *base_dir* is
+    the root directory that both paths are relative to.
 
     The receptor path is relative to ``hub_cache/receptors/`` and the
     ligand path is relative to ``hub_cache/ligands/``.  To unify them
     under a single base directory we return the cache root and use
-    prefixed paths.
+    prefixed paths.  ``pair_idx`` is the manifest row id, propagated so
+    each shard entry can later be joined back to the manifest's official
+    fold columns.
     """
     import pyarrow.parquet as pq  # noqa: PLC0415
 
@@ -171,11 +175,11 @@ def _load_pairs_from_manifest(
     if max_pairs is not None:
         df = df.head(max_pairs)
 
-    pairs: list[tuple[str, str]] = []
+    pairs: list[tuple[str, str, int]] = []
     for _, row in df.iterrows():
         rec_rel = f"{row['complex_dir']}/{row['receptor_pdb']}"
         lig_rel = f"{row['pair_idx']:07d}.sdf.gz"
-        pairs.append((rec_rel, lig_rel))
+        pairs.append((rec_rel, lig_rel, int(row["pair_idx"])))
 
     logger.info("Loaded %d pairs from manifest", len(pairs))
     return pairs, cache_dir
@@ -198,19 +202,23 @@ def _worker_init(pocket_config_dict: dict) -> None:
 
 
 def _group_entries_by_receptor(
-    abs_entries: list[tuple[str, str, int]],
-) -> list[tuple[str, list[tuple[str, list[int]]]]]:
+    abs_entries: list[tuple[str, str, int, int]],
+) -> list[tuple[str, list[tuple[str, list[tuple[int, int]]]]]]:
     """Group entries by receptor PDB, then by SDF file.
 
     Returns a list of ``(rec_path, sdf_groups)`` where *sdf_groups* is
-    ``[(sdf_path, [pose_indices]), ...]``.
+    ``[(sdf_path, [(pose_idx, pair_idx), ...]), ...]``.  ``pair_idx`` is
+    the manifest row id (or ``-1`` for the legacy types-file path) and is
+    threaded through to the shard so it can be looked up at split time.
     """
     from collections import defaultdict  # noqa: PLC0415
 
-    # rec -> sdf -> [pose_idx]
-    grouped: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(list))
-    for rec, lig, pose_idx in abs_entries:
-        grouped[rec][lig].append(pose_idx)
+    # rec -> sdf -> [(pose_idx, pair_idx)]
+    grouped: dict[str, dict[str, list[tuple[int, int]]]] = defaultdict(
+        lambda: defaultdict(list),
+    )
+    for rec, lig, pose_idx, pair_idx in abs_entries:
+        grouped[rec][lig].append((pose_idx, pair_idx))
 
     return [
         (rec, [(sdf, poses) for sdf, poses in sdf_dict.items()])
@@ -303,8 +311,8 @@ def _process_pose(
 
 
 def _worker_process_receptor_group(
-    args: tuple[str, list[tuple[str, list[int]]]],
-) -> tuple[list[dict[str, np.ndarray | list[str]]], int]:
+    args: tuple[str, list[tuple[str, list[tuple[int, int]]]]],
+) -> tuple[list[dict[str, np.ndarray | list[str] | int]], int]:
     """Process all entries for one receptor PDB.
 
     Parses the PDB once and each SDF once across all poses.
@@ -312,7 +320,7 @@ def _worker_process_receptor_group(
     of poses attempted (for progress tracking).
     """
     rec_path, sdf_groups = args
-    results: list[dict[str, np.ndarray | list[str]]] = []
+    results: list[dict[str, np.ndarray | list[str] | int]] = []
     total = sum(len(poses) for _, poses in sdf_groups)
 
     rec_full = Path(rec_path)
@@ -325,7 +333,7 @@ def _worker_process_receptor_group(
         logger.exception("Error parsing PDB %s", rec_path)
         return results, total
 
-    for sdf_path, pose_indices in sdf_groups:
+    for sdf_path, pose_specs in sdf_groups:
         sdf_full = Path(sdf_path)
         if not sdf_full.exists():
             continue
@@ -336,7 +344,7 @@ def _worker_process_receptor_group(
             logger.exception("Error parsing SDF %s", sdf_path)
             continue
 
-        for pose_idx in pose_indices:
+        for pose_idx, pair_idx in pose_specs:
             if pose_idx >= len(molecules):
                 continue
             try:
@@ -356,6 +364,7 @@ def _worker_process_receptor_group(
                 )
                 continue
             if result is not None:
+                result["pair_idx"] = pair_idx
                 results.append(result)
 
     return results, total
@@ -364,14 +373,16 @@ def _worker_process_receptor_group(
 def _write_shard(
     shard_dir: Path,
     shard_idx: int,
-    data: list[dict[str, np.ndarray | list[str]]],
+    data: list[dict[str, np.ndarray | list[str] | int]],
 ) -> None:
     """Write one shard file to disk."""
     torch.save(data, shard_dir / f"shard_{shard_idx:04d}.pt")
 
 
 def _collect_grouped_results_sharded(
-    batch_results: Iterable[tuple[list[dict[str, np.ndarray | list[str]]], int]],
+    batch_results: Iterable[
+        tuple[list[dict[str, np.ndarray | list[str] | int]], int]
+    ],
     total_entries: int,
     shard_dir: Path,
     shard_size: int = _DEFAULT_SHARD_SIZE,
@@ -381,7 +392,7 @@ def _collect_grouped_results_sharded(
     Returns ``(total_count, shard_counts, unique_elements)`` where
     *shard_counts* is the number of complexes in each shard file.
     """
-    buffer: list[dict[str, np.ndarray | list[str]]] = []
+    buffer: list[dict[str, np.ndarray | list[str] | int]] = []
     shard_idx = 0
     shard_counts: list[int] = []
     total_count = 0
@@ -435,7 +446,7 @@ def _collect_grouped_results_sharded(
 
 
 def _process_entries_sharded(
-    abs_entries: list[tuple[str, str, int]],
+    abs_entries: list[tuple[str, str, int, int]],
     pocket_config: PocketExtractionConfig,
     shard_dir: Path,
     num_workers: int = 0,
@@ -798,8 +809,8 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
             receptor_dir = cache_dir / "receptors"
             ligand_dir = cache_dir / "ligands"
             abs_entries = [
-                (str(receptor_dir / rec), str(ligand_dir / lig), 0)
-                for rec, lig in pairs
+                (str(receptor_dir / rec), str(ligand_dir / lig), 0, pair_idx)
+                for rec, lig, pair_idx in pairs
             ]
         else:
             types_dir = self.data_dir / "types"
@@ -808,8 +819,10 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
                 max_pairs=self.data_config.max_pairs,
             )
             crossdocked_dir = self.data_dir / "CrossDocked2020"
+            # Sentinel pair_idx=-1 signals "no manifest fold info" so the
+            # legacy random split branch in _setup_from_shards is used.
             abs_entries = [
-                (str(crossdocked_dir / rec), str(crossdocked_dir / lig), pose_idx)
+                (str(crossdocked_dir / rec), str(crossdocked_dir / lig), pose_idx, -1)
                 for rec, lig, pose_idx in entries
             ]
 
@@ -913,7 +926,7 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
         self._log_split_sizes()
 
-    def _setup_from_shards(self) -> None:  # noqa: C901, PLR0915
+    def _setup_from_shards(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """Stream-load shards with two passes: stats then normalization."""
         metadata: dict = torch.load(
             self.cache_dir / _SHARD_METADATA_FILE,
@@ -923,9 +936,10 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         if cached_version < _SHARD_SCHEMA_VERSION:
             msg = (
                 f"Shard cache at {self.cache_dir} is schema v{cached_version} "
-                f"(expected v{_SHARD_SCHEMA_VERSION}). The 3D coord-reconstruction "
-                "loss needs per-entry 'ligand_refs' and 'protein_segment_start', "
-                "which older caches don't carry. Delete the descriptor_cache "
+                f"(expected v{_SHARD_SCHEMA_VERSION}). v3 adds per-entry "
+                "'pair_idx' for the manifest-fold split, on top of v2's "
+                "'ligand_refs' and 'protein_segment_start' (used by the 3D "
+                "coord-reconstruction loss). Delete the descriptor_cache "
                 "directory and re-run prepare_data to regenerate shards."
             )
             raise RuntimeError(msg)
@@ -933,23 +947,35 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         shard_counts: list[int] = metadata["shard_counts"]
         shard_dir = self.cache_dir / _SHARD_DIR_NAME
 
-        # --- Deterministic complex-level split ---
-        rng = torch.Generator().manual_seed(self.data_config.random_state)
-        perm = torch.randperm(n, generator=rng).tolist()
-
-        n_test = int(n * self.data_config.test_size)
-        n_val = int(n * self.data_config.val_size)
-        train_set = set(perm[n_test + n_val :])
-        val_set = set(perm[n_test : n_test + n_val])
-        test_set = set(perm[:n_test])
-
-        logger.info(
-            "Complex-level split: %d train, %d val, %d test (total %d)",
-            len(train_set),
-            len(val_set),
-            len(test_set),
-            n,
-        )
+        if self.hub_config is not None:
+            train_set, val_set, test_set = self._fold_split_from_manifest(
+                shard_dir,
+                shard_counts,
+            )
+        else:
+            # Legacy types-file path: no per-pair fold info available,
+            # fall back to a deterministic random complex-level split.
+            logger.warning(
+                "types-file path: using legacy random %.0f/%.0f/%.0f split; "
+                "manifest-fold split unavailable",
+                (1 - self.data_config.test_size - self.data_config.val_size) * 100,
+                self.data_config.val_size * 100,
+                self.data_config.test_size * 100,
+            )
+            rng = torch.Generator().manual_seed(self.data_config.random_state)
+            perm = torch.randperm(n, generator=rng).tolist()
+            n_test = int(n * self.data_config.test_size)
+            n_val = int(n * self.data_config.val_size)
+            train_set = set(perm[n_test + n_val :])
+            val_set = set(perm[n_test : n_test + n_val])
+            test_set = set(perm[:n_test])
+            logger.info(
+                "Complex-level split: %d train, %d val, %d test (total %d)",
+                len(train_set),
+                len(val_set),
+                len(test_set),
+                n,
+            )
 
         # --- Pass 1: Compute normalization stats from train split (Welford) ---
         stats_path = self.cache_dir / _NORMALIZATION_STATS_FILE
@@ -1036,8 +1062,9 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
                     train_by_shard[shard_idx].append(local_idx)
                 elif global_idx in val_set:
                     val_by_shard[shard_idx].append(local_idx)
-                else:
+                elif global_idx in test_set:
                     test_by_shard[shard_idx].append(local_idx)
+                # else: entry has no fold assignment in the manifest; skip
             global_offset += count
 
         self._shard_dir = shard_dir
@@ -1047,6 +1074,83 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
 
         logger.info("Shard plans built (no full data load needed)")
         self._log_split_sizes()
+
+    def _fold_split_from_manifest(
+        self,
+        shard_dir: Path,
+        shard_counts: list[int],
+    ) -> tuple[set[int], set[int], set[int]]:
+        """Build (train, val, test) global-index sets from the official fold.
+
+        Pulls the ``{source_type}_fold{fold}`` columns out of the hub
+        manifest, walks the shards reading each entry's ``pair_idx``,
+        bins them into the manifest's "train"/"test" buckets, then carves
+        ``val_size`` of the train bucket into validation with a seeded RNG.
+        """
+        import pyarrow.parquet as pq  # noqa: PLC0415
+
+        assert self.hub_config is not None  # noqa: S101  (caller-checked)
+        manifest_path = (
+            Path(self.hub_config.cache_dir) / "repo" / "manifest.parquet"
+        )
+        fold = self.hub_config.fold
+        source_types = list(self.hub_config.source_types)
+        fold_cols = [f"{st}_fold{fold}" for st in source_types]
+        df = pq.read_table(
+            manifest_path,
+            columns=["pair_idx", "source_type", *fold_cols],
+        ).to_pandas()
+        df = df[df["source_type"].isin(source_types)]
+        fold_map: dict[int, str] = {}
+        for row in df.itertuples(index=False):
+            label = getattr(row, f"{row.source_type}_fold{fold}")
+            if label is not None:
+                fold_map[int(row.pair_idx)] = label
+
+        test_globals: list[int] = []
+        trainval_globals: list[int] = []
+        missing = 0
+        global_offset = 0
+        for shard_idx, count in enumerate(shard_counts):
+            shard = torch.load(
+                shard_dir / f"shard_{shard_idx:04d}.pt",
+                weights_only=False,
+            )
+            for local_idx, cplx in enumerate(shard):
+                gi = global_offset + local_idx
+                pid = int(cplx["pair_idx"])
+                label = fold_map.get(pid)
+                if label == "test":
+                    test_globals.append(gi)
+                elif label == "train":
+                    trainval_globals.append(gi)
+                else:
+                    missing += 1
+            global_offset += count
+        if missing:
+            logger.warning(
+                "%d entries missing fold-%d label in manifest; skipped",
+                missing,
+                fold,
+            )
+
+        rng = torch.Generator().manual_seed(self.data_config.random_state)
+        perm = torch.randperm(len(trainval_globals), generator=rng).tolist()
+        n_val = int(len(trainval_globals) * self.data_config.val_size)
+        val_set = {trainval_globals[i] for i in perm[:n_val]}
+        train_set = {trainval_globals[i] for i in perm[n_val:]}
+        test_set = set(test_globals)
+
+        logger.info(
+            "Fold-%d split: %d train, %d val, %d test (total %d, skipped %d)",
+            fold,
+            len(train_set),
+            len(val_set),
+            len(test_set),
+            len(train_set) + len(val_set) + len(test_set),
+            missing,
+        )
+        return train_set, val_set, test_set
 
     def _log_split_sizes(self) -> None:
         if self._train_plan is not None:
