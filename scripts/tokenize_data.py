@@ -14,11 +14,11 @@ import torch
 from torch import Tensor
 
 from src.config import CrossDockedConfig, PocketExtractionConfig, VQVAETrainingConfig
-from src.data.descriptors import _get_ligand_coords_from_sdf, _parse_types_file
+from src.data.descriptors import _parse_types_file
 from src.model.vqvae_module import VQVAEModule
 from src.tokenizers.ligand import LigandDescriptor, parse_sdf
 from src.tokenizers.protein import (
-    BackboneZMatrixDescriptor,
+    BackboneSphericalDescriptor,
     _compute_canonical_frame,
     extract_full_sequence,
     extract_pocket,
@@ -34,7 +34,7 @@ class TokenizerContext:
     """Holds all objects needed for tokenizing complexes."""
 
     module: VQVAEModule
-    protein_desc: BackboneZMatrixDescriptor
+    protein_desc: BackboneSphericalDescriptor
     ligand_desc: LigandDescriptor
     assembler: TokenSequenceAssembler
     pocket_config: PocketExtractionConfig
@@ -67,7 +67,7 @@ def _load_context(config: VQVAETrainingConfig, data_dir: Path) -> TokenizerConte
 
     return TokenizerContext(
         module=module,
-        protein_desc=BackboneZMatrixDescriptor(),
+        protein_desc=BackboneSphericalDescriptor(),
         ligand_desc=LigandDescriptor(),
         assembler=TokenSequenceAssembler(),
         pocket_config=PocketExtractionConfig(),
@@ -85,12 +85,23 @@ def _tokenize_complex(
     lig_path: Path,
     ctx: TokenizerContext,
 ) -> str | None:
-    """Tokenize a single protein-ligand complex."""
+    """Tokenize a single protein-ligand complex.
+
+    With the spherical multi-feature VQ-VAE each atom / residue is one
+    codebook integer; element and AA identity are recovered by the decoder.
+    The AR sequence still keeps a separate ``<s>...</s>`` block for the AA
+    sequence so language-model retrieval can attend to it directly.
+    """
     import numpy as np  # noqa: PLC0415
 
-    lig_coords = _get_ligand_coords_from_sdf(lig_path)
-    if lig_coords is None:
+    molecules = parse_sdf(lig_path)
+    if not molecules:
         return None
+    mol = molecules[0]
+    heavy = [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"]
+    if not heavy:
+        return None
+    lig_coords = np.array(heavy, dtype=np.float32)
 
     pocket = extract_pocket(rec_path, lig_coords, ctx.pocket_config)
     if pocket is None:
@@ -99,30 +110,24 @@ def _tokenize_complex(
 
     full_seq = extract_full_sequence(rec_path)
 
-    # Compute canonical frame
     ca_coords = backbone_coords[:, 1].astype(np.float64)
     centroid, rotation = _compute_canonical_frame(ca_coords)
     pocket_frame = (centroid, rotation)
 
-    # Protein structure tokens (12D backbone Z-matrix)
+    # Protein structure tokens — single integer per residue.
     prot_desc, _prot_meta = ctx.protein_desc.compute(
         backbone_coords,
         residue_ids,
         pocket_frame=pocket_frame,
+        residue_names_one_letter=list(pocket_seq),
     )
     prot_t = torch.from_numpy(prot_desc).to(ctx.device)
     prot_t = (prot_t - ctx.protein_mean) / ctx.protein_std
     prot_indices = ctx.module.protein_vqvae.encode(prot_t).cpu().tolist()
-    pocket_tokens = [
-        f"{aa}_{code}" for aa, code in zip(pocket_seq, prot_indices, strict=True)
-    ]
+    pocket_tokens = [str(code) for code in prot_indices]
 
-    # Ligand tokens (anchored to pocket canonical frame)
-    molecules = parse_sdf(lig_path)
-    if not molecules:
-        return None
-    mol = molecules[0]
-    lig_desc, elements, _lig_meta = ctx.ligand_desc.compute(
+    # Ligand tokens — single integer per heavy atom.
+    lig_desc, _elements_sym, _lig_meta = ctx.ligand_desc.compute(
         mol["atoms"],
         mol["bonds"],
         pocket_frame=pocket_frame,
@@ -133,9 +138,7 @@ def _tokenize_complex(
     lig_t = torch.from_numpy(lig_desc).to(ctx.device)
     lig_t = (lig_t - ctx.ligand_mean) / ctx.ligand_std
     lig_indices = ctx.module.ligand_vqvae.encode(lig_t).cpu().tolist()
-    ligand_tokens = [
-        f"{elem}_{code}" for elem, code in zip(elements, lig_indices, strict=True)
-    ]
+    ligand_tokens = [str(code) for code in lig_indices]
 
     return ctx.assembler.assemble(pocket_tokens, full_seq, ligand_tokens)
 

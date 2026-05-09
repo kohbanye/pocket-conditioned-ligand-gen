@@ -16,7 +16,7 @@ from src.model.vqvae_module import VQVAEModule
 logging.basicConfig(level=logging.INFO)
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915
+def main() -> None:  # noqa: C901, PLR0915
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-pairs", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
@@ -42,34 +42,24 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         default=None,
         help="Types categories to use (e.g. cdonly it0)",
     )
-    parser.add_argument(
-        "--circle-loss-weight",
-        type=float,
-        default=None,
-        help="Weight λ for the unit-circle penalty on sin/cos slots (both models).",
-    )
-    parser.add_argument(
-        "--coord-loss-warmup-epochs",
-        type=int,
-        default=None,
-        help="Linear ramp of coord loss from 0 → 1 over the first N epochs.",
-    )
-    parser.add_argument(
-        "--skip-sincos-norm",
-        action="store_true",
-        help="Force sin/cos descriptor slots to mean=0, std=1 (preserves unit circle).",
-    )
-    parser.add_argument(
-        "--run-name",
-        type=str,
-        default=None,
-        help="Wandb run name.",
-    )
+    parser.add_argument("--run-name", type=str, default=None, help="Wandb run name.")
     parser.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
-        help="Override descriptor cache directory (e.g. data/descriptor_cache_v2).",
+        help="Override descriptor cache directory.",
+    )
+    parser.add_argument(
+        "--ligand-coord-weight",
+        type=float,
+        default=None,
+        help="Override the ligand coord-MSE recon weight.",
+    )
+    parser.add_argument(
+        "--protein-coord-weight",
+        type=float,
+        default=None,
+        help="Override the protein coord-MSE recon weight.",
     )
     args = parser.parse_args()
 
@@ -88,13 +78,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.learning_rate = args.lr
     if args.precision is not None:
         config.precision = args.precision
-    if args.circle_loss_weight is not None:
-        config.protein.circle_loss_weight = args.circle_loss_weight
-        config.ligand.circle_loss_weight = args.circle_loss_weight
-    if args.coord_loss_warmup_epochs is not None:
-        config.coord_loss_warmup_epochs = args.coord_loss_warmup_epochs
-    if args.skip_sincos_norm:
-        config.skip_sincos_normalization = True
+    if args.ligand_coord_weight is not None:
+        config.ligand.recon_weights["coord"] = args.ligand_coord_weight
+    if args.protein_coord_weight is not None:
+        config.protein.recon_weights["coord"] = args.protein_coord_weight
 
     hub_config = None
     if args.from_hub:
@@ -109,7 +96,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         hub_dm = HubCrossDockedDataModule(hub_config)
         hub_dm.prepare_data()
 
-    # Enable TF32 for A100/H100 (free ~3x speedup for float32 matmuls)
+    # Enable TF32 for A100/H100 (free ~3x speedup for float32 matmuls).
     torch.set_float32_matmul_precision("high")
 
     dm = ComplexDescriptorDataModule(config, data_config, hub_config=hub_config)
@@ -124,10 +111,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         logger=WandbLogger(project="pocket-ligand-vqvae", name=args.run_name),
         callbacks=[
             ModelCheckpoint(
-                monitor="val/protein_recon",
+                monitor="val/ligand_coord",
                 mode="min",
                 save_top_k=3,
-                filename="vqvae-{epoch:02d}-{val/protein_recon:.4f}",
+                filename="vqvae-{epoch:02d}-{val/ligand_coord:.4f}",
             ),
         ],
     )

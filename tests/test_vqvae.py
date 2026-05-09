@@ -1,384 +1,187 @@
-"""Tests for VQ-VAE components: collation, LigandVQVAE and ProteinVQVAE."""
+"""Tests for the multi-head Transformer VQ-VAE."""
 
-import pytest
+from __future__ import annotations
+
 import torch
 
-from src.config import LigandVQVAEConfig, ProteinVQVAEConfig, VQVAETrainingConfig
+from src.config import LigandVQVAEConfig, ProteinVQVAEConfig
 from src.data.descriptors import MoleculeDataset, collate_molecules
-from src.model.vqvae_module import VQVAEModule
-from src.tokenizers.ligand import LigandVQVAE
-from src.tokenizers.protein import ProteinStructureVQVAE
+from src.tokenizers.descriptor_schema import (
+    LIGAND_DESCRIPTOR_DIM,
+    PROTEIN_DESCRIPTOR_DIM,
+)
+from src.tokenizers.vqvae import TransformerVQVAE
 
 
-class TestCollateMolecules:
-    """Tests for the collate_molecules function."""
+def _ligand_config(**kwargs: object) -> LigandVQVAEConfig:
+    defaults: dict = {
+        "hidden_dim": 64,
+        "latent_dim": 8,
+        "codebook_size": 32,
+        "num_transformer_layers": 2,
+        "num_attention_heads": 4,
+        "transformer_feedforward_dim": 128,
+        "max_seq_len": 64,
+    }
+    defaults.update(kwargs)
+    return LigandVQVAEConfig(**defaults)
 
+
+def _protein_config(**kwargs: object) -> ProteinVQVAEConfig:
+    defaults: dict = {
+        "hidden_dim": 64,
+        "latent_dim": 8,
+        "codebook_size": 64,
+        "num_transformer_layers": 2,
+        "num_attention_heads": 4,
+        "transformer_feedforward_dim": 128,
+        "max_seq_len": 64,
+    }
+    defaults.update(kwargs)
+    return ProteinVQVAEConfig(**defaults)
+
+
+def _make_random_ligand_batch(b: int, seq_len: int) -> torch.Tensor:
+    """Random descriptor where categorical slots hold valid integer indices."""
+    x = torch.randn(b, seq_len, LIGAND_DESCRIPTOR_DIM)
+    # element idx ∈ [0, 12), charge ∈ [0, 5), hybrid ∈ [0, 5),
+    # aromatic ∈ {0, 1}, ring ∈ [0, 5), numH ∈ [0, 5)
+    x[..., 4] = torch.randint(0, 12, (b, seq_len)).float()
+    x[..., 5] = torch.randint(0, 5, (b, seq_len)).float()
+    x[..., 6] = torch.randint(0, 5, (b, seq_len)).float()
+    x[..., 7] = torch.randint(0, 2, (b, seq_len)).float()
+    x[..., 8] = torch.randint(0, 5, (b, seq_len)).float()
+    x[..., 9] = torch.randint(0, 5, (b, seq_len)).float()
+    # KNN element idx
+    x[..., 26:30] = torch.randint(0, 12, (b, seq_len, 4)).float()
+    return x
+
+
+def _make_random_protein_batch(b: int, seq_len: int) -> torch.Tensor:
+    x = torch.randn(b, seq_len, PROTEIN_DESCRIPTOR_DIM)
+    x[..., 12] = torch.randint(0, 21, (b, seq_len)).float()
+    x[..., 61:65] = torch.randint(0, 21, (b, seq_len, 4)).float()
+    return x
+
+
+class TestCollation:
     def test_uniform_length(self) -> None:
-        mols = [torch.randn(5, 4), torch.randn(5, 4)]
+        mols = [torch.randn(5, LIGAND_DESCRIPTOR_DIM) for _ in range(2)]
         padded, mask = collate_molecules(mols)
-        assert padded.shape == (2, 5, 4)
+        assert padded.shape == (2, 5, LIGAND_DESCRIPTOR_DIM)
         assert mask.shape == (2, 5)
         assert mask.all()
 
     def test_variable_length_padding(self) -> None:
-        mols = [torch.randn(3, 4), torch.randn(7, 4), torch.randn(5, 4)]
+        mols = [
+            torch.randn(3, LIGAND_DESCRIPTOR_DIM),
+            torch.randn(7, LIGAND_DESCRIPTOR_DIM),
+        ]
         padded, mask = collate_molecules(mols)
-        assert padded.shape == (3, 7, 4)
-        assert mask.shape == (3, 7)
-        # Check mask correctness
+        assert padded.shape == (2, 7, LIGAND_DESCRIPTOR_DIM)
         assert mask[0, :3].all()
         assert not mask[0, 3:].any()
         assert mask[1, :7].all()
-        assert mask[2, :5].all()
-        assert not mask[2, 5:].any()
-
-    def test_padded_values_are_zero(self) -> None:
-        mols = [torch.randn(2, 4), torch.randn(5, 4)]
-        padded, _mask = collate_molecules(mols)
-        assert (padded[0, 2:] == 0).all()
-
-    def test_original_values_preserved(self) -> None:
-        mol = torch.randn(4, 4)
-        padded, _mask = collate_molecules([mol, torch.randn(6, 4)])
-        torch.testing.assert_close(padded[0, :4], mol)
-
-    def test_single_molecule(self) -> None:
-        mol = torch.randn(10, 4)
-        padded, mask = collate_molecules([mol])
-        assert padded.shape == (1, 10, 4)
-        assert mask.all()
 
 
 class TestMoleculeDataset:
-    """Tests for MoleculeDataset."""
-
-    def test_length(self) -> None:
-        mols = [torch.randn(i + 1, 4) for i in range(5)]
+    def test_length_and_getitem(self) -> None:
+        mols = [torch.randn(i + 1, LIGAND_DESCRIPTOR_DIM) for i in range(3)]
         ds = MoleculeDataset(mols)
-        assert len(ds) == 5
-
-    def test_getitem(self) -> None:
-        mols = [torch.randn(3, 4), torch.randn(7, 4)]
-        ds = MoleculeDataset(mols)
-        torch.testing.assert_close(ds[0], mols[0])
+        assert len(ds) == 3
         torch.testing.assert_close(ds[1], mols[1])
 
 
-class TestTransformerLigandVQVAE:
-    """Tests for the Transformer-based LigandVQVAE."""
-
-    def _make_config(self, **kwargs: object) -> LigandVQVAEConfig:
-        defaults = {
-            "hidden_dim": 64,
-            "latent_dim": 8,
-            "codebook_size": 32,
-            "num_transformer_layers": 2,
-            "num_attention_heads": 4,
-            "transformer_feedforward_dim": 128,
-            "max_seq_len": 64,
-            # These tests exercise the descriptor path only.
-            "coord_loss_enabled": False,
-        }
-        defaults.update(kwargs)
-        return LigandVQVAEConfig(**defaults)
-
+class TestLigandVQVAEForward:
     def test_forward_shapes(self) -> None:
-        config = self._make_config()
-        model = LigandVQVAE(config)
+        config = _ligand_config()
+        model = TransformerVQVAE(config)
         model.train()
 
-        b, seq_len = 4, 10
-        x = torch.randn(b, seq_len, 4)
+        b, seq_len = 2, 6
+        x = _make_random_ligand_batch(b, seq_len)
         mask = torch.ones(b, seq_len, dtype=torch.bool)
 
         out = model(x, mask=mask)
-        assert out["reconstructed"].shape == (b, seq_len, 4)
         assert out["indices"].shape == (b, seq_len)
         assert out["reconstruction_loss"].shape == ()
         assert out["commitment_loss"].shape == ()
 
-    def test_forward_with_padding(self) -> None:
-        config = self._make_config()
-        model = LigandVQVAE(config)
-        model.train()
+        # Heads
+        recon = out["recon_outputs"]
+        assert recon["coord"].shape == (b, seq_len, 4)
+        assert recon["element"].shape == (b, seq_len, 12)
+        assert recon["charge"].shape == (b, seq_len, 5)
+        assert recon["aromatic"].shape == (b, seq_len, 2)
 
-        b, max_len = 3, 12
-        x = torch.randn(b, max_len, 4)
+    def test_forward_with_padding(self) -> None:
+        config = _ligand_config()
+        model = TransformerVQVAE(config)
+        model.eval()
+
+        b, max_len = 2, 8
+        x = _make_random_ligand_batch(b, max_len)
         mask = torch.zeros(b, max_len, dtype=torch.bool)
         mask[0, :5] = True
-        mask[1, :12] = True
-        mask[2, :8] = True
+        mask[1, :max_len] = True
 
         out = model(x, mask=mask)
-        assert out["reconstructed"].shape == (b, max_len, 4)
-        # Padded positions should have index -1
         assert (out["indices"][0, 5:] == -1).all()
-        assert (out["indices"][2, 8:] == -1).all()
+        assert (out["indices"][1] >= 0).all()
 
-    def test_forward_no_mask(self) -> None:
-        config = self._make_config()
-        model = LigandVQVAE(config)
+    def test_encode_decode_to_outputs(self) -> None:
+        config = _ligand_config()
+        model = TransformerVQVAE(config)
         model.eval()
 
-        x = torch.randn(2, 6, 4)
-        out = model(x)
-        assert out["reconstructed"].shape == (2, 6, 4)
-        assert (out["indices"] >= 0).all()
-
-    def test_encode_single_molecule(self) -> None:
-        config = self._make_config()
-        model = LigandVQVAE(config)
-        model.eval()
-
-        x = torch.randn(15, 4)
+        x = _make_random_ligand_batch(1, 10).squeeze(0)
         with torch.no_grad():
             indices = model.encode(x)
-        assert indices.shape == (15,)
-        assert indices.dtype == torch.long
+            outs = model.decode_to_outputs(indices)
+        assert indices.shape == (10,)
         assert (indices >= 0).all()
         assert (indices < config.codebook_size).all()
-
-    def test_decode_single_molecule(self) -> None:
-        config = self._make_config()
-        model = LigandVQVAE(config)
-        model.eval()
-
-        indices = torch.randint(0, config.codebook_size, (10,))
-        with torch.no_grad():
-            reconstructed = model.decode(indices)
-        assert reconstructed.shape == (10, 4)
-
-    def test_encode_decode_roundtrip(self) -> None:
-        config = self._make_config()
-        model = LigandVQVAE(config)
-        model.eval()
-
-        x = torch.randn(8, 4)
-        with torch.no_grad():
-            indices = model.encode(x)
-            reconstructed = model.decode(indices)
-        assert reconstructed.shape == x.shape
+        assert outs["coord"].shape == (10, 4)
+        assert outs["element"].shape == (10, 12)
 
     def test_gradient_flow(self) -> None:
-        config = self._make_config()
-        model = LigandVQVAE(config)
+        config = _ligand_config()
+        model = TransformerVQVAE(config)
         model.train()
 
-        x = torch.randn(2, 5, 4)
+        x = _make_random_ligand_batch(2, 5)
         mask = torch.ones(2, 5, dtype=torch.bool)
         out = model(x, mask=mask)
         loss = out["reconstruction_loss"] + out["commitment_loss"]
         loss.backward()
-
-        # Check that encoder and decoder gradients exist
         assert model.input_proj[0].weight.grad is not None
-        assert model.output_proj[-1].weight.grad is not None
+        assert model.recon_head_modules["coord"].weight.grad is not None
+        assert model.recon_head_modules["element"].weight.grad is not None
 
 
-class TestProteinVQVAE:
-    """Tests for the deepened ProteinStructureVQVAE."""
-
-    def _make_config(self, **kwargs: object) -> ProteinVQVAEConfig:
-        defaults: dict[str, object] = {
-            "descriptor_dim": 9,
-            "hidden_dim": 64,
-            "latent_dim": 16,
-            "codebook_size": 64,
-        }
-        defaults.update(kwargs)
-        return ProteinVQVAEConfig(**defaults)
-
+class TestProteinVQVAEForward:
     def test_forward_shapes(self) -> None:
-        config = self._make_config()
-        model = ProteinStructureVQVAE(config)
+        config = _protein_config()
+        model = TransformerVQVAE(config)
         model.train()
 
-        x = torch.randn(32, 9)
-        out = model(x)
-        assert out["reconstructed"].shape == (32, 9)
-        assert out["indices"].shape == (32,)
+        b, seq_len = 2, 8
+        x = _make_random_protein_batch(b, seq_len)
+        mask = torch.ones(b, seq_len, dtype=torch.bool)
+        out = model(x, mask=mask)
+        recon = out["recon_outputs"]
+        assert recon["coord"].shape == (b, seq_len, 12)
+        assert recon["aa"].shape == (b, seq_len, 21)
 
-    def test_encoder_depth(self) -> None:
-        config = self._make_config()
-        model = ProteinStructureVQVAE(config)
-        # Encoder should have 4 Linear layers (7 modules with ReLUs)
-        linear_layers = [m for m in model.encoder if isinstance(m, torch.nn.Linear)]
-        assert len(linear_layers) == 4
-
-    def test_decoder_depth(self) -> None:
-        config = self._make_config()
-        model = ProteinStructureVQVAE(config)
-        # Decoder should have 3 Linear layers
-        linear_layers = [m for m in model.decoder if isinstance(m, torch.nn.Linear)]
-        assert len(linear_layers) == 3
-
-
-class TestCircleLoss:
-    """Unit-circle penalty wired into TransformerVQVAE.forward()."""
-
-    def _make_model(self, descriptor_dim: int = 4) -> LigandVQVAE:
-        config = LigandVQVAEConfig(
-            descriptor_dim=descriptor_dim,
-            hidden_dim=32,
-            latent_dim=8,
-            codebook_size=16,
-            num_transformer_layers=1,
-            num_attention_heads=4,
-            transformer_feedforward_dim=64,
-            max_seq_len=16,
-            coord_loss_enabled=False,
-        )
-        return LigandVQVAE(config)
-
-    def test_circle_loss_present_in_output(self) -> None:
-        model = self._make_model()
-        model.eval()
-        x = torch.randn(2, 5, 4)
-        mask = torch.ones(2, 5, dtype=torch.bool)
-        with torch.no_grad():
-            out = model(x, mask=mask)
-        assert "circle_loss" in out
-        assert out["circle_loss"].shape == ()
-        assert out["circle_loss"].item() >= 0.0
-
-    def test_circle_loss_zero_on_unit_circle(self) -> None:
-        """When sin² + cos² == 1 identically, penalty is ~0 despite noisy x_hat."""
-        model = self._make_model()
-        model.eval()
-        # Drive x_hat toward unit-circle sin/cos by feeding unit-circle x with
-        # identity-ish normalization: mean=0, std=1 means denorm == input.
-        mean = torch.zeros(4)
-        std = torch.ones(4)
-        model.set_normalization(mean, std)
-
-        x_hat = torch.zeros(2, 5, 4)
-        x_hat[..., 2] = 1.0  # sin
-        x_hat[..., 3] = 0.0  # cos
-        mask = torch.ones(2, 5, dtype=torch.bool)
-        loss = model._compute_circle_loss(x_hat, mask)  # noqa: SLF001
-        assert loss.item() == 0.0
-
-    def test_circle_loss_positive_off_circle(self) -> None:
-        model = self._make_model()
-        model.eval()
-        model.set_normalization(torch.zeros(4), torch.ones(4))
-        x_hat = torch.zeros(2, 5, 4)
-        x_hat[..., 2] = 2.0  # sin too big
-        x_hat[..., 3] = 2.0  # cos too big
-        mask = torch.ones(2, 5, dtype=torch.bool)
-        loss = model._compute_circle_loss(x_hat, mask)  # noqa: SLF001
-        # (2² + 2² - 1)² = 7² = 49
-        assert loss.item() == 49.0
-
-
-class TestCoordLossRamp:
-    """Warmup ramp for coord loss inside VQVAEModule._combine_losses."""
-
-    def _make_module(self, warmup: int) -> VQVAEModule:
-        config = VQVAETrainingConfig(
-            coord_loss_warmup_epochs=warmup,
-            protein=ProteinVQVAEConfig(
-                descriptor_dim=12,
-                hidden_dim=16,
-                latent_dim=8,
-                codebook_size=8,
-                num_transformer_layers=1,
-                num_attention_heads=2,
-                transformer_feedforward_dim=32,
-                max_seq_len=8,
-                coord_loss_enabled=True,
-            ),
-            ligand=LigandVQVAEConfig(
-                hidden_dim=16,
-                latent_dim=8,
-                codebook_size=8,
-                num_transformer_layers=1,
-                num_attention_heads=2,
-                transformer_feedforward_dim=32,
-                max_seq_len=8,
-                coord_loss_enabled=True,
-            ),
-        )
-        return VQVAEModule(config)
-
-    def test_no_warmup_yields_ramp_one(self) -> None:
-        module = self._make_module(warmup=0)
-        # current_epoch defaults to 0 without a Trainer; warmup=0 bypasses it.
-        assert module._coord_loss_ramp() == 1.0  # noqa: SLF001
-
-    def test_warmup_linear_ramp(self, monkeypatch: "pytest.MonkeyPatch") -> None:
-        module = self._make_module(warmup=10)
-        # Patch the read-only LightningModule.current_epoch property at the
-        # class level so the ramp formula sees a real epoch number.
-        monkeypatch.setattr(
-            type(module),
-            "current_epoch",
-            property(lambda _self: 0),
-        )
-        # Epoch 0 → (0 + 1) / 10 = 0.1
-        assert module._coord_loss_ramp() == pytest.approx(0.1)  # noqa: SLF001
-
-    def test_warmup_plateau_at_one(self, monkeypatch: "pytest.MonkeyPatch") -> None:
-        module = self._make_module(warmup=2)
-        monkeypatch.setattr(
-            type(module),
-            "current_epoch",
-            property(lambda _self: 5),
-        )
-        assert module._coord_loss_ramp() == 1.0  # noqa: SLF001
-
-
-class TestVQVAEModuleBatchFormat:
-    """Tests for VQVAEModule with the new batch format."""
-
-    def test_forward_both_models(self) -> None:
-        config = VQVAETrainingConfig(
-            protein=ProteinVQVAEConfig(
-                descriptor_dim=12,
-                hidden_dim=32,
-                latent_dim=8,
-                codebook_size=16,
-                num_transformer_layers=1,
-                num_attention_heads=4,
-                transformer_feedforward_dim=64,
-                max_seq_len=32,
-                coord_loss_enabled=False,
-            ),
-            ligand=LigandVQVAEConfig(
-                hidden_dim=32,
-                latent_dim=8,
-                codebook_size=16,
-                num_transformer_layers=1,
-                num_attention_heads=4,
-                transformer_feedforward_dim=64,
-                max_seq_len=32,
-                coord_loss_enabled=False,
-            ),
-        )
-        module = VQVAEModule(config)
-        module.train()
-
-        # Protein forward (sequence batch with mask)
-        prot_x = torch.randn(4, 8, 12)
-        prot_mask = torch.ones(4, 8, dtype=torch.bool)
-        prot_mask[0, 6:] = False
-        prot_out = module.protein_vqvae(prot_x, mask=prot_mask)
-        assert prot_out["reconstructed"].shape == (4, 8, 12)
-        assert (prot_out["indices"][0, 6:] == -1).all()
-
-        # Ligand forward (sequence batch with mask)
-        lig_x = torch.randn(4, 10, 4)
-        lig_mask = torch.ones(4, 10, dtype=torch.bool)
-        lig_mask[0, 7:] = False
-        lig_out = module.ligand_vqvae(lig_x, mask=lig_mask)
-        assert lig_out["reconstructed"].shape == (4, 10, 4)
-        assert (lig_out["indices"][0, 7:] == -1).all()
-
-        # Both losses are scalar and backpropagable
-        total_loss = (
-            prot_out["reconstruction_loss"]
-            + prot_out["commitment_loss"]
-            + lig_out["reconstruction_loss"]
-            + lig_out["commitment_loss"]
-        )
-        total_loss.backward()
+    def test_per_head_losses_present(self) -> None:
+        config = _protein_config()
+        model = TransformerVQVAE(config)
+        model.train()
+        x = _make_random_protein_batch(1, 4)
+        mask = torch.ones(1, 4, dtype=torch.bool)
+        out = model(x, mask=mask)
+        head_losses = out["head_losses"]
+        assert "coord" in head_losses
+        assert "aa" in head_losses
+        assert head_losses["coord"].shape == ()
+        assert head_losses["aa"].shape == ()

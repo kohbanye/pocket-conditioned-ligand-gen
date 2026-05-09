@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from pathlib import Path
 
@@ -33,18 +32,25 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import (
+from src.config import (  # noqa: E402
     CrossDockedConfig,
     PocketExtractionConfig,
     VQVAETrainingConfig,
 )
-from src.data.descriptors import ComplexDescriptorDataModule
-from src.model.vqvae_module import VQVAEModule
-from src.tokenizers.ligand import LigandDescriptor, parse_sdf
-from src.tokenizers.protein import (
+from src.data.descriptors import ComplexDescriptorDataModule  # noqa: E402
+from src.model.vqvae_module import VQVAEModule  # noqa: E402
+from src.tokenizers.descriptor_schema import (  # noqa: E402
+    LIGAND_DESCRIPTOR_DIM,
+    LIGAND_LAYOUT,
+    PROTEIN_DESCRIPTOR_DIM,
+    PROTEIN_LAYOUT,
+    fields_by_name,
+)
+from src.tokenizers.ligand import LigandDescriptor, parse_sdf  # noqa: E402
+from src.tokenizers.protein import (  # noqa: E402
     AA_3TO1,
     BACKBONE_ATOMS,
-    BackboneZMatrixDescriptor,
+    BackboneSphericalDescriptor,
     _compute_canonical_frame,
     extract_pocket,
 )
@@ -88,7 +94,7 @@ METRIC_FN = {
 }
 
 
-def _fmt_atom(
+def _fmt_atom(  # noqa: PLR0913
     record: str,
     serial: int,
     atom_name: str,
@@ -99,7 +105,7 @@ def _fmt_atom(
     element: str,
 ) -> str:
     """Format a single PDB ATOM/HETATM line per the column spec."""
-    name_field = f" {atom_name:<3s}" if len(atom_name) < 4 else atom_name[:4]
+    name_field = f" {atom_name:<3s}" if len(atom_name) < 4 else atom_name[:4]  # noqa: PLR2004
     return (
         f"{record:<6s}{serial:>5d} {name_field}"
         f" {res_name:>3s} {chain_id:1s}{res_seq:>4d}    "
@@ -108,9 +114,7 @@ def _fmt_atom(
     )
 
 
-def _conect_lines(
-    bonds: list[tuple[int, int]], *, start_serial: int
-) -> list[str]:
+def _conect_lines(bonds: list[tuple[int, int]], *, start_serial: int) -> list[str]:
     """Emit CONECT records so viewers don't have to guess bonds from distance."""
     lines: list[str] = []
     for a, b in bonds:
@@ -129,13 +133,9 @@ def _ligand_lines(
     """Format the ligand heavy atoms as HETATM (+ optional CONECT) records."""
     lines: list[str] = []
     serial = start_serial
-    for k, (elem, xyz) in enumerate(
-        zip(ligand_elements, ligand_coords, strict=True)
-    ):
+    for k, (elem, xyz) in enumerate(zip(ligand_elements, ligand_coords, strict=True)):
         atom_name = f"{elem}{k + 1}"[:4]
-        lines.append(
-            _fmt_atom("HETATM", serial, atom_name, "LIG", "L", 1, xyz, elem)
-        )
+        lines.append(_fmt_atom("HETATM", serial, atom_name, "LIG", "L", 1, xyz, elem))
         serial += 1
     if bonds:
         lines.extend(_conect_lines(bonds, start_serial=start_serial))
@@ -158,13 +158,13 @@ def write_full_protein_pdb(
         if head in {"END", "ENDMDL", "MASTER"}:
             continue
         keep.append(line)
+    import contextlib  # noqa: PLC0415
+
     last_serial = 0
     for line in keep:
         if line.startswith(("ATOM", "HETATM")):
-            try:
+            with contextlib.suppress(ValueError):
                 last_serial = max(last_serial, int(line[6:11]))
-            except ValueError:
-                pass
     keep.append("TER\n")
     keep.extend(
         _ligand_lines(
@@ -178,7 +178,7 @@ def write_full_protein_pdb(
     out_path.write_text("".join(keep))
 
 
-def write_complex_pdb(
+def write_complex_pdb(  # noqa: PLR0913
     out_path: Path,
     backbone_coords: np.ndarray,
     pocket_seq: str,
@@ -226,16 +226,36 @@ def write_complex_pdb(
     out_path.write_text("".join(lines))
 
 
+def _reconstruct_descriptor_from_coord_head(
+    coord_norm: torch.Tensor,
+    full_dim: int,
+    coord_field_start: int,
+    coord_field_length: int,
+) -> np.ndarray:
+    """Build a (N, full_dim) descriptor with only the coord slot populated.
+
+    The downstream ``descriptor_to_coords`` / ``descriptor_to_backbone_coords``
+    helpers slice out the coord field, so the rest of the descriptor can be
+    zeros — categorical reconstruction is irrelevant for visual diffing.
+    """
+    n = coord_norm.shape[0]
+    desc = np.zeros((n, full_dim), dtype=np.float32)
+    desc[:, coord_field_start : coord_field_start + coord_field_length] = (
+        coord_norm.cpu().numpy().astype(np.float32)
+    )
+    return desc
+
+
 @torch.no_grad()
-def reconstruct_one(
+def reconstruct_one(  # noqa: PLR0913
     rec_path: Path,
     lig_path: Path,
     *,
     pocket_config: PocketExtractionConfig,
-    protein_desc_calc: BackboneZMatrixDescriptor,
+    protein_desc_calc: BackboneSphericalDescriptor,
     ligand_desc_calc: LigandDescriptor,
-    protein_vqvae,
-    ligand_vqvae,
+    protein_vqvae: object,
+    ligand_vqvae: object,
     norm_stats: dict[str, torch.Tensor],
     device: torch.device,
 ) -> dict | None:
@@ -246,16 +266,13 @@ def reconstruct_one(
     mol = molecules[0]
     if not mol["atoms"]:
         return None
-    # Pocket extraction needs heavy-atom coords for the distance cutoff.
     heavy_for_pocket = np.array(
         [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"],
         dtype=np.float32,
     )
     if len(heavy_for_pocket) == 0:
         return None
-    pocket_result = extract_pocket(
-        rec_path, heavy_for_pocket, pocket_config
-    )
+    pocket_result = extract_pocket(rec_path, heavy_for_pocket, pocket_config)
     if pocket_result is None:
         return None
     backbone_coords_orig, pocket_seq, residue_ids = pocket_result
@@ -264,52 +281,80 @@ def reconstruct_one(
     centroid, rotation = _compute_canonical_frame(ca_coords)
     pocket_frame = (centroid, rotation)
 
+    # ---- Protein -----------------------------------------------------
     prot_desc, prot_meta = protein_desc_calc.compute(
-        backbone_coords_orig, residue_ids, pocket_frame=pocket_frame
+        backbone_coords_orig,
+        residue_ids,
+        pocket_frame=pocket_frame,
+        residue_names_one_letter=list(pocket_seq),
     )
     prot_t = torch.from_numpy(prot_desc).to(device)
     prot_norm = (prot_t - norm_stats["protein_mean"]) / norm_stats["protein_std"]
     pi = protein_vqvae.encode(prot_norm)
-    prot_recon_norm = protein_vqvae.decode(pi)
-    prot_recon_desc = (
-        prot_recon_norm * norm_stats["protein_std"] + norm_stats["protein_mean"]
-    ).cpu().numpy()
-    backbone_recon = BackboneZMatrixDescriptor.descriptor_to_backbone_coords(
-        prot_recon_desc, prot_meta
+    prot_outputs = protein_vqvae.decode_to_outputs(pi)
+    prot_coord_field = fields_by_name(PROTEIN_LAYOUT)["coord"]
+    # Denormalize only the coord slot; the network predicts in normalized space.
+    prot_coord_mean = norm_stats["protein_mean"][
+        prot_coord_field.start : prot_coord_field.end
+    ]
+    prot_coord_std = norm_stats["protein_std"][
+        prot_coord_field.start : prot_coord_field.end
+    ]
+    prot_coord_denorm = prot_outputs["coord"] * prot_coord_std + prot_coord_mean
+    prot_recon_desc = _reconstruct_descriptor_from_coord_head(
+        prot_coord_denorm,
+        PROTEIN_DESCRIPTOR_DIM,
+        prot_coord_field.start,
+        prot_coord_field.length,
+    )
+    backbone_recon = BackboneSphericalDescriptor.descriptor_to_backbone_coords(
+        prot_recon_desc,
+        prot_meta,
     )
 
-    lig_desc, lig_elements, lig_meta = ligand_desc_calc.compute(
-        mol["atoms"], mol["bonds"], pocket_frame=pocket_frame
+    # ---- Ligand ------------------------------------------------------
+    lig_desc, lig_elements_sym, lig_meta = ligand_desc_calc.compute(
+        mol["atoms"],
+        mol["bonds"],
+        pocket_frame=pocket_frame,
     )
     if len(lig_desc) == 0:
         return None
     lig_t = torch.from_numpy(lig_desc).to(device)
     lig_norm = (lig_t - norm_stats["ligand_mean"]) / norm_stats["ligand_std"]
     li = ligand_vqvae.encode(lig_norm)
-    lig_recon_norm = ligand_vqvae.decode(li)
-    lig_recon_desc = (
-        lig_recon_norm * norm_stats["ligand_std"] + norm_stats["ligand_mean"]
-    ).cpu().numpy()
+    lig_outputs = ligand_vqvae.decode_to_outputs(li)
+    lig_coord_field = fields_by_name(LIGAND_LAYOUT)["coord"]
+    lig_coord_mean = norm_stats["ligand_mean"][
+        lig_coord_field.start : lig_coord_field.end
+    ]
+    lig_coord_std = norm_stats["ligand_std"][
+        lig_coord_field.start : lig_coord_field.end
+    ]
+    lig_coord_denorm = lig_outputs["coord"] * lig_coord_std + lig_coord_mean
+    lig_recon_desc = _reconstruct_descriptor_from_coord_head(
+        lig_coord_denorm,
+        LIGAND_DESCRIPTOR_DIM,
+        lig_coord_field.start,
+        lig_coord_field.length,
+    )
     lig_coords_recon = LigandDescriptor.descriptor_to_coords(
-        lig_recon_desc, lig_meta, pocket_frame=pocket_frame
+        lig_recon_desc,
+        lig_meta,
+        pocket_frame=pocket_frame,
     )
 
-    # `descriptor_to_coords` returns coords in **raw SDF order** (indexed by
-    # raw atom index), while `lig_elements` is in DFS order.  Reorder both
-    # the original and reconstructed coords into DFS order so they line up
-    # element-by-element, then drop hydrogens from all three for cleaner PDB.
-    raw_coords = np.array(
-        [(a[1], a[2], a[3]) for a in mol["atoms"]], dtype=np.float64
+    # Heavy atoms are already in heavy-only original-atom order from the new
+    # spherical descriptor (no DFS reordering); just project ground-truth
+    # coords with the same heavy_to_orig mapping.
+    heavy_to_orig = lig_meta["heavy_to_orig"]
+    orig_atoms = mol["atoms"]
+    lig_coords_orig = np.array(
+        [(orig_atoms[i][1], orig_atoms[i][2], orig_atoms[i][3]) for i in heavy_to_orig],
+        dtype=np.float64,
     )
-    dfs_order = lig_meta["order"]
-    lig_coords_orig_dfs = raw_coords[dfs_order]
-    lig_coords_recon_dfs = lig_coords_recon.astype(np.float64)[dfs_order]
-    keep = [i for i, e in enumerate(lig_elements) if e != "H"]
-    # Remap SDF bonds (raw atom indices) → final ligand atom indices in the
-    # heavy-only DFS order, dropping any bond that touched a hydrogen.
     raw_to_final: dict[int, int] = {
-        dfs_order[dfs_pos]: final_pos
-        for final_pos, dfs_pos in enumerate(keep)
+        orig_idx: final_pos for final_pos, orig_idx in enumerate(heavy_to_orig)
     }
     bonds_remapped: list[tuple[int, int]] = []
     for a, b, *_ in mol["bonds"]:
@@ -320,14 +365,14 @@ def reconstruct_one(
         "residue_ids": residue_ids,
         "backbone_orig": backbone_coords_orig.astype(np.float64),
         "backbone_recon": backbone_recon.astype(np.float64),
-        "ligand_elements": [lig_elements[i] for i in keep],
-        "ligand_coords_orig": lig_coords_orig_dfs[keep],
-        "ligand_coords_recon": lig_coords_recon_dfs[keep],
+        "ligand_elements": lig_elements_sym,
+        "ligand_coords_orig": lig_coords_orig,
+        "ligand_coords_recon": lig_coords_recon.astype(np.float64),
         "ligand_bonds": bonds_remapped,
     }
 
 
-def main() -> None:
+def main() -> None:  # noqa: PLR0915
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--ckpt",
@@ -355,8 +400,8 @@ def main() -> None:
         "--max-attempts",
         type=int,
         default=None,
-        help="Cap on candidate complexes to scan (default: 5 × n_samples for "
-        "random mode, 100 × n_samples for worst-* modes).",
+        help="Cap on candidate complexes to scan (default: 5 x n_samples for "
+        "random mode, 100 x n_samples for worst-* modes).",
     )
     parser.add_argument(
         "--mode",
@@ -407,7 +452,7 @@ def main() -> None:
     )
 
     pocket_config = PocketExtractionConfig()
-    protein_desc_calc = BackboneZMatrixDescriptor()
+    protein_desc_calc = BackboneSphericalDescriptor()
     ligand_desc_calc = LigandDescriptor()
 
     # Scan candidates; in random mode stop after n_samples valid hits, in
@@ -445,7 +490,9 @@ def main() -> None:
         candidates.sort(key=lambda x: -x[0])
         logger.info(
             "Scanned %d valid candidates, taking top %d by %s RMSD",
-            len(candidates), args.n_samples, metric_key,
+            len(candidates),
+            args.n_samples,
+            metric_key,
         )
     selected = candidates[: args.n_samples]
 
