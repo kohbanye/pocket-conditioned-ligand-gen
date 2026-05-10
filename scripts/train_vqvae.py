@@ -16,7 +16,7 @@ from src.model.vqvae_module import VQVAEModule
 logging.basicConfig(level=logging.INFO)
 
 
-def main() -> None:  # noqa: C901, PLR0915
+def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser()
     parser.add_argument("--max-pairs", type=int, default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
@@ -61,6 +61,18 @@ def main() -> None:  # noqa: C901, PLR0915
         default=None,
         help="Override the protein coord-MSE recon weight.",
     )
+    parser.add_argument(
+        "--ligand-codebook-size",
+        type=int,
+        default=None,
+        help="Override the ligand VQ-VAE codebook size.",
+    )
+    parser.add_argument(
+        "--protein-codebook-size",
+        type=int,
+        default=None,
+        help="Override the protein VQ-VAE codebook size.",
+    )
     args = parser.parse_args()
 
     config = VQVAETrainingConfig()
@@ -82,6 +94,10 @@ def main() -> None:  # noqa: C901, PLR0915
         config.ligand.recon_weights["coord"] = args.ligand_coord_weight
     if args.protein_coord_weight is not None:
         config.protein.recon_weights["coord"] = args.protein_coord_weight
+    if args.ligand_codebook_size is not None:
+        config.ligand.codebook_size = args.ligand_codebook_size
+    if args.protein_codebook_size is not None:
+        config.protein.codebook_size = args.protein_codebook_size
 
     hub_config = None
     if args.from_hub:
