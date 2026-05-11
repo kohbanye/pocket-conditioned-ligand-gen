@@ -178,14 +178,7 @@ def _(
         f"Ligand test:  {len(ligand_test_molecules)} molecules, "
         f"{ligand_test_flat.shape[0]} atoms total"
     )
-    return (
-        config,
-        ligand_test_flat,
-        ligand_test_molecules,
-        norm_stats,
-        protein_test_flat,
-        protein_test_pockets,
-    )
+    return config, ligand_test_molecules, norm_stats, protein_test_pockets
 
 
 @app.cell(hide_code=True)
@@ -336,7 +329,14 @@ def _(fields_by_name, np, torch):
 
 
 @app.cell
-def _(lig_out, ligand_vqvae, norm_stats, per_head_metrics, prot_out, protein_vqvae):
+def _(
+    lig_out,
+    ligand_vqvae,
+    norm_stats,
+    per_head_metrics,
+    prot_out,
+    protein_vqvae,
+):
     prot_metrics = per_head_metrics(
         prot_out, protein_vqvae,
         norm_stats["protein_mean"], norm_stats["protein_std"], "Protein",
@@ -361,7 +361,14 @@ def _(mo):
 
 
 @app.cell
-def _(LIGAND_ELEMENT_VOCAB, PROTEIN_AA_VOCAB, lig_metrics, np, plt, prot_metrics):
+def _(
+    LIGAND_ELEMENT_VOCAB,
+    PROTEIN_AA_VOCAB,
+    lig_metrics,
+    np,
+    plt,
+    prot_metrics,
+):
     def plot_confusion(target, pred, vocab, ax, title):
         n = len(vocab)
         cm = np.zeros((n, n), dtype=np.int64)
@@ -472,7 +479,7 @@ def _(mo):
 
 
 @app.cell
-def _(  # noqa: C901
+def _(
     LIGAND_LAYOUT,
     PROTEIN_LAYOUT,
     device,
@@ -723,8 +730,12 @@ def _(  # noqa: C901
     return (
         joint_rmsd_arr,
         lig_in_joint_rmsd_arr,
+        lig_rmsd_aligned_arr,
+        lig_rmsd_arr,
         plot_rmsd_hist,
         prot_in_joint_rmsd_arr,
+        prot_rmsd_aligned_arr,
+        prot_rmsd_arr,
     )
 
 
