@@ -1,9 +1,9 @@
 """Delete ``normalization_stats.pt`` and re-run the stats pass from shards.
 
-Needed after changing normalization policy (e.g. toggling
-``skip_sincos_normalization``) without regenerating the descriptor shards.
-The shards themselves store pre-normalization values, so only the stats
-file — a tiny tensor dict — is recomputed.
+Needed when the descriptor schema or ``continuous_mask`` changes without
+regenerating the descriptor shards. The shards themselves store
+pre-normalization values, so only the stats file — a tiny tensor dict —
+is recomputed.
 """
 
 from __future__ import annotations
@@ -33,15 +33,10 @@ def main() -> None:
         help="Use HubDatasetConfig so prepare_data paths match the usual training run.",
     )
     parser.add_argument(
-        "--skip-sincos-norm",
-        action="store_true",
-        help="Force sin/cos slots to mean=0, std=1 in the regenerated stats.",
-    )
-    parser.add_argument(
         "--cache-dir",
         type=Path,
         default=None,
-        help="Override descriptor cache directory (e.g. data/descriptor_cache_v2).",
+        help="Override descriptor cache directory.",
     )
     args = parser.parse_args()
 
@@ -49,8 +44,6 @@ def main() -> None:
     data_config = CrossDockedConfig()
     if args.data_dir is not None:
         data_config.data_dir = args.data_dir
-    if args.skip_sincos_norm:
-        config.skip_sincos_normalization = True
 
     hub_config = HubDatasetConfig() if args.from_hub else None
     dm = ComplexDescriptorDataModule(config, data_config, hub_config=hub_config)

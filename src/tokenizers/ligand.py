@@ -1,52 +1,55 @@
-"""Ligand 3D structure tokenization using invertible Z-matrix descriptors.
+"""Ligand 3D structure tokenization with spherical coords + atom features.
 
-Provides:
-- Canonical DFS ordering via RDKit
-- Z-matrix internal coordinates (4D per atom)
-- Inverse reconstruction via NeRF algorithm
-- VQ-VAE for structure tokenization (via TransformerVQVAE)
-- SDF file parsing
+Each heavy atom gets a single 30-D descriptor row whose layout is defined in
+:mod:`src.tokenizers.descriptor_schema`. The descriptor combines:
+
+- Pocket-anchored spherical coords ``(r, θ, sin φ, cos φ)`` from the pocket
+  centroid in the canonical frame. No DFS chain, no NeRF, no per-atom error
+  accumulation: each atom's position is one independent transform.
+- Categorical atom features (element, formal charge, hybridization, aromatic
+  flag, smallest ring size, total H count) read off RDKit.
+- K=4 nearest-heavy-neighbour spherical offsets and elements as encoder hint
+  features (Mol-StrucTok style "understanding" channels).
+
+Reconstruction is a one-line spherical → Cartesian → frame-rotation. Bond
+inference happens post-hoc from the reconstructed Cartesian coords.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
-from src.tokenizers.geometry import (
-    _EPS,
+from src.tokenizers.descriptor_schema import (
+    K_NEIGHBORS,
+    LIGAND_CHARGE_TO_IDX,
+    LIGAND_CHARGE_VOCAB,
+    LIGAND_DESCRIPTOR_DIM,
+    LIGAND_ELEMENT_TO_IDX,
+    LIGAND_HYBRID_OTHER_IDX,
+    LIGAND_LAYOUT,
+    LIGAND_NUMH_VOCAB,
+    LIGAND_OTHER_IDX,
+    LIGAND_RING_NONE_IDX,
+    fields_by_name,
 )
-from src.tokenizers.geometry import (
-    bond_angle as _bond_angle,
-)
-from src.tokenizers.geometry import (
-    canonical_virtual_ref as _canonical_virtual_ref,
-)
-from src.tokenizers.geometry import (
-    cartesian_to_spherical as _cartesian_to_spherical,
-)
-from src.tokenizers.geometry import (
-    dihedral_angle as _dihedral_angle,
-)
-from src.tokenizers.geometry import (
-    place_atom as _place_atom,
-)
-from src.tokenizers.geometry import (
-    spherical_to_cartesian as _spherical_to_cartesian,
-)
-from src.tokenizers.geometry import (
-    virtual_dihedral_ref as _virtual_dihedral_ref,
-)
+from src.tokenizers.geometry import cartesian_to_spherical, spherical_to_cartesian
 from src.tokenizers.vqvae import TransformerVQVAE as LigandVQVAE  # noqa: TC001
+
+if TYPE_CHECKING:
+    from rdkit.Chem import Mol
+
+
+# ---------------------------------------------------------------------------
+# SDF parsing (unchanged from previous implementation)
+# ---------------------------------------------------------------------------
 
 
 def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
-    """Parse an SDF file and return a list of molecules.
-
-    Supports both plain ``.sdf`` and gzipped ``.sdf.gz`` files.
+    """Parse an SDF (or .sdf.gz) file and return one dict per molecule.
 
     Each molecule is a dict with keys:
     - atoms: list of (element, x, y, z)
@@ -64,7 +67,6 @@ def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
 
     i = 0
     while i < len(lines):
-        # Skip to counts line (line 4 of each mol block, index 3)
         if i + 3 >= len(lines):
             break
 
@@ -76,7 +78,6 @@ def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
         i += 1
         parts = counts_line.split()
         if len(parts) < 2:  # noqa: PLR2004
-            # Skip to next $$$$ delimiter
             while i < len(lines) and lines[i].strip() != "$$$$":
                 i += 1
             i += 1
@@ -91,7 +92,6 @@ def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
             i += 1
             continue
 
-        # Atom block
         atoms = []
         for _ in range(num_atoms):
             if i >= len(lines):
@@ -105,7 +105,6 @@ def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
             element = atom_parts[3]
             atoms.append((element, x, y, z))
 
-        # Bond block
         bonds = []
         for _ in range(num_bonds):
             if i >= len(lines):
@@ -115,7 +114,7 @@ def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
             bond_parts = bond_line.split()
             if len(bond_parts) < 3:  # noqa: PLR2004
                 continue
-            a1 = int(bond_parts[0]) - 1  # Convert to 0-indexed
+            a1 = int(bond_parts[0]) - 1
             a2 = int(bond_parts[1]) - 1
             bt = int(bond_parts[2])
             bonds.append((a1, a2, bt))
@@ -123,7 +122,6 @@ def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
         if atoms:
             molecules.append({"atoms": atoms, "bonds": bonds})
 
-        # Skip to $$$$
         while i < len(lines) and lines[i].strip() != "$$$$":
             i += 1
         i += 1
@@ -131,223 +129,177 @@ def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
     return molecules
 
 
-def _build_adjacency(
-    num_atoms: int,
-    bonds: list[tuple[int, int, int]],
-) -> list[list[int]]:
-    """Build adjacency list from bond information."""
-    adj: list[list[int]] = [[] for _ in range(num_atoms)]
-    for a1, a2, _bt in bonds:
-        if 0 <= a1 < num_atoms and 0 <= a2 < num_atoms:
-            adj[a1].append(a2)
-            adj[a2].append(a1)
-    return adj
-
-
 # ---------------------------------------------------------------------------
-# Canonical DFS ordering
+# RDKit atom-feature extraction
 # ---------------------------------------------------------------------------
 
 
-def _canonical_atom_ranks(
+def _build_rdkit_mol(
     atoms: list[tuple[str, float, float, float]],
     bonds: list[tuple[int, int, int]],
-) -> list[int]:
-    """Compute canonical atom ranks using RDKit.
-
-    Falls back to simple atom-index ordering if RDKit Mol construction fails.
-    """
+) -> Mol | None:
+    """Build a sanitised RDKit Mol from parsed SDF data, or ``None`` on failure."""
     from rdkit import Chem  # noqa: PLC0415
 
-    num_atoms = len(atoms)
     mol = Chem.RWMol()
     for elem, *_ in atoms:
-        mol.AddAtom(Chem.Atom(elem))
+        try:
+            mol.AddAtom(Chem.Atom(elem))
+        except Exception:  # noqa: BLE001
+            mol.AddAtom(Chem.Atom("C"))
 
     bond_type_map = {
         1: Chem.BondType.SINGLE,
         2: Chem.BondType.DOUBLE,
         3: Chem.BondType.TRIPLE,
+        4: Chem.BondType.AROMATIC,
     }
+    n = len(atoms)
     for a1, a2, bt in bonds:
-        if 0 <= a1 < num_atoms and 0 <= a2 < num_atoms:
-            mol.AddBond(a1, a2, bond_type_map.get(bt, Chem.BondType.SINGLE))
-
-    try:
-        final_mol = mol.GetMol()
-        final_mol.UpdatePropertyCache(strict=False)
-        return list(Chem.CanonicalRankAtoms(final_mol))
-    except Exception:  # noqa: BLE001
-        return list(range(num_atoms))
-
-
-def _canonical_dfs_order(
-    num_atoms: int,
-    adj: list[list[int]],
-    ranks: list[int],
-) -> tuple[list[int], list[int], list[tuple[int, int, int]]]:
-    """Canonical DFS traversal based on atom ranks.
-
-    Returns:
-        order: atom indices in DFS visit order.
-        tree_parent: ``tree_parent[atom_idx]`` = parent atom idx (-1 for roots).
-        ring_closures: back-edge bonds ``(a1, a2, bond_type)`` not in the
-            spanning tree.  (``bond_type`` is always stored as 0 here because
-            the original bond type is not available inside this helper;
-            callers that need it should cross-reference with the full bond
-            list.)
-    """
-    if num_atoms == 0:
-        return [], [], []
-
-    visited = [False] * num_atoms
-    order: list[int] = []
-    tree_parent = [-1] * num_atoms
-
-    def _dfs_component(start: int) -> None:
-        stack = [(start, -1)]
-        while stack:
-            node, parent = stack.pop()
-            if visited[node]:
+        if 0 <= a1 < n and 0 <= a2 < n and a1 != a2:
+            try:
+                mol.AddBond(a1, a2, bond_type_map.get(bt, Chem.BondType.SINGLE))
+            except Exception:  # noqa: BLE001, S112
                 continue
-            visited[node] = True
-            order.append(node)
-            tree_parent[node] = parent
-            stack.extend(
-                (nbr, node)
-                for nbr in sorted(adj[node], key=lambda n: ranks[n], reverse=True)
-                if not visited[nbr]
-            )
 
-    # Start from the atom with the smallest canonical rank
-    start = min(range(num_atoms), key=lambda i: ranks[i])
-    _dfs_component(start)
-
-    # Handle disconnected components
-    for atom_idx in sorted(range(num_atoms), key=lambda i: ranks[i]):
-        if not visited[atom_idx]:
-            _dfs_component(atom_idx)
-
-    return order, tree_parent, []  # ring_closures filled by caller
+    final_mol = mol.GetMol()
+    try:
+        Chem.SanitizeMol(final_mol)
+    except Exception:  # noqa: BLE001
+        # Best-effort: keep the unsanitised mol so we can still read element
+        # symbols and approximate features. ``FastFindRings`` is required
+        # so ``GetRingInfo`` works on the unsanitised mol; without it
+        # ``IsAtomInRingOfSize`` raises "RingInfo not initialized".
+        try:
+            final_mol.UpdatePropertyCache(strict=False)
+            Chem.FastFindRings(final_mol)
+        except Exception:  # noqa: BLE001
+            return None
+    return final_mol
 
 
-# ---------------------------------------------------------------------------
-# Z-matrix reference selection
-# ---------------------------------------------------------------------------
+def _atom_features_from_mol(mol: Mol, num_atoms: int) -> dict[str, np.ndarray]:
+    """Extract per-atom integer features for ``num_atoms`` heavy atoms.
 
-
-def _compute_zmat_refs(
-    order: list[int],
-    tree_parent: list[int],
-    adj: list[list[int]],
-) -> list[tuple[int, int, int]]:
-    """Determine (parent, angle_ref, dihedral_ref) for each DFS position.
-
-    All values are *original atom indices*.  ``-1`` means not available.
+    Returns arrays of shape ``(num_atoms,)`` for ``element``, ``charge``,
+    ``hybrid``, ``aromatic``, ``ring``, ``numH``. Missing/unsanitised atoms
+    fall back to ``OTHER`` / 0 values.
     """
-    placed: set[int] = set()
-    refs: list[tuple[int, int, int]] = []
+    from rdkit import Chem  # noqa: PLC0415
 
-    for pos, atom in enumerate(order):
-        if pos == 0:
-            refs.append((-1, -1, -1))
-            placed.add(atom)
-            continue
+    elements = np.full(num_atoms, LIGAND_OTHER_IDX, dtype=np.int64)
+    charges = np.full(num_atoms, LIGAND_CHARGE_TO_IDX[0], dtype=np.int64)
+    hybrid = np.full(num_atoms, LIGAND_HYBRID_OTHER_IDX, dtype=np.int64)
+    aromatic = np.zeros(num_atoms, dtype=np.int64)
+    ring = np.full(num_atoms, LIGAND_RING_NONE_IDX, dtype=np.int64)
+    num_h = np.zeros(num_atoms, dtype=np.int64)
 
-        parent = tree_parent[atom]
+    if mol is None:
+        return {
+            "element": elements,
+            "charge": charges,
+            "hybrid": hybrid,
+            "aromatic": aromatic,
+            "ring": ring,
+            "numH": num_h,
+        }
 
-        if pos == 1:
-            refs.append((parent, -1, -1))
-            placed.add(atom)
-            continue
+    ring_info = mol.GetRingInfo()
+    hybrid_map = {
+        Chem.HybridizationType.SP: 0,
+        Chem.HybridizationType.SP2: 1,
+        Chem.HybridizationType.SP3: 2,
+    }
 
-        # --- angle reference: grandparent preferred -------------------------
-        grandparent = tree_parent[parent]
-        if grandparent != -1:
-            angle_ref = grandparent
-        else:
-            angle_ref = _find_placed_neighbor(adj[parent], placed, exclude={atom})
+    for i in range(min(num_atoms, mol.GetNumAtoms())):
+        atom = mol.GetAtomWithIdx(i)
+        elem_sym = atom.GetSymbol()
+        elements[i] = LIGAND_ELEMENT_TO_IDX.get(elem_sym, LIGAND_OTHER_IDX)
 
-        if angle_ref == -1:
-            refs.append((parent, -1, -1))
-            placed.add(atom)
-            continue
-
-        # --- dihedral reference: great-grandparent or other placed atom -----
-        dihedral_ref = _find_dihedral_ref(
-            tree_parent,
-            adj,
-            angle_ref,
-            parent,
-            atom,
-            placed,
+        c = max(
+            min(atom.GetFormalCharge(), LIGAND_CHARGE_VOCAB[-1]), LIGAND_CHARGE_VOCAB[0]
         )
+        charges[i] = LIGAND_CHARGE_TO_IDX[c]
 
-        refs.append((parent, angle_ref, dihedral_ref))
-        placed.add(atom)
+        is_arom = bool(atom.GetIsAromatic())
+        aromatic[i] = 1 if is_arom else 0
+        if is_arom:
+            hybrid[i] = 3  # AROM bucket
+        else:
+            hybrid[i] = hybrid_map.get(atom.GetHybridization(), LIGAND_HYBRID_OTHER_IDX)
 
-    return refs
+        # Smallest ring containing this atom; 0 if not in any ring.
+        smallest = 0
+        for size in (3, 4, 5, 6):
+            if ring_info.IsAtomInRingOfSize(i, size):
+                smallest = size
+                break
+        else:
+            if atom.IsInRing():
+                smallest = 7  # 6+
+        if smallest == 0:
+            ring[i] = LIGAND_RING_NONE_IDX
+        elif smallest <= 5:  # noqa: PLR2004
+            ring[i] = smallest - 3  # 3->0, 4->1, 5->2
+        else:
+            ring[i] = 3  # 6+
+
+        nh = atom.GetTotalNumHs(includeNeighbors=False)
+        num_h[i] = max(0, min(nh, LIGAND_NUMH_VOCAB[-1]))
+
+    return {
+        "element": elements,
+        "charge": charges,
+        "hybrid": hybrid,
+        "aromatic": aromatic,
+        "ring": ring,
+        "numH": num_h,
+    }
 
 
-def _find_placed_neighbor(
-    neighbors: list[int],
-    placed: set[int],
-    *,
-    exclude: set[int],
-) -> int:
-    """Return the first placed neighbor not in *exclude*, or -1."""
-    for n in neighbors:
-        if n not in exclude and n in placed:
-            return n
-    return -1
+# ---------------------------------------------------------------------------
+# K-NN encoder hint features
+# ---------------------------------------------------------------------------
 
 
-def _find_dihedral_ref(  # noqa: PLR0913
-    tree_parent: list[int],
-    adj: list[list[int]],
-    angle_ref: int,
-    parent: int,
-    atom: int,
-    placed: set[int],
-) -> int:
-    """Find a suitable dihedral reference atom.
+def _knn_offsets_and_elements(
+    canonical_coords: np.ndarray,  # (N, 3) heavy-atom coords in canonical frame
+    elements: np.ndarray,  # (N,) element indices
+    k: int = K_NEIGHBORS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """For each atom, return spherical offsets + element idx of K nearest atoms.
 
-    The returned atom must differ from *parent*, *angle_ref*, and *atom*
-    to avoid a degenerate four-point dihedral.
+    Distances are computed in the canonical frame; offsets are spherical
+    ``(Δr, θ, sin φ, cos φ)`` of the displacement vector ``neighbour - self``.
+    Self is excluded. When fewer than ``k`` other atoms exist, the trailing
+    slots are zero-padded (offsets) and filled with ``OTHER`` (elements).
     """
-    excluded = {parent, angle_ref, atom}
-    ggp = tree_parent[angle_ref]
-    if ggp != -1 and ggp not in excluded:
-        return ggp
-    ref = _find_placed_neighbor(adj[angle_ref], placed, exclude=excluded)
-    if ref != -1:
-        return ref
-    return _find_placed_neighbor(adj[parent], placed, exclude=excluded)
+    n = canonical_coords.shape[0]
+    offsets = np.zeros((n, k * 4), dtype=np.float32)
+    nbr_elements = np.full((n, k), LIGAND_OTHER_IDX, dtype=np.int64)
 
+    if n <= 1:
+        return offsets, nbr_elements
 
-# ---------------------------------------------------------------------------
-# Ring-closure identification
-# ---------------------------------------------------------------------------
+    # Pairwise distances (small N, brute force is faster than building a tree).
+    diff = canonical_coords[:, None, :] - canonical_coords[None, :, :]  # (N, N, 3)
+    dist = np.linalg.norm(diff, axis=-1)
+    np.fill_diagonal(dist, np.inf)
 
+    take = min(k, n - 1)
+    nbr_idx = np.argpartition(dist, take - 1, axis=1)[:, :take]
+    # Order each row's neighbours by ascending distance (argpartition is unsorted).
+    for i in range(n):
+        order = np.argsort(dist[i, nbr_idx[i]])
+        nbr_idx[i] = nbr_idx[i, order]
 
-def _find_ring_closures(
-    num_atoms: int,
-    tree_parent: list[int],
-    bonds: list[tuple[int, int, int]],
-) -> list[tuple[int, int, int]]:
-    """Return bonds that are *not* part of the DFS spanning tree."""
-    tree_edges: set[tuple[int, int]] = set()
-    for atom_idx in range(num_atoms):
-        p = tree_parent[atom_idx]
-        if p != -1:
-            tree_edges.add((min(atom_idx, p), max(atom_idx, p)))
-
-    closures = []
-    for a1, a2, bt in bonds:
-        edge = (min(a1, a2), max(a1, a2))
-        if edge not in tree_edges:
-            closures.append((a1, a2, bt))
-    return closures
+    for i in range(n):
+        for slot, j in enumerate(nbr_idx[i]):
+            delta = canonical_coords[j] - canonical_coords[i]
+            r, theta, sphi, cphi = cartesian_to_spherical(delta)
+            offsets[i, slot * 4 : slot * 4 + 4] = (r, theta, sphi, cphi)
+            nbr_elements[i, slot] = elements[j]
+    return offsets, nbr_elements
 
 
 # ---------------------------------------------------------------------------
@@ -356,149 +308,103 @@ def _find_ring_closures(
 
 
 class LigandDescriptor:
-    """Z-matrix per-atom descriptor with analytical inverse.
+    """Spherical multi-feature per-atom descriptor with one-shot reconstruction."""
 
-    Each atom receives a **4-D** descriptor.  The meaning of the four
-    components depends on whether the descriptor is *pocket-anchored*:
+    DESCRIPTOR_DIM = LIGAND_DESCRIPTOR_DIM
 
-    **Without pocket frame** (standalone mode):
-
-    *   ``(bond_length, bond_angle, sin_dihedral, cos_dihedral)``
-    *   Root / early atoms get padding values.
-
-    **With pocket frame** (anchored mode):
-
-    *   *pos 0* (root): ``(r, θ_polar, sin φ, cos φ)`` — spherical
-        coordinates of the root atom relative to the pocket centroid.
-    *   *pos 1*: ``(d, θ_dir, sin φ_dir, cos φ_dir)`` — bond length +
-        direction from root in the canonical frame.
-    *   *pos 2* (no dihedral ref): ``(d, θ_bond, sin τ, cos τ)`` —
-        torsion measured against the canonical frame z-axis.
-    *   *pos 3+*: standard Z-matrix (unchanged).
-
-    This anchors the ligand's 6-DOF pose in the pocket's canonical
-    coordinate system while keeping the rest of the molecule in
-    frame-invariant internal coordinates.
-    """
-
-    DESCRIPTOR_DIM = 4
-
-    def compute(  # noqa: PLR0912, PLR0915
+    def compute(
         self,
         atoms: list[tuple[str, float, float, float]],
         bonds: list[tuple[int, int, int]],
         pocket_frame: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> tuple[np.ndarray, list[str], dict[str, Any]]:
-        """Compute Z-matrix descriptors for every atom.
+        """Compute descriptors for all heavy atoms.
 
         Args:
-            atoms: List of (element, x, y, z) tuples.
-            bonds: List of (atom1_idx, atom2_idx, bond_type) tuples.
-            pocket_frame: Optional ``(centroid, rotation)`` from
-                :class:`CanonicalPocketDescriptor`.  When provided the
-                first atoms encode the ligand's pose in the pocket's
-                canonical frame.
+            atoms: ``(element, x, y, z)`` per atom (heavy + hydrogens).
+            bonds: ``(atom1_idx, atom2_idx, bond_type)`` 0-indexed.
+            pocket_frame: ``(centroid, rotation)`` from
+                :func:`_compute_canonical_frame`. Required — the descriptor
+                is only meaningful in a fixed canonical frame because it
+                stores absolute spherical coords from the pocket centroid.
 
         Returns:
-            descriptors: ``(N, 4)`` float32 array in canonical DFS order.
-            elements: element symbols in canonical DFS order.
-            metadata: dict needed for coordinate reconstruction.
+            descriptors: ``(N_heavy, 30)`` float32 array.
+            elements: heavy-atom element symbols in original atom order.
+            metadata: ``{'centroid', 'rotation', 'heavy_to_orig'}`` for
+                inverse transform. ``heavy_to_orig[i]`` is the index of the
+                i-th heavy atom in the original atom list.
         """
-        num_atoms = len(atoms)
-        empty_meta: dict[str, Any] = {
-            "order": [],
-            "refs": [],
-            "ring_closures": [],
-            "anchored": False,
-        }
-        if num_atoms == 0:
-            return np.zeros((0, 4), dtype=np.float32), [], empty_meta
+        if pocket_frame is None:
+            msg = "LigandDescriptor.compute requires a pocket_frame"
+            raise ValueError(msg)
 
-        coords = np.array([(a[1], a[2], a[3]) for a in atoms], dtype=np.float64)
-        all_elements = [a[0] for a in atoms]
-        adj = _build_adjacency(num_atoms, bonds)
-
-        ranks = _canonical_atom_ranks(atoms, bonds)
-        order, tree_parent, _ = _canonical_dfs_order(num_atoms, adj, ranks)
-        refs = _compute_zmat_refs(order, tree_parent, adj)
-        ring_closures = _find_ring_closures(num_atoms, tree_parent, bonds)
-
-        anchored = pocket_frame is not None
-        if anchored:
-            centroid, rotation = pocket_frame
-            wc = (coords - centroid) @ rotation.T  # canonical frame
-        else:
-            wc = coords
-
-        descriptors = np.zeros((num_atoms, 4), dtype=np.float64)
-
-        for pos, atom in enumerate(order):
-            parent_idx, angle_ref_idx, dihedral_ref_idx = refs[pos]
-
-            # --- root atom (or start of disconnected component) -------------
-            if parent_idx == -1:
-                if anchored:
-                    descriptors[pos] = _cartesian_to_spherical(wc[atom])
-                else:
-                    descriptors[pos, 3] = 1.0
-                continue
-
-            d = float(np.linalg.norm(wc[atom] - wc[parent_idx]))
-            descriptors[pos, 0] = d
-
-            # --- second atom in component (no angle ref) --------------------
-            if angle_ref_idx == -1:
-                if anchored and d >= _EPS:
-                    delta_hat = (wc[atom] - wc[parent_idx]) / d
-                    _, th, sp, cp = _cartesian_to_spherical(delta_hat)
-                    descriptors[pos, 1] = th
-                    descriptors[pos, 2] = sp
-                    descriptors[pos, 3] = cp
-                else:
-                    descriptors[pos, 3] = 1.0
-                continue
-
-            theta = _bond_angle(wc[angle_ref_idx], wc[parent_idx], wc[atom])
-            descriptors[pos, 1] = theta
-
-            # --- no dihedral ref: virtual reference -------------------------
-            if dihedral_ref_idx == -1:
-                if anchored:
-                    virtual = _canonical_virtual_ref(
-                        wc[angle_ref_idx],
-                        wc[parent_idx],
-                    )
-                    tau = _dihedral_angle(
-                        virtual,
-                        wc[angle_ref_idx],
-                        wc[parent_idx],
-                        wc[atom],
-                    )
-                    descriptors[pos, 2] = np.sin(tau)
-                    descriptors[pos, 3] = np.cos(tau)
-                else:
-                    descriptors[pos, 3] = 1.0
-                continue
-
-            # --- standard Z-matrix dihedral ---------------------------------
-            tau = _dihedral_angle(
-                wc[dihedral_ref_idx],
-                wc[angle_ref_idx],
-                wc[parent_idx],
-                wc[atom],
+        # Drop hydrogens up-front; bond_type still references original indices
+        # but RDKit Mol is built on the heavy-only atom list (mapping below).
+        heavy_indices = [i for i, (e, *_) in enumerate(atoms) if e != "H"]
+        if not heavy_indices:
+            empty_meta: dict[str, Any] = {
+                "centroid": pocket_frame[0],
+                "rotation": pocket_frame[1],
+                "heavy_to_orig": [],
+            }
+            return (
+                np.zeros((0, LIGAND_DESCRIPTOR_DIM), dtype=np.float32),
+                [],
+                empty_meta,
             )
-            descriptors[pos, 2] = np.sin(tau)
-            descriptors[pos, 3] = np.cos(tau)
 
-        elements = [all_elements[i] for i in order]
+        orig_to_heavy = {orig: h for h, orig in enumerate(heavy_indices)}
+        heavy_atoms = [atoms[i] for i in heavy_indices]
+        heavy_bonds = [
+            (orig_to_heavy[a], orig_to_heavy[b], bt)
+            for a, b, bt in bonds
+            if a in orig_to_heavy and b in orig_to_heavy
+        ]
+
+        n = len(heavy_atoms)
+        coords_global = np.array(
+            [(a[1], a[2], a[3]) for a in heavy_atoms],
+            dtype=np.float64,
+        )
+        elements_sym = [a[0] for a in heavy_atoms]
+
+        # Canonical-frame coords (always required).
+        centroid, rotation = pocket_frame
+        canonical = (coords_global - centroid) @ rotation.T  # (N, 3)
+
+        # Spherical (r, theta, sin phi, cos phi) per atom, from centroid (= origin).
+        coord = np.zeros((n, 4), dtype=np.float32)
+        for i in range(n):
+            r, theta, sphi, cphi = cartesian_to_spherical(canonical[i])
+            coord[i] = (r, theta, sphi, cphi)
+
+        # RDKit-derived categorical features.
+        mol = _build_rdkit_mol(heavy_atoms, heavy_bonds)
+        feats = _atom_features_from_mol(mol, n)
+        elements = feats["element"]
+
+        # K-NN encoder hint features, computed in canonical Cartesian space.
+        knn_offsets, knn_elements = _knn_offsets_and_elements(canonical, elements)
+
+        descriptor = np.zeros((n, LIGAND_DESCRIPTOR_DIM), dtype=np.float32)
+        f = fields_by_name(LIGAND_LAYOUT)
+        descriptor[:, f["coord"].start : f["coord"].end] = coord
+        descriptor[:, f["element"].start] = elements
+        descriptor[:, f["charge"].start] = feats["charge"]
+        descriptor[:, f["hybrid"].start] = feats["hybrid"]
+        descriptor[:, f["aromatic"].start] = feats["aromatic"]
+        descriptor[:, f["ring"].start] = feats["ring"]
+        descriptor[:, f["numH"].start] = feats["numH"]
+        descriptor[:, f["knn_offsets"].start : f["knn_offsets"].end] = knn_offsets
+        descriptor[:, f["knn_elements"].start : f["knn_elements"].end] = knn_elements
 
         metadata: dict[str, Any] = {
-            "order": order,
-            "refs": refs,
-            "ring_closures": ring_closures,
-            "anchored": anchored,
+            "centroid": centroid,
+            "rotation": rotation,
+            "heavy_to_orig": heavy_indices,
         }
-        return descriptors.astype(np.float32), elements, metadata
+        return descriptor, elements_sym, metadata
 
     # ---- inverse transform ------------------------------------------------
 
@@ -508,107 +414,40 @@ class LigandDescriptor:
         metadata: dict[str, Any],
         pocket_frame: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> np.ndarray:
-        """Reconstruct Cartesian coordinates from Z-matrix descriptors.
+        """Reconstruct global Cartesian coordinates from descriptors.
 
-        When ``metadata['anchored']`` is True the reconstruction places
-        atoms in the pocket's canonical frame.  If *pocket_frame* is also
-        supplied the result is transformed back to the global frame.
+        ``pocket_frame`` overrides ``metadata`` if both are given (handy for
+        cross-frame visualisation). When neither is supplied, raises.
 
         Returns:
-            coords: ``(N, 3)`` array in **original** atom order.
+            coords: ``(N_heavy, 3)`` float64 in the **global** frame.
         """
-        order: list[int] = metadata["order"]
-        refs: list[tuple[int, int, int]] = metadata["refs"]
-        anchored: bool = metadata.get("anchored", False)
-        n_atoms = len(order)
+        frame = pocket_frame or (metadata["centroid"], metadata["rotation"])
+        centroid, rotation = frame
 
-        if n_atoms == 0:
+        n = descriptors.shape[0]
+        if n == 0:
             return np.zeros((0, 3), dtype=np.float64)
 
-        coords = np.zeros((n_atoms, 3), dtype=np.float64)
+        f = fields_by_name(LIGAND_LAYOUT)
+        coord = descriptors[:, f["coord"].start : f["coord"].end].astype(np.float64)
 
-        for pos in range(n_atoms):
-            atom_idx = order[pos]
-            parent_idx, angle_ref_idx, dihedral_ref_idx = refs[pos]
-
-            d = float(descriptors[pos, 0])
-            theta = float(descriptors[pos, 1])
-            sin_tau = float(descriptors[pos, 2])
-            cos_tau = float(descriptors[pos, 3])
-
-            # --- root atom --------------------------------------------------
-            if parent_idx == -1:
-                if anchored:
-                    coords[atom_idx] = _spherical_to_cartesian(
-                        d,
-                        theta,
-                        sin_tau,
-                        cos_tau,
-                    )
-                else:
-                    coords[atom_idx] = [0.0, 0.0, 0.0]
-
-            # --- second atom (no angle ref) ---------------------------------
-            elif angle_ref_idx == -1:
-                if anchored:
-                    direction = _spherical_to_cartesian(
-                        1.0,
-                        theta,
-                        sin_tau,
-                        cos_tau,
-                    )
-                    coords[atom_idx] = coords[parent_idx] + d * direction
-                else:
-                    coords[atom_idx] = coords[parent_idx] + np.array(
-                        [d, 0.0, 0.0],
-                    )
-
-            # --- no dihedral ref: virtual reference -------------------------
-            elif dihedral_ref_idx == -1:
-                virtual = (
-                    _canonical_virtual_ref(
-                        coords[angle_ref_idx],
-                        coords[parent_idx],
-                    )
-                    if anchored
-                    else _virtual_dihedral_ref(
-                        coords[angle_ref_idx],
-                        coords[parent_idx],
-                    )
-                )
-                tau = float(np.arctan2(sin_tau, cos_tau))
-                coords[atom_idx] = _place_atom(
-                    virtual,
-                    coords[angle_ref_idx],
-                    coords[parent_idx],
-                    d,
-                    theta,
-                    tau,
-                )
-
-            # --- standard Z-matrix ------------------------------------------
-            else:
-                tau = float(np.arctan2(sin_tau, cos_tau))
-                coords[atom_idx] = _place_atom(
-                    coords[dihedral_ref_idx],
-                    coords[angle_ref_idx],
-                    coords[parent_idx],
-                    d,
-                    theta,
-                    tau,
-                )
-
-        # Transform from canonical frame to global if requested
-        if pocket_frame is not None:
-            centroid, rotation = pocket_frame
-            for i in range(n_atoms):
-                coords[i] = coords[i] @ rotation + centroid
-
-        return coords
+        canonical = np.zeros((n, 3), dtype=np.float64)
+        for i in range(n):
+            r, theta, sphi, cphi = coord[i]
+            canonical[i] = spherical_to_cartesian(
+                float(r), float(theta), float(sphi), float(cphi)
+            )
+        return canonical @ rotation + centroid
 
 
 class LigandTokenizer:
-    """High-level ligand tokenizer combining descriptors and VQ-VAE."""
+    """High-level ligand tokenizer that emits raw VQ-VAE codebook indices.
+
+    Unlike the previous element-prefixed format (``"C_20"``), the codebook
+    index alone now carries the element + atom features (recoverable from
+    the VQ-VAE decoder), so each atom maps to a single integer token.
+    """
 
     def __init__(self, vqvae: LigandVQVAE) -> None:
         self.vqvae = vqvae
@@ -619,18 +458,8 @@ class LigandTokenizer:
         atoms: list[tuple[str, float, float, float]],
         bonds: list[tuple[int, int, int]],
         pocket_frame: tuple[np.ndarray, np.ndarray] | None = None,
-    ) -> list[str]:
-        """Tokenize a molecule into element_code tokens.
-
-        Args:
-            atoms: List of (element, x, y, z) tuples.
-            bonds: List of (atom1_idx, atom2_idx, bond_type) tuples.
-            pocket_frame: Optional ``(centroid, rotation)`` for anchoring.
-
-        Returns:
-            List of tokens like ["C_20", "O_23", "N_6"].
-        """
-        descriptors, elements, _metadata = self.descriptor.compute(
+    ) -> list[int]:
+        descriptors, _elements, _metadata = self.descriptor.compute(
             atoms,
             bonds,
             pocket_frame=pocket_frame,
@@ -638,14 +467,9 @@ class LigandTokenizer:
         if len(descriptors) == 0:
             return []
 
-        desc_tensor = torch.from_numpy(descriptors)
-        device = next(self.vqvae.parameters()).device
-        desc_tensor = desc_tensor.to(device)
-
+        desc_tensor = torch.from_numpy(descriptors).to(
+            next(self.vqvae.parameters()).device,
+        )
         with torch.no_grad():
             indices = self.vqvae.encode(desc_tensor)
-
-        indices_list = indices.cpu().tolist()
-        return [
-            f"{elem}_{code}" for elem, code in zip(elements, indices_list, strict=True)
-        ]
+        return indices.cpu().tolist()

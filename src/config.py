@@ -1,6 +1,11 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src.tokenizers.descriptor_schema import (
+    LIGAND_DESCRIPTOR_DIM,
+    PROTEIN_DESCRIPTOR_DIM,
+)
+
 
 @dataclass
 class HubDatasetConfig:
@@ -24,15 +29,8 @@ class CrossDockedConfig:
     types_tarball: str = "CrossDocked2020_v1.3_types.tgz"
     batch_size: int = 32
     num_workers: int = 4
-    # Ignored when ``hub_config`` is set: the test set is the manifest
-    # ``{source_type}_fold{fold}`` == "test" entries.  Used only by the legacy
-    # types-file path which still does a fully-random split.
     test_size: float = 0.1
-    # Fraction of the (train + val) pool sampled for validation.  On the hub
-    # path the pool is the manifest fold's "train" entries; on the legacy
-    # types-file path it is the whole dataset.
     val_size: float = 0.1
-    # Seed for the train/val carve-out RNG (and the legacy random split).
     random_state: int = 42
     max_pairs: int | None = None
 
@@ -45,54 +43,78 @@ class PocketExtractionConfig:
     max_residues: int = 128
 
 
+# ---------------------------------------------------------------------------
+# Multi-head VQ-VAE recon weights
+# ---------------------------------------------------------------------------
+#
+# Continuous coord MSE is in Å² and dominates early training; categorical CEs
+# are unitless and ~log(vocab) at init. The defaults below were chosen so all
+# heads contribute on a similar order of magnitude after a few epochs (CE for
+# 12-class element ≈ log(12) ≈ 2.5, MSE ≈ a few Å² → roughly comparable).
+# Tune via the training-script CLI flag.
+
+
+def _default_ligand_recon_weights() -> dict[str, float]:
+    return {
+        "coord": 1.0,
+        "element": 0.5,
+        "charge": 0.1,
+        "hybrid": 0.1,
+        "aromatic": 0.1,
+        "ring": 0.1,
+        "numH": 0.1,
+    }
+
+
+def _default_protein_recon_weights() -> dict[str, float]:
+    return {
+        "coord": 1.0,
+        "aa": 0.5,
+    }
+
+
 @dataclass
 class ProteinVQVAEConfig:
     """Config for protein backbone structure VQ-VAE."""
 
-    descriptor_dim: int = 12  # 3 backbone atoms (N, CA, C) x 4D Z-matrix each
+    descriptor_dim: int = PROTEIN_DESCRIPTOR_DIM
     hidden_dim: int = 256
     latent_dim: int = 16
-    codebook_size: int = 2048
+    codebook_size: int = 4096
     commitment_cost: float = 0.25
     ema_decay: float = 0.99
-    # Transformer context parameters
     num_transformer_layers: int = 4
     num_attention_heads: int = 8
     transformer_feedforward_dim: int = 512
     transformer_dropout: float = 0.1
     max_seq_len: int = 256
-    # 3D coord-reconstruction loss
-    coord_loss_enabled: bool = True
-    coord_loss_kind: str = "protein_backbone"
-    coord_loss_bond_length_min: float = 0.5
-    # Unit-circle penalty on (sin tau, cos tau) slots of the denormalized
-    # descriptor: lambda * sum((s^2 + c^2 - 1)^2). Keeps decoder outputs on
-    # the unit circle -- otherwise the NeRF step sees drifting phases and
-    # angle error accumulates through the backbone. Set 0 to disable.
-    circle_loss_weight: float = 0.0
+    domain: str = "protein"
+    categorical_embed_dim: int = 8
+    recon_weights: dict[str, float] = field(
+        default_factory=_default_protein_recon_weights,
+    )
 
 
 @dataclass
 class LigandVQVAEConfig:
-    """Config for ligand structure VQ-VAE (Z-matrix descriptors)."""
+    """Config for ligand structure VQ-VAE (spherical + features)."""
 
-    descriptor_dim: int = 4  # bond_length, bond_angle, sin_dihedral, cos_dihedral
+    descriptor_dim: int = LIGAND_DESCRIPTOR_DIM
     hidden_dim: int = 256
     latent_dim: int = 8
-    codebook_size: int = 1024
+    codebook_size: int = 2048
     commitment_cost: float = 0.25
     ema_decay: float = 0.99
-    # Transformer context parameters
     num_transformer_layers: int = 4
     num_attention_heads: int = 8
     transformer_feedforward_dim: int = 512
     transformer_dropout: float = 0.1
     max_seq_len: int = 256
-    # 3D coord-reconstruction loss
-    coord_loss_enabled: bool = True
-    coord_loss_kind: str = "ligand"
-    coord_loss_bond_length_min: float = 0.5
-    circle_loss_weight: float = 0.0
+    domain: str = "ligand"
+    categorical_embed_dim: int = 8
+    recon_weights: dict[str, float] = field(
+        default_factory=_default_ligand_recon_weights,
+    )
 
 
 @dataclass
@@ -104,18 +126,6 @@ class VQVAETrainingConfig:
     max_epochs: int = 100
     num_workers: int = 16
     precision: str = "bf16-mixed"
-    # Linear ramp of ``coord_loss`` from 0 → 1 over the first N epochs.  With
-    # ``TaskWeighting`` the combined objective is unstable when ``coord`` is
-    # orders of magnitude larger than ``recon`` at init, so we hold it at 0
-    # until ``recon`` has had a chance to decrease.  During the ramp phase
-    # (and when 0) we bypass ``TaskWeighting`` so ``log_var_coord`` does not
-    # drift to -∞.  0 disables the warmup (ramp = 1 from epoch 0).
-    coord_loss_warmup_epochs: int = 0
-    # When True, force (sin, cos) slots to mean=0, std=1 in the descriptor
-    # normalization stats so the unit-circle constraint ``s² + c² = 1`` is
-    # preserved in the network's input/output space.  Requires the cached
-    # ``normalization_stats.pt`` to be deleted so it is recomputed.
-    skip_sincos_normalization: bool = False
     protein: ProteinVQVAEConfig = field(default_factory=ProteinVQVAEConfig)
     ligand: LigandVQVAEConfig = field(default_factory=LigandVQVAEConfig)
     pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)

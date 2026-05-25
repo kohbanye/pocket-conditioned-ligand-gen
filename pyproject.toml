@@ -41,6 +41,7 @@ ignore = ["D", "N812", "COM812"]
 "tests/*.py" = ["S101", "PLR2004"]
 "notebooks/*.ipynb" = ["T201", "E402", "ANN", "E501", "PLR2004", "INP001", "S101"]
 "notebooks/*.py" = [
+    "ANN001",     # marimo cell args are reactive-deps with complex types
     "ANN2",       # marimo cell return types are complex tuples of exported variables
     "E402",       # import inside cell function — same as PLC0415, marimo structure
     "E501",       # line too long — Japanese markdown, long checkpoint paths

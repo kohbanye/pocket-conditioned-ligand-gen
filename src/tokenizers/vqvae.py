@@ -1,8 +1,16 @@
-"""Generic Transformer-based VQ-VAE for structure tokenization.
+"""Transformer VQ-VAE with mixed continuous + categorical descriptors.
 
-Used by both protein and ligand tokenizers.  Processes a variable-length
-sequence of per-element descriptors through a Transformer encoder, quantizes
-per position via an EMA codebook, and decodes with a Transformer decoder.
+The encoder consumes a single (B, L, D) descriptor tensor in which:
+- continuous slots hold normalized real values (spherical coords + KNN
+  offsets);
+- categorical slots hold integer indices stored as float (cast back to long
+  before embedding lookup).
+
+A single codebook quantises the encoder's latent. The decoder is multi-head
+and reconstructs both the continuous coords (regression) and the categorical
+features (classification logits). This lets one VQ token per atom carry
+position + element + atom features; the AR transformer downstream consumes
+codebook indices directly without needing element-prefixed tokens.
 """
 
 from __future__ import annotations
@@ -14,9 +22,15 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 from src.tokenizers.codebook import EMACodebook
+from src.tokenizers.descriptor_schema import (
+    LIGAND_LAYOUT,
+    LIGAND_RECON_HEADS,
+    PROTEIN_LAYOUT,
+    PROTEIN_RECON_HEADS,
+    FieldSpec,
+    fields_by_name,
+)
 from src.tokenizers.geometry import (
-    canonical_virtual_ref_batched,
-    place_atom_batched,
     project_unit_circle,
     sinusoidal_positional_encoding,
     spherical_to_cartesian_batched,
@@ -27,7 +41,7 @@ from src.tokenizers.geometry import (
 class TransformerVQVAEConfig:
     """Base config for Transformer VQ-VAE (used by both protein and ligand)."""
 
-    descriptor_dim: int = 4
+    descriptor_dim: int = 30  # overridden by domain configs
     hidden_dim: int = 256
     latent_dim: int = 8
     codebook_size: int = 1024
@@ -38,32 +52,54 @@ class TransformerVQVAEConfig:
     transformer_feedforward_dim: int = 512
     transformer_dropout: float = 0.1
     max_seq_len: int = 256
-    # 3D coord-reconstruction loss settings.  When disabled (default) the
-    # forward pass returns coord_loss = 0 and behavior matches legacy.
-    coord_loss_enabled: bool = False
-    coord_loss_kind: str = "ligand"  # "ligand" | "protein_backbone"
-    coord_loss_bond_length_min: float = 0.5
+    # "ligand" or "protein" — picks the descriptor layout / recon heads.
+    domain: str = "ligand"
+    # Per-categorical embedding dim. Categorical slots map to learned vectors
+    # of this size before being concatenated with continuous slots.
+    categorical_embed_dim: int = 8
 
 
 class TransformerVQVAE(nn.Module):
-    """Transformer-based VQ-VAE for structure tokenization.
-
-    Processes the full sequence, giving each element access to the context
-    via self-attention before quantization.  Quantization is per-position
-    (each position maps to one codebook entry).
-    """
+    """Transformer VQ-VAE with mixed-feature input + multi-head reconstruction."""
 
     def __init__(self, config: TransformerVQVAEConfig) -> None:
         super().__init__()
         self.config = config
-        h = config.hidden_dim
-        d = config.descriptor_dim
-        z = config.latent_dim
+        if config.domain not in ("ligand", "protein"):
+            msg = f"Unknown domain: {config.domain!r}"
+            raise ValueError(msg)
 
-        # Encoder
-        self.input_norm = nn.LayerNorm(d)
+        self.layout: list[FieldSpec] = (
+            LIGAND_LAYOUT if config.domain == "ligand" else PROTEIN_LAYOUT
+        )
+        self.recon_heads: list[tuple[str, str, int]] = (
+            LIGAND_RECON_HEADS if config.domain == "ligand" else PROTEIN_RECON_HEADS
+        )
+
+        # ---- Embeddings for categorical input slots --------------------
+        d_cat = config.categorical_embed_dim
+        self.cat_embeddings = nn.ModuleDict()
+        cat_input_dim = 0
+        cont_input_dim = 0
+        for spec in self.layout:
+            if spec.kind == "categorical":
+                # Each scalar position uses the same embedding table; KNN
+                # element / aa slots reuse the singleton's table so that "C"
+                # has one vector everywhere it appears.
+                key = self._embedding_key(spec.name)
+                if key not in self.cat_embeddings:
+                    self.cat_embeddings[key] = nn.Embedding(spec.vocab_size, d_cat)
+                cat_input_dim += spec.length * d_cat
+            else:
+                cont_input_dim += spec.length
+
+        encoder_input_dim = cont_input_dim + cat_input_dim
+        h = config.hidden_dim
+
+        # ---- Encoder ---------------------------------------------------
+        self.input_norm = nn.LayerNorm(encoder_input_dim)
         self.input_proj = nn.Sequential(
-            nn.Linear(d, h),
+            nn.Linear(encoder_input_dim, h),
             nn.GELU(),
             nn.Linear(h, h),
         )
@@ -80,11 +116,11 @@ class TransformerVQVAE(nn.Module):
             encoder_layer,
             num_layers=config.num_transformer_layers,
         )
-        self.latent_proj = nn.Linear(h, z)
-        self.latent_norm = nn.LayerNorm(z)
+        self.latent_proj = nn.Linear(h, config.latent_dim)
+        self.latent_norm = nn.LayerNorm(config.latent_dim)
 
-        # Decoder
-        self.latent_unproj = nn.Linear(z, h)
+        # ---- Decoder ---------------------------------------------------
+        self.latent_unproj = nn.Linear(config.latent_dim, h)
         decoder_layer = nn.TransformerEncoderLayer(
             d_model=h,
             nhead=config.num_attention_heads,
@@ -98,24 +134,29 @@ class TransformerVQVAE(nn.Module):
             decoder_layer,
             num_layers=config.num_transformer_layers + 2,
         )
-        self.output_proj = nn.Sequential(
+        self.decoder_trunk = nn.Sequential(
             nn.Linear(h, h),
             nn.GELU(),
-            nn.Linear(h, d),
         )
+        self.recon_head_modules = nn.ModuleDict()
+        for name, kind, dim in self.recon_heads:
+            out_dim = dim  # continuous: dim; categorical: vocab size
+            self.recon_head_modules[name] = nn.Linear(h, out_dim)
+            _ = kind  # explicitly note that kind is consumed at loss time
 
-        # Positional encoding (buffer, not a parameter)
+        # ---- Positional encoding --------------------------------------
         self.register_buffer(
             "pos_encoding",
             sinusoidal_positional_encoding(config.max_seq_len, h),
         )
 
-        # Descriptor normalization stats (injected via set_normalization).
-        # Stored as buffers so they move with .to(device) and survive checkpoints.
-        self.register_buffer("_desc_mean", torch.zeros(d))
-        self.register_buffer("_desc_std", torch.ones(d))
+        # ---- Continuous-slot normalization stats (set externally) -----
+        # Only continuous slots carry meaningful stats; categorical slots
+        # are normalized with mean=0, std=1 so they pass through unchanged.
+        self.register_buffer("_desc_mean", torch.zeros(config.descriptor_dim))
+        self.register_buffer("_desc_std", torch.ones(config.descriptor_dim))
 
-        # Codebook
+        # ---- Codebook --------------------------------------------------
         self.codebook = EMACodebook(
             num_codes=config.codebook_size,
             code_dim=config.latent_dim,
@@ -123,11 +164,25 @@ class TransformerVQVAE(nn.Module):
             commitment_cost=config.commitment_cost,
         )
 
-    def set_normalization(self, mean: Tensor, std: Tensor) -> None:
-        """Inject descriptor normalization stats used to denormalize in 3D loss.
+    # ------------------------------------------------------------------
+    # Helper: shared embedding tables for "element"/"aa" across slots
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _embedding_key(field_name: str) -> str:
+        # KNN slots share their singleton's embedding so the same atom type
+        # has one canonical vector regardless of where it appears.
+        if field_name == "knn_elements":
+            return "element"
+        if field_name == "knn_aa":
+            return "aa"
+        return field_name
 
-        Required before the first forward when ``coord_loss_enabled`` is True.
-        """
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def set_normalization(self, mean: Tensor, std: Tensor) -> None:
+        """Inject continuous-slot normalization stats from the DataModule."""
         target_dtype = self._desc_mean.dtype
         target_device = self._desc_mean.device
         self._desc_mean = mean.to(dtype=target_dtype, device=target_device)
@@ -137,46 +192,34 @@ class TransformerVQVAE(nn.Module):
         self,
         x: Tensor,
         mask: Tensor | None = None,
-        aux: Tensor | None = None,
     ) -> dict[str, Tensor]:
-        """Forward pass with sequence context.
+        """Forward pass.
 
         Args:
-            x: Descriptors of shape ``(B, L, descriptor_dim)``.
-            mask: Boolean mask ``(B, L)``, ``True`` for real elements.
-            aux: Auxiliary per-element metadata used by the 3D coord loss.
-                For ``coord_loss_kind='ligand'``, a ``(B, L, 3)`` int tensor of
-                ``(parent, angle_ref, dihedral_ref)`` Z-matrix indices (``-1``
-                marks special cases). For ``coord_loss_kind='protein_backbone'``,
-                a ``(B, L)`` bool tensor marking segment-start residues.
-                Ignored when ``coord_loss_enabled`` is False.
+            x: ``(B, L, descriptor_dim)`` raw (already-normalized) descriptors.
+            mask: ``(B, L)`` bool, ``True`` for real elements.
 
         Returns:
-            Dict with keys: reconstructed, indices, commitment_loss,
-            reconstruction_loss, coord_loss, diagnostics.
+            dict with keys: indices, commitment_loss, reconstruction_loss,
+            recon_outputs (per-head dict), diagnostics.
         """
         b, seq_len, _ = x.shape
-
         if mask is None:
             mask = torch.ones(b, seq_len, dtype=torch.bool, device=x.device)
 
-        # Encode
-        h = self.input_proj(self.input_norm(x)) + self.pos_encoding[:seq_len]
+        # 1. Encoder input embedding (continuous concat with categorical embeds).
+        h_in = self._embed_descriptor(x)
+        h = self.input_proj(self.input_norm(h_in)) + self.pos_encoding[:seq_len]
         h = self.transformer_encoder(h, src_key_padding_mask=~mask)
         z = self.latent_norm(self.latent_proj(h))  # (B, L, latent_dim)
 
-        # Quantize per-position (only real elements)
-        # Cast to float32 for codebook (EMA updates need full precision)
-        z_real = z[mask].float()  # (N_real, latent_dim)
+        # 2. Quantize per-position over real elements only.
+        z_real = z[mask].float()
         quantized_real, indices_real, commitment_loss, codebook_diag = self.codebook(
             z_real,
         )
-
-        # Encoder output diversity: std across tokens, averaged over latent dims.
-        # Collapses toward 0 when encoder maps all inputs to the same point.
         z_diversity = z_real.detach().std(dim=0).mean()
 
-        # Scatter quantized vectors back to (B, L, latent_dim)
         quantized = torch.zeros_like(z)
         quantized[mask] = quantized_real.to(z.dtype)
 
@@ -188,364 +231,176 @@ class TransformerVQVAE(nn.Module):
         )
         indices[mask] = indices_real
 
-        # Decode
+        # 3. Decoder.
         dec_in = self.latent_unproj(quantized) + self.pos_encoding[:seq_len]
         dec_out = self.transformer_decoder(dec_in, src_key_padding_mask=~mask)
-        x_hat = self.output_proj(dec_out)  # (B, L, descriptor_dim)
+        trunk = self.decoder_trunk(dec_out)
 
-        # Masked reconstruction loss
-        diff_sq = (x - x_hat)[mask].pow(2)  # (N_real, descriptor_dim)
-        reconstruction_loss = diff_sq.mean()
-        # Per-token mean squared error; max spots pathological single samples
-        # even when the batch mean looks fine.
-        recon_max = diff_sq.detach().mean(dim=-1).max()
+        recon_outputs: dict[str, Tensor] = {}
+        for name, _kind, _dim in self.recon_heads:
+            recon_outputs[name] = self.recon_head_modules[name](trunk)
 
-        # Unit-circle penalty on (sin τ, cos τ) slots of the denormalized
-        # x_hat.  Descriptor MSE alone does not constrain s² + c² = 1, so
-        # the NeRF reconstruction downstream sees drifting phases and angle
-        # error accumulates.  Caller decides the weight.
-        circle_loss = self._compute_circle_loss(x_hat, mask)
-
-        # 3D coord-reconstruction loss (optional). Compares NeRF-reconstructed
-        # coords from x against those from x_hat, both denormalized into Å.
-        coord_loss = x.new_zeros(())
-        coord_diag: dict[str, Tensor] = {}
-        if self.config.coord_loss_enabled:
-            coord_loss, coord_diag = self._compute_coord_loss(x, x_hat, mask, aux)
+        # 4. Loss aggregation: continuous heads use Cartesian-space MSE
+        #    (denormalized + spherical->Cartesian), categorical heads use CE.
+        recon_loss, head_losses, recon_diag = self._compute_recon_loss(
+            x,
+            recon_outputs,
+            mask,
+        )
 
         return {
-            "reconstructed": x_hat,
             "indices": indices,
             "commitment_loss": commitment_loss,
-            "reconstruction_loss": reconstruction_loss,
-            "coord_loss": coord_loss,
-            "circle_loss": circle_loss,
+            "reconstruction_loss": recon_loss,
+            "head_losses": head_losses,
+            "recon_outputs": recon_outputs,
             "diagnostics": {
                 **codebook_diag,
-                **coord_diag,
+                **recon_diag,
                 "z_diversity": z_diversity,
-                "recon_max": recon_max,
             },
         }
 
-    def _compute_circle_loss(self, x_hat: Tensor, mask: Tensor) -> Tensor:
-        """Denormalized unit-circle penalty: ``mean((s^2 + c^2 - 1)^2)``.
-
-        Extracts the sin/cos slots (every 4th descriptor starting at offset
-        2 / 3) of ``x_hat`` in the original-descriptor scale and returns the
-        mean squared deviation from the unit circle, restricted to real
-        tokens.  Zero when the mask is empty.
-        """
-        mean = self._desc_mean.to(x_hat.dtype)
-        std = self._desc_std.to(x_hat.dtype)
-        x_hat_denorm = x_hat * std + mean
-        raw_s = x_hat_denorm[..., 2::4]
-        raw_c = x_hat_denorm[..., 3::4]
-        circle_dev_sq = ((raw_s.pow(2) + raw_c.pow(2)) - 1.0).pow(2)
-        if not mask.any():
-            return x_hat.new_zeros(())
-        return circle_dev_sq[mask].mean()
-
-    def _compute_coord_loss(
-        self,
-        x: Tensor,
-        x_hat: Tensor,
-        mask: Tensor,
-        aux: Tensor | None,
-    ) -> tuple[Tensor, dict[str, Tensor]]:
-        """Compute 3D coord MSE (Å²) by NeRF-reconstructing from x and x_hat."""
-        if aux is None:
-            msg = (
-                "coord_loss_enabled=True but aux was not provided to forward(). "
-                f"Expected refs (B, L, 3) for kind='{self.config.coord_loss_kind}'."
-            )
-            raise ValueError(msg)
-
-        mean = self._desc_mean.to(x.dtype)
-        std = self._desc_std.to(x.dtype)
-        x_denorm = x * std + mean
-        x_hat_denorm = x_hat * std + mean
-
-        bond_min = self.config.coord_loss_bond_length_min
-        kind = self.config.coord_loss_kind
-
-        if kind == "ligand":
-            coords_true = _reconstruct_coords_ligand(x_denorm, aux, mask, bond_min)
-            coords_pred = _reconstruct_coords_ligand(x_hat_denorm, aux, mask, bond_min)
-            # (B, L, 3) per-atom diff → sum xyz → mean over real atoms
-            diff_sq = (coords_true - coords_pred).pow(2).sum(dim=-1)  # (B, L)
-            real_diff = diff_sq[mask]
-        elif kind == "protein_backbone":
-            coords_true = _reconstruct_coords_protein(x_denorm, aux, mask, bond_min)
-            coords_pred = _reconstruct_coords_protein(x_hat_denorm, aux, mask, bond_min)
-            # (B, L, 3, 3) -- sum over (N, CA, C) and xyz -> (B, L); mean over real rows
-            diff_sq = (coords_true - coords_pred).pow(2).sum(dim=(-1, -2))
-            real_diff = diff_sq[mask]
-        else:
-            msg = f"Unknown coord_loss_kind: {kind}"
-            raise ValueError(msg)
-
-        coord_loss = real_diff.mean() if real_diff.numel() > 0 else x.new_zeros(())
-
-        # Diagnostics: predicted-side stats only (true side is the dataset).
-        with torch.no_grad():
-            coord_max = real_diff.max() if real_diff.numel() > 0 else x.new_zeros(())
-            raw_s = x_hat_denorm[..., 2::4]  # every 4th starting at 2: sin slots
-            raw_c = x_hat_denorm[..., 3::4]
-            circle_err = (raw_s.pow(2) + raw_c.pow(2)).sqrt().sub(1.0).abs()
-            circle_err = circle_err[mask].mean() if mask.any() else x.new_zeros(())
-            bond_raw = x_hat_denorm[..., 0::4]  # every 4th starting at 0: bond slots
-            clamp_frac = (
-                (bond_raw < bond_min)[mask].float().mean()
-                if mask.any()
-                else x.new_zeros(())
-            )
-
-        return coord_loss, {
-            "coord_recon_max": coord_max,
-            "unit_circle_norm_err": circle_err,
-            "bond_clamp_frac": clamp_frac,
-        }
-
     def encode(self, x: Tensor) -> Tensor:
-        """Encode descriptors to codebook indices.
-
-        Args:
-            x: ``(N, descriptor_dim)`` for a single sequence.
-
-        Returns:
-            Codebook indices of shape ``(N,)``.
-        """
-        x_seq = x.unsqueeze(0)  # (1, N, D)
-        h = self.input_proj(self.input_norm(x_seq)) + self.pos_encoding[: x.shape[0]]
+        """Encode a single sequence ``(N, descriptor_dim)`` to codebook indices."""
+        x_seq = x.unsqueeze(0)
+        h_in = self._embed_descriptor(x_seq)
+        h = self.input_proj(self.input_norm(h_in)) + self.pos_encoding[: x.shape[0]]
         h = self.transformer_encoder(h)
-        z = self.latent_norm(self.latent_proj(h)).squeeze(0)  # (N, latent_dim)
+        z = self.latent_norm(self.latent_proj(h)).squeeze(0)
         _, indices, _, _ = self.codebook(z)
         return indices
 
-    def decode(self, indices: Tensor) -> Tensor:
-        """Decode codebook indices back to descriptors.
+    def decode_to_outputs(self, indices: Tensor) -> dict[str, Tensor]:
+        """Decode ``(N,)`` codebook indices into raw recon-head outputs.
 
-        Args:
-            indices: ``(N,)`` codebook indices for a single sequence.
-
-        Returns:
-            Reconstructed descriptors of shape ``(N, descriptor_dim)``.
+        Returns a dict with one entry per head. The caller is responsible
+        for converting categorical logits to indices (argmax) and continuous
+        spherical outputs to Cartesian as needed.
         """
         quantized = self.codebook.lookup(indices)  # (N, latent_dim)
-        q_seq = quantized.unsqueeze(0)  # (1, N, latent_dim)
+        q_seq = quantized.unsqueeze(0)
         dec_in = self.latent_unproj(q_seq) + self.pos_encoding[: indices.shape[0]]
         dec_out = self.transformer_decoder(dec_in)
-        return self.output_proj(dec_out).squeeze(0)  # (N, descriptor_dim)
+        trunk = self.decoder_trunk(dec_out).squeeze(0)
+        return {
+            name: self.recon_head_modules[name](trunk)
+            for name, _kind, _dim in self.recon_heads
+        }
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Differentiable Z-matrix → Cartesian reconstruction (used by coord loss).
-# Mirrors LigandDescriptor.descriptor_to_coords and
-# BackboneZMatrixDescriptor.descriptor_to_backbone_coords numerically.
-# ---------------------------------------------------------------------------
+    def _embed_descriptor(self, x: Tensor) -> Tensor:
+        """Concatenate continuous slots with embedded categorical slots."""
+        pieces: list[Tensor] = []
+        for spec in self.layout:
+            slot = x[..., spec.start : spec.end]
+            if spec.kind == "continuous":
+                pieces.append(slot)
+            else:
+                key = self._embedding_key(spec.name)
+                # ``spec.length`` is 1 for singleton categoricals and K for
+                # KNN slots. Cast to long for the embedding lookup, then
+                # flatten the trailing two dims back into the feature axis.
+                emb = self.cat_embeddings[key](slot.long())
+                pieces.append(emb.reshape(*slot.shape[:-1], -1))
+        return torch.cat(pieces, dim=-1)
 
+    def _split_coord_head(
+        self,
+        coord_pred: Tensor,  # (B, L, 4) for ligand or (B, L, 12) for protein
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Split a coord head into r/θ/sin φ/cos φ groups (with unit-circle proj).
 
-def _reconstruct_coords_ligand(
-    x_denorm: Tensor,  # (B, L, 4)
-    refs: Tensor,  # (B, L, 3) int64
-    mask: Tensor,  # (B, L) bool
-    bond_length_min: float,
-) -> Tensor:
-    """Batched differentiable Z-matrix → Cartesian for ligands.
+        For protein the head is 3 atoms x 4 dims = 12; we reshape to
+        ``(B, L, 3, 4)`` and decompose along the last axis. Ligand stays
+        ``(B, L, 1, 4)``.
+        """
+        b, seq_len, total = coord_pred.shape
+        atoms = total // 4
+        reshaped = coord_pred.view(b, seq_len, atoms, 4)
+        r = reshaped[..., 0]
+        theta = reshaped[..., 1]
+        sphi, cphi = project_unit_circle(reshaped[..., 2], reshaped[..., 3])
+        return r, theta, sphi, cphi
 
-    Returns canonical-frame coords ``(B, L, 3)``; padded rows are zeroed.
-    """
-    b, seq_len, _ = x_denorm.shape
+    def _compute_recon_loss(
+        self,
+        x: Tensor,
+        recon_outputs: dict[str, Tensor],
+        mask: Tensor,
+    ) -> tuple[Tensor, dict[str, Tensor], dict[str, Tensor]]:
+        """Compute multi-head reconstruction loss.
 
-    d = x_denorm[..., 0].clamp_min(bond_length_min)
-    theta = x_denorm[..., 1]
-    sin_tau, cos_tau = project_unit_circle(x_denorm[..., 2], x_denorm[..., 3])
+        - Continuous (coord) head: denormalize the predicted spherical
+          values, convert to Cartesian, MSE against the ground-truth
+          Cartesian (also denormalized + converted). This avoids the
+          sin/cos-vs-MSE mismatch that biases the loss near θ=0.
+        - Categorical heads: CE over the per-slot integer targets.
+        """
+        f = fields_by_name(self.layout)
+        head_losses: dict[str, Tensor] = {}
+        diag: dict[str, Tensor] = {}
 
-    parents = refs[..., 0]
-    angle_refs = refs[..., 1]
-    dihedral_refs = refs[..., 2]
+        coord_field = f["coord"]
+        coord_norm_target = x[..., coord_field.start : coord_field.end]
+        coord_norm_pred = recon_outputs["coord"]
 
-    is_root = parents == -1
-    is_second = (parents >= 0) & (angle_refs == -1)
-    is_virtual = (parents >= 0) & (angle_refs >= 0) & (dihedral_refs == -1)
+        # Denormalize coord slot only (categorical slots are not part of coord).
+        mean = self._desc_mean[coord_field.start : coord_field.end].to(x.dtype)
+        std = self._desc_std[coord_field.start : coord_field.end].to(x.dtype)
+        coord_target = coord_norm_target * std + mean
+        coord_pred = coord_norm_pred * std + mean
 
-    coords_parts: list[Tensor] = []  # each (B, 3)
-    zeros_b3 = x_denorm.new_zeros(b, 3)
-
-    for pos in range(seq_len):
-        d_p = d[:, pos]
-        theta_p = theta[:, pos]
-        s_p = sin_tau[:, pos]
-        c_p = cos_tau[:, pos]
-
-        if pos == 0:
-            parent_pos = zeros_b3
-            angle_ref_pos = zeros_b3
-            dihedral_ref_pos = zeros_b3
+        # Spherical → Cartesian for both pred and target, MSE in canonical frame.
+        r_t, th_t, s_t, c_t = self._split_coord_head(coord_target)
+        r_p, th_p, s_p, c_p = self._split_coord_head(coord_pred)
+        xyz_t = spherical_to_cartesian_batched(r_t, th_t, s_t, c_t)
+        xyz_p = spherical_to_cartesian_batched(r_p, th_p, s_p, c_p)
+        coord_diff = (xyz_t - xyz_p).pow(2).sum(dim=-1)  # (B, L, atoms)
+        coord_diff_per_token = coord_diff.mean(dim=-1)  # (B, L)
+        if mask.any():
+            coord_loss = coord_diff_per_token[mask].mean()
+            coord_max = coord_diff_per_token[mask].detach().max()
         else:
-            running = torch.stack(coords_parts, dim=1)  # (B, pos, 3)
-            limit = pos - 1
-            parent_safe = parents[:, pos].clamp(0, limit)
-            angle_safe = angle_refs[:, pos].clamp(0, limit)
-            dihedral_safe = dihedral_refs[:, pos].clamp(0, limit)
-            parent_pos = running.gather(
-                1,
-                parent_safe.view(b, 1, 1).expand(-1, 1, 3),
-            ).squeeze(1)
-            angle_ref_pos = running.gather(
-                1,
-                angle_safe.view(b, 1, 1).expand(-1, 1, 3),
-            ).squeeze(1)
-            dihedral_ref_pos = running.gather(
-                1,
-                dihedral_safe.view(b, 1, 1).expand(-1, 1, 3),
-            ).squeeze(1)
-
-        # Candidate placements (all four computed; torch.where blends).
-        root_xyz = spherical_to_cartesian_batched(d_p, theta_p, s_p, c_p)
-        direction = spherical_to_cartesian_batched(
-            torch.ones_like(d_p),
-            theta_p,
-            s_p,
-            c_p,
-        )
-        second_xyz = parent_pos + d_p.unsqueeze(-1) * direction
-        virtual_ref_pos = canonical_virtual_ref_batched(angle_ref_pos, parent_pos)
-        virtual_xyz = place_atom_batched(
-            virtual_ref_pos,
-            angle_ref_pos,
-            parent_pos,
-            d_p,
-            theta_p,
-            s_p,
-            c_p,
-        )
-        std_xyz = place_atom_batched(
-            dihedral_ref_pos,
-            angle_ref_pos,
-            parent_pos,
-            d_p,
-            theta_p,
-            s_p,
-            c_p,
+            coord_loss = x.new_zeros(())
+            coord_max = x.new_zeros(())
+        head_losses["coord"] = coord_loss
+        diag["coord_max"] = coord_max
+        diag["unit_circle_norm_err"] = (
+            (coord_pred[..., 2::4].pow(2) + coord_pred[..., 3::4].pow(2))
+            .sqrt()
+            .sub(1.0)
+            .abs()[mask]
+            .mean()
+            if mask.any()
+            else x.new_zeros(())
         )
 
-        is_root_p = is_root[:, pos].unsqueeze(-1)
-        is_second_p = is_second[:, pos].unsqueeze(-1)
-        is_virtual_p = is_virtual[:, pos].unsqueeze(-1)
+        # Categorical heads: target indices live in the same slot as input.
+        for name, kind, _dim in self.recon_heads:
+            if kind == "continuous":
+                continue
+            spec = f[name]
+            target_idx = x[..., spec.start].long()  # singleton categorical
+            logits = recon_outputs[name]  # (B, L, V)
+            if mask.any():
+                head_loss = F.cross_entropy(
+                    logits[mask],
+                    target_idx[mask],
+                    reduction="mean",
+                )
+                pred = logits[mask].argmax(dim=-1)
+                acc = (pred == target_idx[mask]).float().mean()
+            else:
+                head_loss = x.new_zeros(())
+                acc = x.new_zeros(())
+            head_losses[name] = head_loss
+            diag[f"{name}_acc"] = acc
 
-        placed = torch.where(
-            is_root_p,
-            root_xyz,
-            torch.where(
-                is_second_p,
-                second_xyz,
-                torch.where(is_virtual_p, virtual_xyz, std_xyz),
-            ),
-        )
-        coords_parts.append(placed)
-
-    coords = torch.stack(coords_parts, dim=1)  # (B, L, 3)
-    return coords * mask.unsqueeze(-1).to(coords.dtype)
-
-
-def _reconstruct_coords_protein(
-    x_denorm: Tensor,  # (B, L, 12)
-    segment_start: Tensor,  # (B, L) bool
-    mask: Tensor,  # (B, L) bool
-    bond_length_min: float,
-) -> Tensor:
-    """Batched differentiable backbone Z-matrix → Cartesian.
-
-    Returns canonical-frame coords ``(B, L, 3, 3)`` for (N, CA, C); padded
-    rows zeroed. Mirrors :func:`_decode_segment_start` /
-    :func:`_decode_continuation` from ``src/tokenizers/protein.py``.
-    """
-    b, seq_len, _ = x_denorm.shape
-
-    def _group(i0: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        d_ = x_denorm[..., i0].clamp_min(bond_length_min)
-        th_ = x_denorm[..., i0 + 1]
-        s_, c_ = project_unit_circle(x_denorm[..., i0 + 2], x_denorm[..., i0 + 3])
-        return d_, th_, s_, c_
-
-    d_n, th_n, s_n, c_n = _group(0)
-    d_ca, th_ca, s_ca, c_ca = _group(4)
-    d_c, th_c, s_c, c_c = _group(8)
-
-    residues: list[Tensor] = []  # each (B, 3, 3)
-
-    for pos in range(seq_len):
-        # --- segment-start branch (always computable) ----------------------
-        n_start = spherical_to_cartesian_batched(
-            d_n[:, pos],
-            th_n[:, pos],
-            s_n[:, pos],
-            c_n[:, pos],
-        )
-        direction = spherical_to_cartesian_batched(
-            torch.ones_like(d_ca[:, pos]),
-            th_ca[:, pos],
-            s_ca[:, pos],
-            c_ca[:, pos],
-        )
-        ca_start = n_start + d_ca[:, pos].unsqueeze(-1) * direction
-        virtual = canonical_virtual_ref_batched(n_start, ca_start)
-        c_start = place_atom_batched(
-            virtual,
-            n_start,
-            ca_start,
-            d_c[:, pos],
-            th_c[:, pos],
-            s_c[:, pos],
-            c_c[:, pos],
-        )
-        segstart_res = torch.stack([n_start, ca_start, c_start], dim=1)  # (B, 3, 3)
-
-        # --- continuation branch (needs prev residue) ----------------------
-        if pos == 0:
-            placed = segstart_res  # force segment-start for the first position
-        else:
-            prev_res = residues[-1]  # (B, 3, 3)
-            prev_n = prev_res[:, 0]
-            prev_ca = prev_res[:, 1]
-            prev_c = prev_res[:, 2]
-            n_cont = place_atom_batched(
-                prev_n,
-                prev_ca,
-                prev_c,
-                d_n[:, pos],
-                th_n[:, pos],
-                s_n[:, pos],
-                c_n[:, pos],
-            )
-            ca_cont = place_atom_batched(
-                prev_ca,
-                prev_c,
-                n_cont,
-                d_ca[:, pos],
-                th_ca[:, pos],
-                s_ca[:, pos],
-                c_ca[:, pos],
-            )
-            c_cont = place_atom_batched(
-                prev_c,
-                n_cont,
-                ca_cont,
-                d_c[:, pos],
-                th_c[:, pos],
-                s_c[:, pos],
-                c_c[:, pos],
-            )
-            cont_res = torch.stack([n_cont, ca_cont, c_cont], dim=1)
-            placed = torch.where(
-                segment_start[:, pos].view(b, 1, 1),
-                segstart_res,
-                cont_res,
-            )
-
-        residues.append(placed)
-
-    coords = torch.stack(residues, dim=1)  # (B, L, 3, 3)
-    return coords * mask.view(b, seq_len, 1, 1).to(coords.dtype)
+        # Aggregate (sum without weighting; module-level recon_weights are
+        # applied in the training step).
+        recon_loss = sum(head_losses.values()) if head_losses else x.new_zeros(())
+        return recon_loss, head_losses, diag
