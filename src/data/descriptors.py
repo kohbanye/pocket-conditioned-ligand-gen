@@ -1,10 +1,10 @@
 """DataModule for computing and caching VQ-VAE training descriptors.
 
-Schema v4: each shard entry stores ``{"protein", "ligand", "elements",
-"pair_idx"}`` where ``protein`` is ``(L, PROTEIN_DESCRIPTOR_DIM)`` and
-``ligand`` is ``(N_atoms, LIGAND_DESCRIPTOR_DIM)``. Both descriptors are
-spherical-from-pocket-centroid, with element / AA / atom-feature columns
-embedded directly in the descriptor (see :mod:`src.tokenizers.descriptor_schema`).
+Each shard entry stores ``{"protein", "ligand", "elements", "pair_idx"}``
+where ``protein`` is ``(L, PROTEIN_DESCRIPTOR_DIM)`` and ``ligand`` is
+``(N_atoms, LIGAND_DESCRIPTOR_DIM)``. Both descriptors are spherical-from-
+pocket-centroid, with element / AA / atom-feature columns embedded directly
+in the descriptor (see :mod:`src.tokenizers.descriptor_schema`).
 
 Normalization is computed only over **continuous** slots; categorical
 columns are forced to mean=0, std=1 so values pass through unchanged.
@@ -59,9 +59,7 @@ _DEFAULT_SHARD_SIZE = 50_000
 _SHARD_DIR_NAME = "shards"
 _SHARD_METADATA_FILE = "shard_metadata.pt"
 _NORMALIZATION_STATS_FILE = "normalization_stats.pt"
-# v4: spherical-from-pocket-centroid descriptors with embedded categorical
-# columns. ``ligand_refs`` and ``protein_segment_start`` are gone (no NeRF
-# reconstruction chain). ``pair_idx`` retained for fold lookup.
+# Bump when shard layout changes; _setup_from_shards refuses older caches.
 _SHARD_SCHEMA_VERSION = 4
 
 # Per-worker state for multiprocessing (set by _worker_init).
@@ -687,10 +685,9 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         if cached_version < _SHARD_SCHEMA_VERSION:
             msg = (
                 f"Shard cache at {self.cache_dir} is schema v{cached_version} "
-                f"(expected v{_SHARD_SCHEMA_VERSION}). v4 stores spherical "
-                "multi-feature descriptors and drops ligand_refs / "
-                "protein_segment_start. Delete the descriptor_cache directory "
-                "and re-run prepare_data() to regenerate."
+                f"(expected v{_SHARD_SCHEMA_VERSION}). Delete the "
+                "descriptor_cache directory and re-run prepare_data() "
+                "to regenerate."
             )
             raise RuntimeError(msg)
         n = metadata["total_count"]
@@ -820,7 +817,17 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         manifest_path = Path(self.hub_config.cache_dir) / "repo" / "manifest.parquet"
         fold = self.hub_config.fold
         source_types = list(self.hub_config.source_types)
-        fold_cols = [f"{st}_fold{fold}" for st in source_types]
+
+        # Some source types (notably "other") have no ``{st}_fold{fold}`` column
+        # in the manifest. Request only the columns that exist; entries whose
+        # source type lacks a fold column are treated as trainval ("train") so
+        # they are not silently dropped from the corpus.
+        available = set(pq.read_schema(manifest_path).names)
+        fold_cols = [
+            f"{st}_fold{fold}"
+            for st in source_types
+            if f"{st}_fold{fold}" in available
+        ]
         df = pq.read_table(
             manifest_path,
             columns=["pair_idx", "source_type", *fold_cols],
@@ -828,7 +835,8 @@ class ComplexDescriptorDataModule(L.LightningDataModule):
         df = df[df["source_type"].isin(source_types)]
         fold_map: dict[int, str] = {}
         for row in df.itertuples(index=False):
-            label = getattr(row, f"{row.source_type}_fold{fold}")
+            col = f"{row.source_type}_fold{fold}"
+            label = getattr(row, col, None) if col in available else "train"
             if label is not None:
                 fold_map[int(row.pair_idx)] = label
 

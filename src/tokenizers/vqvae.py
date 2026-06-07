@@ -271,6 +271,32 @@ class TransformerVQVAE(nn.Module):
         _, indices, _, _ = self.codebook(z)
         return indices
 
+    @torch.no_grad()
+    def encode_batch(self, x: Tensor, mask: Tensor) -> Tensor:
+        """Encode a padded batch ``(B, L, descriptor_dim)`` to codebook indices.
+
+        Mirrors the encoder path of :meth:`forward` but skips the decoder and
+        loss. Returns ``(B, L)`` long indices with ``-1`` at padded positions.
+
+        The caller MUST put the module in ``eval()`` mode: the EMA codebook only
+        updates its statistics while ``training`` is ``True``, so eval mode keeps
+        the frozen tokenizer deterministic.
+
+        Args:
+            x: ``(B, L, descriptor_dim)`` already-normalized descriptors.
+            mask: ``(B, L)`` bool, ``True`` for real elements.
+        """
+        b, seq_len, _ = x.shape
+        h_in = self._embed_descriptor(x)
+        h = self.input_proj(self.input_norm(h_in)) + self.pos_encoding[:seq_len]
+        h = self.transformer_encoder(h, src_key_padding_mask=~mask)
+        z = self.latent_norm(self.latent_proj(h))  # (B, L, latent_dim)
+        z_flat = z.reshape(b * seq_len, -1).float()
+        _, indices_flat, _, _ = self.codebook(z_flat)
+        indices = indices_flat.view(b, seq_len)
+        indices = indices.masked_fill(~mask, -1)
+        return indices
+
     def decode_to_outputs(self, indices: Tensor) -> dict[str, Tensor]:
         """Decode ``(N,)`` codebook indices into raw recon-head outputs.
 

@@ -129,3 +129,79 @@ class VQVAETrainingConfig:
     protein: ProteinVQVAEConfig = field(default_factory=ProteinVQVAEConfig)
     ligand: LigandVQVAEConfig = field(default_factory=LigandVQVAEConfig)
     pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)
+
+
+# ---------------------------------------------------------------------------
+# Autoregressive LM over VQ-VAE tokens (项目(2))
+# ---------------------------------------------------------------------------
+#
+# A dense Qwen3-style decoder trained from scratch on VQ-VAE codebook tokens.
+# Sequences are ``<bos><p> protein-pocket tokens </p><l> ligand tokens </l><eos>``
+# in a flat vocabulary (see :mod:`src.tokenizers.lm_vocab`). The default model
+# dims target ~0.3B parameters, sized down from Qwen3-0.6B because the training
+# corpus is only ~1B tokens (token/param ≈ 3).
+
+# Number of special tokens; must match ``lm_vocab.NUM_SPECIAL``.
+_NUM_SPECIAL_TOKENS = 7
+
+
+@dataclass
+class LigandLMConfig:
+    """Architecture config for the dense Qwen3-style autoregressive LM (~0.3B)."""
+
+    # Codebook sizes determine the flat vocabulary. Defaults match the "2x"
+    # VQ-VAE checkpoint (protein=8192, ligand=4096).
+    protein_codebook_size: int = 8192
+    ligand_codebook_size: int = 4096
+
+    # Dims chosen to land at ~0.3B parameters with the ~12.3k vocabulary
+    # (measured: 302M). Token/param ≈ 3 against the ~1B-token corpus.
+    hidden_size: int = 1024
+    num_hidden_layers: int = 24
+    num_attention_heads: int = 16
+    num_key_value_heads: int = 4
+    head_dim: int = 64
+    intermediate_size: int = 3072
+    max_position_embeddings: int = 512
+    rope_theta: float = 10000.0
+    rms_norm_eps: float = 1e-6
+    hidden_act: str = "silu"
+    attention_bias: bool = False
+    attention_dropout: float = 0.0
+    tie_word_embeddings: bool = True
+    # Attention backend: "sdpa" (fast, default) or "eager" (most permissive
+    # with custom 4D block-diagonal masks if a transformers version balks).
+    attn_implementation: str = "sdpa"
+
+    @property
+    def vocab_size(self) -> int:
+        return (
+            _NUM_SPECIAL_TOKENS
+            + self.protein_codebook_size
+            + self.ligand_codebook_size
+        )
+
+
+@dataclass
+class LMTrainingConfig:
+    """Config for from-scratch training of the autoregressive ligand LM."""
+
+    token_dir: Path = Path("data/lm_tokens")
+    block_size: int = 512
+    # Sequences packed per device per step (a "micro batch" of packed blocks).
+    micro_batch_size: int = 64
+    gradient_accumulation: int = 1
+
+    learning_rate: float = 6e-4
+    min_lr_ratio: float = 0.1
+    weight_decay: float = 0.1
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    grad_clip: float = 1.0
+    warmup_steps: int = 2000
+
+    max_epochs: int = 2
+    num_workers: int = 8
+    precision: str = "bf16-mixed"
+
+    model: LigandLMConfig = field(default_factory=LigandLMConfig)
