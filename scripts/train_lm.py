@@ -69,7 +69,10 @@ def main() -> None:
                 monitor="val/loss",
                 mode="min",
                 save_top_k=3,
-                filename="lm-{epoch:02d}-{val/loss:.4f}",
+                # auto_insert_metric_name=False so the "/" in "val/loss" does not
+                # create a nested checkpoint subdirectory.
+                filename="lm-e{epoch:02d}-vl{val/loss:.4f}",
+                auto_insert_metric_name=False,
             ),
             LearningRateMonitor(logging_interval="step"),
         ],

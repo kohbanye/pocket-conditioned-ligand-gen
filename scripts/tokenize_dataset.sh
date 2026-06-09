@@ -25,7 +25,7 @@ cp -n "$VQVAE_STATS" "$CACHE/normalization_stats.pt"
 #   qsub -g tga-ohuelab -hold_jid prep_desc_full scripts/tokenize_dataset.sh
 uv run python scripts/tokenize_dataset.py \
     --from-hub --hub-repo-id kohbanye/crossdocked2020 \
-    --source-types cdonly it0 it2_redocked other \
+    --source-types cdonly it0 it2_redocked \
     --cache-dir "$CACHE" \
     --ckpt "$CKPT" \
     --ligand-codebook-size 4096 \

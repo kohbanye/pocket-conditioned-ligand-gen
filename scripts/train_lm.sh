@@ -15,4 +15,5 @@ module load cuda
 # Submit with: qsub -g <group> scripts/train_lm.sh
 uv run python scripts/train_lm.py \
     --token-dir data/lm_tokens \
-    --run-name lm_v1
+    --run-name lm_10ep \
+    --max-epochs 10
