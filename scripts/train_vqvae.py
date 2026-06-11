@@ -10,25 +10,15 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
 from src.config import CrossDockedConfig, HubDatasetConfig, VQVAETrainingConfig
+from src.data import HubCrossDockedDataModule
 from src.data.descriptors import ComplexDescriptorDataModule
 from src.model.vqvae_module import VQVAEModule
 
 logging.basicConfig(level=logging.INFO)
 
 
-def main() -> None:  # noqa: C901, PLR0912, PLR0915
+def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max-pairs", type=int, default=None)
-    parser.add_argument("--max-epochs", type=int, default=None)
-    parser.add_argument("--mol-batch-size", type=int, default=None)
-    parser.add_argument("--num-workers", type=int, default=None)
-    parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument(
-        "--precision",
-        type=str,
-        default=None,
-        help="Training precision (bf16-mixed, 16-mixed, 32)",
-    )
     parser.add_argument(
         "--from-hub",
         action="store_true",
@@ -50,18 +40,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Override descriptor cache directory.",
     )
     parser.add_argument(
-        "--ligand-coord-weight",
-        type=float,
-        default=None,
-        help="Override the ligand coord-MSE recon weight.",
-    )
-    parser.add_argument(
-        "--protein-coord-weight",
-        type=float,
-        default=None,
-        help="Override the protein coord-MSE recon weight.",
-    )
-    parser.add_argument(
         "--ligand-codebook-size",
         type=int,
         default=None,
@@ -78,22 +56,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     config = VQVAETrainingConfig()
     data_config = CrossDockedConfig()
 
-    if args.max_pairs is not None:
-        data_config.max_pairs = args.max_pairs
-    if args.max_epochs is not None:
-        config.max_epochs = args.max_epochs
-    if args.mol_batch_size is not None:
-        config.mol_batch_size = args.mol_batch_size
-    if args.num_workers is not None:
-        config.num_workers = args.num_workers
-    if args.lr is not None:
-        config.learning_rate = args.lr
-    if args.precision is not None:
-        config.precision = args.precision
-    if args.ligand_coord_weight is not None:
-        config.ligand.recon_weights["coord"] = args.ligand_coord_weight
-    if args.protein_coord_weight is not None:
-        config.protein.recon_weights["coord"] = args.protein_coord_weight
     if args.ligand_codebook_size is not None:
         config.ligand.codebook_size = args.ligand_codebook_size
     if args.protein_codebook_size is not None:
@@ -106,8 +68,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             hub_config.repo_id = args.hub_repo_id
         if args.source_types is not None:
             hub_config.source_types = args.source_types
-
-        from src.data import HubCrossDockedDataModule  # noqa: PLC0415
 
         hub_dm = HubCrossDockedDataModule(hub_config)
         hub_dm.prepare_data()
