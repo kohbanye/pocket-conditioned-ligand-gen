@@ -1,0 +1,9 @@
+[submodule "third_party/pocket-conditioned-ligand-gen"]
+	path = third_party/pocket-conditioned-ligand-gen
+	url = git@github.com:kohbanye/pocket-conditioned-ligand-gen.git
+[submodule "third_party/esm"]
+	path = third_party/esm
+	url = https://github.com/evolutionaryscale/esm.git
+[submodule "third_party/FoldToken_open"]
+	path = third_party/FoldToken_open
+	url = https://github.com/A4Bio/FoldToken_open.git

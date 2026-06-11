@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# uv
+# keep uv.lock tracked
+
+# Data, weights, outputs (large / machine-local) ------------------------------
+# Model weights are symlinked/copied in from elsewhere, never committed.
+/weights/
+# Benchmark input structures (downloaded eval sets, extracted complexes).
+/data/
+# Reconstruction outputs (PDBs, intermediate tensors).
+/outputs/
+# Aggregated result tables are small enough to keep; ignore only bulky dumps.
+/results/**/*.pdb
+/results/**/*.npz
+
+# Notebook render artifacts
+notebooks/*.html
+notebooks/__marimo__/
+
+# Misc
+*.log
+.DS_Store
