@@ -91,8 +91,9 @@ uv run marimo edit notebooks/comparison.py
 ```
 
 ESM3 / FoldToken は**常に全長タンパク質を再構成**する（各モデル本来のタスク）。
-`--protein-scope pocket`（既定）は、その再構成の**評価を自作モデルのポケット残基に限定**し、
-3 モデルを同一残基・非 OOD で公平に比較する。`full` は全長で評価する。
+`--protein-scope pocket`（既定）は、その再構成を **全長(full)** と **ポケット残基限定(pocket)**
+の**両方**で集計する（同じ表に両方の行が出る）。`full` は全長のみ。pocket 行は自作モデル
+（pocket native）と同一残基での直接比較になる。
 
 > ⚠️ ポケット PDB を直接 ESM3/FoldToken に入力するのは避ける。ポケットは配列的に不連続な
 > 残基の寄せ集めで全長前提のモデルには強い分布外となり、再構成が壊れる（実測 kabsch RMSD
@@ -111,15 +112,17 @@ ESM3 / FoldToken は**常に全長タンパク質を再構成**する（各モ�
 ## 状態（このコミット時点）
 
 - ✅ submodule 3 つ、uv コア環境、FoldToken 用 uv venv、CASP16 準備（303 複合体）、各モデルの重み。
-- ✅ **3 モデルすべて CASP16 でエンドツーエンド検証済み（H100 GPU）**。参考値（5 複合体、
-  protein-scope=pocket）:
+- ✅ **3 モデルすべて CASP16 でエンドツーエンド検証済み（H100 GPU、n=303）**。
+  ESM3/FoldToken4 は **全長(full)** と **ポケット残基限定(pocket)** の両方で集計:
 
-  | model | modality | eval_scope | kabsch_rmsd (Å) | tm_score | lddt | n_tokens |
-  |-------|----------|-----------|-----------------|----------|------|----------|
-  | esm3 | protein_backbone | pocket | **0.37** | 0.92 | 0.98 | 224 (全長) |
-  | foldtoken | protein_backbone | pocket | 0.93 | 0.70 | 0.86 | 224 (全長) |
-  | own_vqvae | protein_backbone | native (pocket) | 0.78 | 0.76 | 0.91 | — |
-  | own_vqvae | ligand | native | 0.34 | — | — | 32 |
+  | Model | modality | eval_scope | kabsch_rmsd (Å) | tm_score | lddt |
+  |-------|----------|-----------|-----------------|----------|------|
+  | ESM3 | protein_backbone | full | 3.51 | 0.88 | 0.93 |
+  | ESM3 | protein_backbone | pocket | 1.16 | 0.81 | 0.95 |
+  | FoldToken4 | protein_backbone | full | 2.64 | 0.93 | 0.76 |
+  | FoldToken4 | protein_backbone | pocket | 1.34 | 0.55 | 0.77 |
+  | Ours | protein_backbone | native (pocket) | **0.85** | 0.69 | 0.87 |
+  | Ours | ligand | native | **0.35** | — | — |
 
   （Kabsch 整列後の `kabsch_rmsd` が有効指標。生 `rmsd` は全長再構成の global frame の差で
-  大きく出る。`n_tokens` は ESM3/FoldToken の全長トークン数＝1 残基/トークン。）
+  大きく出る。full は残基数が多いほど整列が難しく RMSD が増え、TM-score は逆に長いほど高い。）

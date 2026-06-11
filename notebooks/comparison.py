@@ -43,16 +43,23 @@ def _(mo, paths):
 @app.cell
 def _(file_dropdown, mo, pd):
     mo.stop(not file_dropdown.value, mo.md("**No results yet.** Run `scripts/run_reconstruction.py` first."))
+    # Display names used in every legend / axis / table.
+    DISPLAY = {"own_vqvae": "Ours", "esm3": "ESM3", "foldtoken": "FoldToken4"}
+    ORDER = ["Ours", "ESM3", "FoldToken4"]
     df = pd.read_parquet(file_dropdown.value)
+    df["model_disp"] = df["model"].map(DISPLAY).fillna(df["model"])
     mo.md(f"Loaded **{len(df)}** rows, models: {sorted(df['model'].unique())}")
-    return (df,)
+    return DISPLAY, ORDER, df
 
 
 @app.cell
-def _(df, mo, runner):
-    # Summary table: mean metrics per (model, modality).
+def _(DISPLAY, df, mo, runner):
+    # Summary table: mean metrics per (model, modality, eval_scope).
+    # ESM3/FoldToken appear twice — full (whole protein) and pocket (scored on
+    # the pocket residues only) — alongside the own pocket model.
     summary = runner.summarize(df)
-    mo.ui.table(summary, label="Mean metrics per model × modality")
+    summary.insert(0, "Model", summary["model"].map(DISPLAY).fillna(summary["model"]))
+    mo.ui.table(summary, label="Mean metrics per model × modality × eval scope")
     return (summary,)
 
 
@@ -63,21 +70,28 @@ def _(df, mo):
 
     _prot = df[(df["ok"]) & (df["modality"] == "protein_backbone")].copy()
     mo.stop(_prot.empty, mo.md("_No protein-backbone reconstructions to plot._"))
-    # Label with eval scope so it's clear ESM3/FoldToken are full-protein
-    # reconstructions scored on the pocket residues, vs the own pocket model.
-    if "eval_scope" in _prot.columns:
-        _prot["label"] = _prot["model"] + " (" + _prot["eval_scope"].fillna("native") + ")"
-    else:
-        _prot["label"] = _prot["model"]
+    # Label = model + eval scope. ESM3/FoldToken4 appear as both "(full)" — the
+    # whole-protein RMSD — and "(pocket)" — scored on the pocket residues only —
+    # next to "Ours (native)" (own model is pocket-only).
+    _scope = _prot["eval_scope"].fillna("native") if "eval_scope" in _prot.columns else "native"
+    _prot["label"] = _prot["model_disp"] + " (" + _scope + ")"
+    _order = [
+        lbl for lbl in
+        ["Ours (native)", "ESM3 (full)", "ESM3 (pocket)",
+         "FoldToken4 (full)", "FoldToken4 (pocket)"]
+        if lbl in set(_prot["label"])
+    ]
 
-    _fig, _axes = plt.subplots(1, 3, figsize=(15, 4))
+    _fig, _axes = plt.subplots(1, 3, figsize=(16, 4.5))
     for _ax, _metric in zip(_axes, ["kabsch_rmsd", "tm_score", "lddt"], strict=False):
         if _metric not in _prot.columns:
             continue
-        sns.boxplot(data=_prot, x="label", y=_metric, ax=_ax)
-        sns.stripplot(data=_prot, x="label", y=_metric, ax=_ax, color="0.3", size=3, alpha=0.4)
+        sns.boxplot(data=_prot, x="label", y=_metric, order=_order, ax=_ax, showfliers=False)
+        sns.stripplot(data=_prot, x="label", y=_metric, order=_order, ax=_ax,
+                      color="0.25", size=2.5, alpha=0.35)
         _ax.set_title(f"protein backbone — {_metric}")
-        _ax.tick_params(axis="x", rotation=20)
+        _ax.set_xlabel("")
+        _ax.tick_params(axis="x", rotation=25)
     _fig.tight_layout()
     _fig
     return (plt, sns)
@@ -85,21 +99,24 @@ def _(df, mo):
 
 @app.cell
 def _(df, mo, sns):
-    # Ligand reconstruction (own model only).
+    # Ligand reconstruction (Ours only).
     _lig = df[(df["ok"]) & (df["modality"] == "ligand")]
-    mo.stop(_lig.empty, mo.md("_No ligand reconstructions (own model only)._"))
-    _lax = sns.histplot(data=_lig, x="kabsch_rmsd", hue="model", bins=30)
-    _lax.set_title("ligand heavy-atom reconstruction RMSD (Å)")
+    mo.stop(_lig.empty, mo.md("_No ligand reconstructions (Ours only)._"))
+    _lax = sns.histplot(data=_lig, x="kabsch_rmsd", hue="model_disp", bins=30)
+    _lax.set_title("ligand heavy-atom reconstruction RMSD (Å) — Ours")
     _lax.figure
     return
 
 
 @app.cell
 def _(df, mo):
-    # Per-sample head-to-head: paired pocket RMSD across models.
-    _pp = df[(df["ok"]) & (df["modality"] == "protein_backbone")]
-    _wide = _pp.pivot_table(index="sample_id", columns="model", values="kabsch_rmsd")
-    mo.ui.table(_wide.round(3), label="Per-sample protein backbone kabsch RMSD (Å)")
+    # Per-sample head-to-head on the SAME pocket residues: Ours (native) vs
+    # ESM3/FoldToken4 (pocket-restricted).
+    _scope = df["eval_scope"].fillna("native") if "eval_scope" in df.columns else "native"
+    _pp = df[(df["ok"]) & (df["modality"] == "protein_backbone")
+             & _scope.isin(["pocket", "native"])]
+    _wide = _pp.pivot_table(index="sample_id", columns="model_disp", values="kabsch_rmsd")
+    mo.ui.table(_wide.round(3), label="Per-sample pocket-residue kabsch RMSD (Å)")
     return
 
 

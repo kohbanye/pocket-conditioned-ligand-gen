@@ -27,6 +27,23 @@ def _subset_to_pocket(mod, pocket: set[tuple[str, int]]):
     return mod.ref[keep], mod.rec[keep], len(keep)
 
 
+def _metric_row(result, mod, ref, rec, eval_scope, is_protein) -> dict:
+    m = metrics.all_metrics(ref, rec, protein=is_protein)
+    return {
+        "sample_id": result.sample_id,
+        "model": result.model,
+        "modality": mod.modality,
+        "ok": True,
+        "error": None,
+        "atom_kind": mod.atom_kind,
+        "eval_scope": eval_scope,
+        "n_residues": mod.n_residues,
+        "n_tokens": mod.n_tokens,
+        "runtime_s": result.runtime_s,
+        **m,
+    }
+
+
 def _rows_from_result(
     result: ReconResult,
     pocket_keys: dict[str, set] | None = None,
@@ -46,28 +63,23 @@ def _rows_from_result(
     rows = []
     for mod in result.modalities:
         is_protein = mod.modality == "protein_backbone"
-        ref, rec, eval_scope = mod.ref, mod.rec, "native"
-        if is_protein and pocket is not None:
-            sref, srec, _ = _subset_to_pocket(mod, pocket)
-            if sref is None:
-                continue  # this protein has no rows in the pocket; skip
-            ref, rec, eval_scope = sref, srec, "pocket"
-        m = metrics.all_metrics(ref, rec, protein=is_protein)
+        has_pocket = is_protein and pocket is not None and mod.res_keys is not None
+        # Base row: the model's native reconstruction. For ESM3/FoldToken this is
+        # the whole protein ("full"); the own model only ever does the pocket.
         rows.append(
-            {
-                "sample_id": result.sample_id,
-                "model": result.model,
-                "modality": mod.modality,
-                "ok": True,
-                "error": None,
-                "atom_kind": mod.atom_kind,
-                "eval_scope": eval_scope,
-                "n_residues": mod.n_residues,
-                "n_tokens": mod.n_tokens,
-                "runtime_s": result.runtime_s,
-                **m,
-            }
+            _metric_row(
+                result, mod, mod.ref, mod.rec,
+                "full" if has_pocket else "native", is_protein,
+            )
         )
+        # Extra row: the same reconstruction scored only on the pocket residues,
+        # so ESM3/FoldToken (full) and the own pocket model share a row.
+        if has_pocket:
+            sref, srec, _ = _subset_to_pocket(mod, pocket)
+            if sref is not None:
+                rows.append(
+                    _metric_row(result, mod, sref, srec, "pocket", is_protein)
+                )
     return rows
 
 
