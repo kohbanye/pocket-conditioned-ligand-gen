@@ -61,38 +61,45 @@ def _(df, mo):
     import matplotlib.pyplot as plt
     import seaborn as sns
 
-    prot = df[(df["ok"]) & (df["modality"] == "protein_backbone")]
-    mo.stop(prot.empty, mo.md("_No protein-backbone reconstructions to plot._"))
+    _prot = df[(df["ok"]) & (df["modality"] == "protein_backbone")].copy()
+    mo.stop(_prot.empty, mo.md("_No protein-backbone reconstructions to plot._"))
+    # Label with eval scope so it's clear ESM3/FoldToken are full-protein
+    # reconstructions scored on the pocket residues, vs the own pocket model.
+    if "eval_scope" in _prot.columns:
+        _prot["label"] = _prot["model"] + " (" + _prot["eval_scope"].fillna("native") + ")"
+    else:
+        _prot["label"] = _prot["model"]
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    for ax, metric in zip(axes, ["kabsch_rmsd", "tm_score", "lddt"], strict=False):
-        if metric not in prot.columns:
+    _fig, _axes = plt.subplots(1, 3, figsize=(15, 4))
+    for _ax, _metric in zip(_axes, ["kabsch_rmsd", "tm_score", "lddt"], strict=False):
+        if _metric not in _prot.columns:
             continue
-        sns.boxplot(data=prot, x="model", y=metric, ax=ax)
-        sns.stripplot(data=prot, x="model", y=metric, ax=ax, color="0.3", size=3, alpha=0.5)
-        ax.set_title(f"protein backbone — {metric}")
-    fig.tight_layout()
-    fig
+        sns.boxplot(data=_prot, x="label", y=_metric, ax=_ax)
+        sns.stripplot(data=_prot, x="label", y=_metric, ax=_ax, color="0.3", size=3, alpha=0.4)
+        _ax.set_title(f"protein backbone — {_metric}")
+        _ax.tick_params(axis="x", rotation=20)
+    _fig.tight_layout()
+    _fig
     return (plt, sns)
 
 
 @app.cell
 def _(df, mo, sns):
     # Ligand reconstruction (own model only).
-    lig = df[(df["ok"]) & (df["modality"] == "ligand")]
-    mo.stop(lig.empty, mo.md("_No ligand reconstructions (own model only)._"))
-    ax = sns.histplot(data=lig, x="kabsch_rmsd", hue="model", bins=30)
-    ax.set_title("ligand heavy-atom reconstruction RMSD (Å)")
-    ax.figure
+    _lig = df[(df["ok"]) & (df["modality"] == "ligand")]
+    mo.stop(_lig.empty, mo.md("_No ligand reconstructions (own model only)._"))
+    _lax = sns.histplot(data=_lig, x="kabsch_rmsd", hue="model", bins=30)
+    _lax.set_title("ligand heavy-atom reconstruction RMSD (Å)")
+    _lax.figure
     return
 
 
 @app.cell
 def _(df, mo):
-    # Per-sample head-to-head: paired RMSD across models on shared samples.
-    prot = df[(df["ok"]) & (df["modality"] == "protein_backbone")]
-    wide = prot.pivot_table(index="sample_id", columns="model", values="kabsch_rmsd")
-    mo.ui.table(wide.round(3), label="Per-sample protein backbone kabsch RMSD (Å)")
+    # Per-sample head-to-head: paired pocket RMSD across models.
+    _pp = df[(df["ok"]) & (df["modality"] == "protein_backbone")]
+    _wide = _pp.pivot_table(index="sample_id", columns="model", values="kabsch_rmsd")
+    mo.ui.table(_wide.round(3), label="Per-sample protein backbone kabsch RMSD (Å)")
     return
 
 
