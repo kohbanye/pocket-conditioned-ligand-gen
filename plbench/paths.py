@@ -25,8 +25,13 @@ RESULTS_DIR = Path(os.environ.get("PLBENCH_RESULTS_DIR", REPO_ROOT / "results"))
 FOLDTOKEN_FT4_DIR = WEIGHTS_DIR / "foldtoken" / "model_zoom" / "FT4"
 FOLDTOKEN_CONFIG = FOLDTOKEN_FT4_DIR / "config.yaml"
 FOLDTOKEN_CKPT = FOLDTOKEN_FT4_DIR / "ckpt.pth"
-# FoldToken's deps are old/heavy; run it through its own interpreter.
-FOLDTOKEN_PYTHON = os.environ.get("PLBENCH_FOLDTOKEN_PYTHON", "python")
+# FoldToken's deps are old; run it through a dedicated uv venv (no conda).
+# Created by: uv venv --python 3.10 .venv-foldtoken && (see scripts/setup_foldtoken_env.sh)
+_FOLDTOKEN_VENV_PY = REPO_ROOT / ".venv-foldtoken" / "bin" / "python"
+FOLDTOKEN_PYTHON = os.environ.get(
+    "PLBENCH_FOLDTOKEN_PYTHON",
+    str(_FOLDTOKEN_VENV_PY) if _FOLDTOKEN_VENV_PY.exists() else "python",
+)
 
 # --- Own pocket-ligand VQ-VAE ------------------------------------------------
 # Source comes from the submodule, but the trained weights + descriptor cache

@@ -28,3 +28,6 @@ notebooks/__marimo__/
 # Misc
 *.log
 .DS_Store
+
+# FoldToken dedicated uv venv (CUDA-specific, machine-local)
+/.venv-foldtoken/

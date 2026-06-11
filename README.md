@@ -47,7 +47,8 @@ protein-ligand-3d-reconstruction-bench/
 git submodule update --init --recursive   # クローン直後の場合
 
 uv sync                                   # コア環境（軽量）
-uv sync --group esm3                       # ESM3 を in-process で動かす場合（torch + esm）
+uv sync --group esm3                       # ESM3 を in-process で動かす（torch + esm）
+sh scripts/setup_foldtoken_env.sh          # FoldToken 用 uv venv（conda 不要, cu118/H100対応）
 
 # 重み・評価データ
 uv run python scripts/fetch_weights.py --foldtoken --esm3 --own
@@ -62,9 +63,11 @@ cd data/casp16 && for n in 1 2 3 4; do
 done
 ```
 
-**FoldToken** は依存が古く（chroma 系）本体 env と競合するため、専用 conda env
-（`third_party/FoldToken_open/foldtoken/environment.yml`）で動かし、アダプタはサブプロセス
-経由で呼ぶ。その env の python を `PLBENCH_FOLDTOKEN_PYTHON` で指定する。GPU 必須。
+**FoldToken** は依存が古いため**専用 uv venv**（`.venv-foldtoken`、`scripts/setup_foldtoken_env.sh`
+で構築）で動かし、アダプタはサブプロセス経由で呼ぶ。再構成に必要なのは torch + PyG
+（scatter/cluster）+ pytorch-lightning 等のみで、flash-attn / openfold / deepspeed は不要。
+cu118 ビルドで H100(sm_90) 対応。GPU 必須。bench は `.venv-foldtoken` を自動検出する
+（`PLBENCH_FOLDTOKEN_PYTHON` で上書き可）。
 
 **自作モデル** は作業コピーの uv venv（`PLBENCH_OWN_MODEL_PYTHON`、既定で
 `../pocket-conditioned-ligand-gen/.venv/bin/python`）でサブプロセス実行する。ソースは
@@ -107,16 +110,16 @@ ESM3 / FoldToken は**常に全長タンパク質を再構成**する（各モ�
 
 ## 状態（このコミット時点）
 
-- ✅ submodule 3 つ、uv コア環境、CASP16 準備（303 複合体）、各モデルの重み取得/symlink。
-- ✅ **自作モデルと ESM3 は CASP16 でエンドツーエンド検証済み**（CPU）。参考値（3 複合体、
+- ✅ submodule 3 つ、uv コア環境、FoldToken 用 uv venv、CASP16 準備（303 複合体）、各モデルの重み。
+- ✅ **3 モデルすべて CASP16 でエンドツーエンド検証済み（H100 GPU）**。参考値（5 複合体、
   protein-scope=pocket）:
 
   | model | modality | eval_scope | kabsch_rmsd (Å) | tm_score | lddt | n_tokens |
   |-------|----------|-----------|-----------------|----------|------|----------|
-  | esm3 | protein_backbone | pocket | **0.38** | 0.92 | 0.98 | 223 (全長) |
-  | own_vqvae | protein_backbone | native (pocket) | 0.82 | 0.76 | 0.90 | — |
-  | own_vqvae | ligand | native | 0.36 | — | — | 33 |
+  | esm3 | protein_backbone | pocket | **0.37** | 0.92 | 0.98 | 224 (全長) |
+  | foldtoken | protein_backbone | pocket | 0.93 | 0.70 | 0.86 | 224 (全長) |
+  | own_vqvae | protein_backbone | native (pocket) | 0.78 | 0.76 | 0.91 | — |
+  | own_vqvae | ligand | native | 0.34 | — | — | 32 |
 
-  （Kabsch 整列後の `kabsch_rmsd` が有効指標。生 `rmsd` は全長再構成の global frame の差で大きく出る。）
-- ⏳ FoldToken は専用 conda env（`environment.yml`）+ GPU が必要なため、`PLBENCH_FOLDTOKEN_PYTHON`
-  を設定して実行する（重み・アダプタ・パーサは配線済み・未実行）。
+  （Kabsch 整列後の `kabsch_rmsd` が有効指標。生 `rmsd` は全長再構成の global frame の差で
+  大きく出る。`n_tokens` は ESM3/FoldToken の全長トークン数＝1 残基/トークン。）

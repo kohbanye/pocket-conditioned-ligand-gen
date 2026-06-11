@@ -44,7 +44,18 @@ def fetch_foldtoken() -> None:
     with zipfile.ZipFile(zip_path) as zf:
         zf.extractall(dest)
     zip_path.unlink(missing_ok=True)
+    _patch_foldtoken_config()
     print(f"[foldtoken] done -> {paths.FOLDTOKEN_FT4_DIR}")
+
+
+def _patch_foldtoken_config() -> None:
+    """The shipped FT4 config omits ``k_neighbors`` (a required model arg, 30
+    everywhere in the code). Add it so reconstruct.py can build the model."""
+    cfg = paths.FOLDTOKEN_CONFIG
+    if cfg.exists() and "k_neighbors" not in cfg.read_text():
+        with cfg.open("a") as f:
+            f.write("k_neighbors: 30\n")
+        print(f"[foldtoken] patched k_neighbors into {cfg.name}")
 
 
 def fetch_esm3() -> None:
