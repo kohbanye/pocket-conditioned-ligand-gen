@@ -4,7 +4,6 @@ Provides:
 - Pocket extraction from PDB files (precomputed + on-demand).
 - Backbone spherical-from-pocket-centroid per-residue descriptor (65-D)
   with one-shot reconstruction.
-- VQ-VAE for structure tokenization (via TransformerVQVAE).
 - Simple amino acid sequence tokenizer.
 """
 
@@ -13,9 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
-from torch import Tensor, nn
 
-from src.tokenizers.codebook import EMACodebook
 from src.tokenizers.descriptor_schema import (
     K_NEIGHBORS,
     PROTEIN_AA_TO_IDX,
@@ -33,7 +30,7 @@ from src.tokenizers.geometry import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from src.config import PocketExtractionConfig, ProteinVQVAEConfig
+    from src.config import PocketExtractionConfig
 
 # Standard amino acid 3-letter to 1-letter mapping
 AA_3TO1: dict[str, str] = {
@@ -451,69 +448,6 @@ class BackboneSphericalDescriptor:
                 backbone[i, j] = canonical[i, j] @ rotation + centroid
 
         return backbone.astype(np.float32)
-
-
-# ---------------------------------------------------------------------------
-# Legacy VQ-VAE (kept for backward compatibility with old checkpoints / tests)
-# ---------------------------------------------------------------------------
-
-
-class ProteinStructureVQVAE(nn.Module):
-    """VQ-VAE for protein backbone structure tokenization.
-
-    .. deprecated::
-        Use :class:`~src.tokenizers.vqvae.TransformerVQVAE` for new code.
-    """
-
-    def __init__(self, config: ProteinVQVAEConfig) -> None:
-        super().__init__()
-        self.config = config
-
-        self.encoder = nn.Sequential(
-            nn.Linear(config.descriptor_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.latent_dim),
-        )
-
-        self.decoder = nn.Sequential(
-            nn.Linear(config.latent_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Linear(config.hidden_dim, config.descriptor_dim),
-        )
-
-        self.codebook = EMACodebook(
-            num_codes=config.codebook_size,
-            code_dim=config.latent_dim,
-            ema_decay=config.ema_decay,
-            commitment_cost=config.commitment_cost,
-        )
-
-    def forward(self, x: Tensor) -> dict[str, Tensor]:
-        z = self.encoder(x)
-        quantized, indices, commitment_loss, _ = self.codebook(z)
-        reconstructed = self.decoder(quantized)
-        reconstruction_loss = (x - reconstructed).pow(2).mean()
-        return {
-            "reconstructed": reconstructed,
-            "indices": indices,
-            "commitment_loss": commitment_loss,
-            "reconstruction_loss": reconstruction_loss,
-        }
-
-    def encode(self, x: Tensor) -> Tensor:
-        z = self.encoder(x)
-        _, indices, _, _ = self.codebook(z)
-        return indices
-
-    def decode(self, indices: Tensor) -> Tensor:
-        quantized = self.codebook.lookup(indices)
-        return self.decoder(quantized)
 
 
 class ProteinSequenceTokenizer:

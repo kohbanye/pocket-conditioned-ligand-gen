@@ -212,3 +212,9 @@ wandb/
 checkpoints/
 *.ckpt
 wget-log
+
+# TSUBAME job logs and generated artifacts
+*.out
+*.err
+outputs/
+.codex

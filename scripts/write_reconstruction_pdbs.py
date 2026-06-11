@@ -41,7 +41,9 @@ from src.data.descriptors import ComplexDescriptorDataModule  # noqa: E402
 from src.model.vqvae_module import VQVAEModule  # noqa: E402
 from src.tokenizers.descriptor_schema import (  # noqa: E402
     LIGAND_DESCRIPTOR_DIM,
+    LIGAND_ELEMENT_VOCAB,
     LIGAND_LAYOUT,
+    PROTEIN_AA_VOCAB,
     PROTEIN_DESCRIPTOR_DIM,
     PROTEIN_LAYOUT,
     fields_by_name,
@@ -59,6 +61,36 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 AA_1TO3: dict[str, str] = {v: k for k, v in AA_3TO1.items()}
+
+# Cordero covalent radii (Å); covers every symbol in LIGAND_ELEMENT_VOCAB
+# except the OTHER catch-all, which gets no bond entries.
+_COVALENT_RADII: dict[str, float] = {
+    "C": 0.76, "N": 0.71, "O": 0.66, "S": 1.05, "F": 0.57,
+    "Cl": 1.02, "Br": 1.20, "I": 1.39, "P": 1.07, "B": 0.84,
+    "Si": 1.11,
+}
+_BOND_TOLERANCE = 0.4
+
+
+def infer_bonds(
+    elements: list[str],
+    coords: np.ndarray,
+    tol: float = _BOND_TOLERANCE,
+) -> list[tuple[int, int]]:
+    """Distance-based bond perception: i<j bonded iff d < r_i + r_j + tol."""
+    n = len(elements)
+    if n < 2:  # noqa: PLR2004
+        return []
+    radii = np.array(
+        [_COVALENT_RADII.get(e, 0.0) for e in elements], dtype=np.float64
+    )
+    diff = coords[:, None, :] - coords[None, :, :]
+    dist = np.linalg.norm(diff, axis=-1)
+    cutoff = radii[:, None] + radii[None, :] + tol
+    mask = (dist < cutoff) & (radii[:, None] > 0) & (radii[None, :] > 0)
+    mask = np.triu(mask, k=1)
+    i_idx, j_idx = np.where(mask)
+    return [(int(i), int(j)) for i, j in zip(i_idx, j_idx, strict=True)]
 
 
 def kabsch_rmsd(p: np.ndarray, q: np.ndarray) -> float:
@@ -247,7 +279,7 @@ def _reconstruct_descriptor_from_coord_head(
 
 
 @torch.no_grad()
-def reconstruct_one(  # noqa: PLR0913
+def reconstruct_one(  # noqa: PLR0913, PLR0915
     rec_path: Path,
     lig_path: Path,
     *,
@@ -282,7 +314,7 @@ def reconstruct_one(  # noqa: PLR0913
     pocket_frame = (centroid, rotation)
 
     # ---- Protein -----------------------------------------------------
-    prot_desc, prot_meta = protein_desc_calc.compute(
+    prot_desc, _prot_meta = protein_desc_calc.compute(
         backbone_coords_orig,
         residue_ids,
         pocket_frame=pocket_frame,
@@ -307,10 +339,25 @@ def reconstruct_one(  # noqa: PLR0913
         prot_coord_field.start,
         prot_coord_field.length,
     )
+    # Use an identity frame so the descriptor → backbone helper returns
+    # canonical-frame coords (no global back-transform — recon must not lean
+    # on the original-PDB-derived centroid/rotation).
+    identity_meta = {
+        "centroid": np.zeros(3, dtype=np.float64),
+        "rotation": np.eye(3, dtype=np.float64),
+    }
     backbone_recon = BackboneSphericalDescriptor.descriptor_to_backbone_coords(
         prot_recon_desc,
-        prot_meta,
+        identity_meta,
     )
+    # Project the original backbone into the same canonical frame so it
+    # overlays the recon directly (no PyMOL `align` required).
+    backbone_orig_canonical = (
+        (backbone_coords_orig.astype(np.float64) - centroid) @ rotation.T
+    ).astype(np.float32)
+
+    aa_pred_idx = prot_outputs["aa"].argmax(dim=-1).cpu().numpy()
+    pocket_seq_pred = "".join(PROTEIN_AA_VOCAB[i] for i in aa_pred_idx)
 
     # ---- Ligand ------------------------------------------------------
     lig_desc, lig_elements_sym, lig_meta = ligand_desc_calc.compute(
@@ -338,41 +385,65 @@ def reconstruct_one(  # noqa: PLR0913
         lig_coord_field.start,
         lig_coord_field.length,
     )
+    # Identity frame keeps the reconstruction in the encoder's canonical
+    # frame (no centroid/rotation pulled from the original PDB).
+    identity_frame = (np.zeros(3, dtype=np.float64), np.eye(3, dtype=np.float64))
     lig_coords_recon = LigandDescriptor.descriptor_to_coords(
         lig_recon_desc,
         lig_meta,
-        pocket_frame=pocket_frame,
+        pocket_frame=identity_frame,
     )
 
     # Heavy atoms are already in heavy-only original-atom order from the new
     # spherical descriptor (no DFS reordering); just project ground-truth
-    # coords with the same heavy_to_orig mapping.
+    # coords with the same heavy_to_orig mapping. Then project orig coords
+    # into the same canonical frame so they overlay the recon directly.
     heavy_to_orig = lig_meta["heavy_to_orig"]
     orig_atoms = mol["atoms"]
-    lig_coords_orig = np.array(
+    lig_coords_orig_global = np.array(
         [(orig_atoms[i][1], orig_atoms[i][2], orig_atoms[i][3]) for i in heavy_to_orig],
         dtype=np.float64,
     )
+    lig_coords_orig_canonical = (lig_coords_orig_global - centroid) @ rotation.T
     raw_to_final: dict[int, int] = {
         orig_idx: final_pos for final_pos, orig_idx in enumerate(heavy_to_orig)
     }
-    bonds_remapped: list[tuple[int, int]] = []
+    bonds_orig: list[tuple[int, int]] = []
     for a, b, *_ in mol["bonds"]:
         if a in raw_to_final and b in raw_to_final:
-            bonds_remapped.append((raw_to_final[a], raw_to_final[b]))
+            bonds_orig.append((raw_to_final[a], raw_to_final[b]))
+
+    element_pred_idx = lig_outputs["element"].argmax(dim=-1).cpu().numpy()
+    ligand_elements_pred_raw = [LIGAND_ELEMENT_VOCAB[i] for i in element_pred_idx]
+    # Bond perception sees the raw vocab so OTHER drops out via radii=0;
+    # PDB writer sees "X" since "OTHER" overflows the 2-char element column.
+    bonds_pred = infer_bonds(ligand_elements_pred_raw, lig_coords_recon)
+    ligand_elements_pred = [
+        e if e != "OTHER" else "X" for e in ligand_elements_pred_raw
+    ]
+
     return {
+        # canonical-frame coords for direct overlay
+        "backbone_recon": backbone_recon.astype(np.float64),
+        "backbone_orig": backbone_orig_canonical.astype(np.float64),
+        "ligand_coords_recon": lig_coords_recon.astype(np.float64),
+        "ligand_coords_orig": lig_coords_orig_canonical,
+        # original labels (for _orig_pocket.pdb)
         "pocket_seq": pocket_seq,
         "residue_ids": residue_ids,
-        "backbone_orig": backbone_coords_orig.astype(np.float64),
-        "backbone_recon": backbone_recon.astype(np.float64),
         "ligand_elements": lig_elements_sym,
-        "ligand_coords_orig": lig_coords_orig,
-        "ligand_coords_recon": lig_coords_recon.astype(np.float64),
-        "ligand_bonds": bonds_remapped,
+        "ligand_bonds": bonds_orig,
+        # predicted labels (for _recon.pdb) — VQ-VAE only, no orig data
+        "pocket_seq_pred": pocket_seq_pred,
+        "ligand_elements_pred": ligand_elements_pred,
+        "ligand_bonds_pred": bonds_pred,
+        # global-frame coords for full-receptor reference PDB
+        "backbone_orig_global": backbone_coords_orig.astype(np.float64),
+        "ligand_coords_orig_global": lig_coords_orig_global,
     }
 
 
-def main() -> None:  # noqa: PLR0915
+def main() -> None:  # noqa: PLR0915, C901
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--ckpt",
@@ -405,11 +476,15 @@ def main() -> None:  # noqa: PLR0915
     )
     parser.add_argument(
         "--mode",
-        choices=["random", *(f"worst-{m}" for m in METRIC_FN)],
+        choices=[
+            "random",
+            *(f"worst-{m}" for m in METRIC_FN),
+            *(f"best-{m}" for m in METRIC_FN),
+        ],
         default="random",
-        help="random: first n_samples valid candidates. worst-*: scan a larger "
-        "pool, rank by the chosen RMSD metric (descending), and write the "
-        "top n_samples worst examples.",
+        help="random: first n_samples valid candidates. worst-*/best-*: scan a "
+        "larger pool, rank by the chosen RMSD metric, and write the top "
+        "n_samples examples (worst-* = highest RMSD, best-* = lowest RMSD).",
     )
     args = parser.parse_args()
 
@@ -443,9 +518,17 @@ def main() -> None:  # noqa: PLR0915
     ligand_dir = hub_cache_dir / "ligands"
 
     rng = np.random.default_rng(args.seed)
-    is_worst = args.mode != "random"
-    metric_key = args.mode.removeprefix("worst-") if is_worst else None
-    default_attempts = args.n_samples * (100 if is_worst else 5)
+    if args.mode.startswith("worst-"):
+        rank_direction: str | None = "worst"
+        metric_key: str | None = args.mode.removeprefix("worst-")
+    elif args.mode.startswith("best-"):
+        rank_direction = "best"
+        metric_key = args.mode.removeprefix("best-")
+    else:
+        rank_direction = None
+        metric_key = None
+    is_ranked = rank_direction is not None
+    default_attempts = args.n_samples * (100 if is_ranked else 5)
     max_attempts = args.max_attempts or default_attempts
     sample_indices = rng.choice(
         len(test_df), size=min(max_attempts, len(test_df)), replace=False
@@ -456,10 +539,10 @@ def main() -> None:  # noqa: PLR0915
     ligand_desc_calc = LigandDescriptor()
 
     # Scan candidates; in random mode stop after n_samples valid hits, in
-    # worst mode keep going through the whole pool to rank.
+    # ranked (worst/best) mode keep going through the whole pool to rank.
     candidates: list[tuple[float, int, dict]] = []
     for cand_idx in sample_indices:
-        if not is_worst and len(candidates) >= args.n_samples:
+        if not is_ranked and len(candidates) >= args.n_samples:
             break
         row = test_df.iloc[int(cand_idx)]
         rec_path = receptor_dir / f"{row['complex_dir']}/{row['receptor_pdb']}"
@@ -486,12 +569,14 @@ def main() -> None:  # noqa: PLR0915
         score = METRIC_FN[metric_key](result) if metric_key else 0.0
         candidates.append((score, int(cand_idx), result))
 
-    if is_worst:
-        candidates.sort(key=lambda x: -x[0])
+    if is_ranked:
+        descending = rank_direction == "worst"
+        candidates.sort(key=lambda x: x[0], reverse=descending)
         logger.info(
-            "Scanned %d valid candidates, taking top %d by %s RMSD",
+            "Scanned %d valid candidates, taking top %d %s by %s RMSD",
             len(candidates),
             args.n_samples,
+            rank_direction,
             metric_key,
         )
     selected = candidates[: args.n_samples]
@@ -500,7 +585,7 @@ def main() -> None:  # noqa: PLR0915
     for score, cand_idx, result in selected:
         row = test_df.iloc[cand_idx]
         rec_path = receptor_dir / f"{row['complex_dir']}/{row['receptor_pdb']}"
-        score_tag = f"_{metric_key}{score:.2f}" if is_worst else ""
+        score_tag = f"_{rank_direction}-{metric_key}{score:.2f}" if is_ranked else ""
         tag = f"{n_done:04d}_pair{int(row['pair_idx']):07d}{score_tag}"
         orig_full_pdb = args.out_dir / f"{tag}_orig.pdb"
         orig_pocket_pdb = args.out_dir / f"{tag}_orig_pocket.pdb"
@@ -509,7 +594,7 @@ def main() -> None:  # noqa: PLR0915
             orig_full_pdb,
             rec_path,
             result["ligand_elements"],
-            result["ligand_coords_orig"],
+            result["ligand_coords_orig_global"],
             ligand_bonds=result["ligand_bonds"],
         )
         write_complex_pdb(
@@ -521,16 +606,21 @@ def main() -> None:  # noqa: PLR0915
             result["ligand_coords_orig"],
             ligand_bonds=result["ligand_bonds"],
         )
+        # Recon PDB is derived purely from VQ-VAE outputs: predicted AA /
+        # element labels, distance-inferred bonds, canonical-frame coords,
+        # and synthetic chain "A" with sequential residue numbering.
+        n_res = len(result["pocket_seq_pred"])
+        recon_residue_ids = [("A", i + 1) for i in range(n_res)]
         write_complex_pdb(
             recon_pdb,
             result["backbone_recon"],
-            result["pocket_seq"],
-            result["residue_ids"],
-            result["ligand_elements"],
+            result["pocket_seq_pred"],
+            recon_residue_ids,
+            result["ligand_elements_pred"],
             result["ligand_coords_recon"],
-            ligand_bonds=result["ligand_bonds"],
+            ligand_bonds=result["ligand_bonds_pred"],
         )
-        score_str = f" {metric_key}={score:.2f} Å" if is_worst else ""
+        score_str = f" {metric_key}={score:.2f} Å" if is_ranked else ""
         logger.info(
             "[%d/%d] %s%s — pocket %d res, ligand %d atoms → %s, %s, %s",
             n_done + 1,

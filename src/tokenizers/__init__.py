@@ -16,7 +16,6 @@ from src.tokenizers.protein import (
     BackboneSphericalDescriptor,
     PrecomputedResidues,
     ProteinSequenceTokenizer,
-    ProteinStructureVQVAE,
     precompute_pocket_candidates,
 )
 from src.tokenizers.sequence import TokenSequenceAssembler
@@ -34,7 +33,6 @@ __all__ = [
     "LigandVQVAE",
     "PrecomputedResidues",
     "ProteinSequenceTokenizer",
-    "ProteinStructureVQVAE",
     "TokenSequenceAssembler",
     "TransformerVQVAE",
     "precompute_pocket_candidates",

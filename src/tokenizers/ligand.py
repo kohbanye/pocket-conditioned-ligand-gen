@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
+def parse_sdf(path: str | Path) -> list[dict]:
     """Parse an SDF (or .sdf.gz) file and return one dict per molecule.
 
     Each molecule is a dict with keys:
@@ -57,13 +57,23 @@ def parse_sdf(path: str | Path) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
     """
     import gzip  # noqa: PLC0415
 
-    molecules = []
     p = Path(path)
     if p.suffix == ".gz":
         with gzip.open(p, "rt") as f:
-            lines = f.read().splitlines()
+            text = f.read()
     else:
-        lines = p.read_text().splitlines()
+        text = p.read_text()
+    return parse_sdf_text(text)
+
+
+def parse_sdf_text(text: str) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
+    """Parse already-decompressed SDF text into one dict per molecule.
+
+    Same return shape as :func:`parse_sdf`; used when reading molecules from
+    packed tar shards (bytes -> gunzip -> text) without extracting files.
+    """
+    molecules = []
+    lines = text.splitlines()
 
     i = 0
     while i < len(lines):

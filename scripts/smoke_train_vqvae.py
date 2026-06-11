@@ -1,4 +1,4 @@
-"""Smoke test: load v4 cache and run a few training steps.
+"""Smoke test: load descriptor cache and run a few training steps.
 
 Verifies that ``ComplexDescriptorDataModule`` + multi-head ``VQVAEModule``
 work end-to-end on a tiny shard. Intended as a debug / CI helper, not for
@@ -111,7 +111,7 @@ def main() -> None:
     trainer.fit(module, dm)
 
     logger.info("=== Smoke test done ===")
-    logger.info("If no exception was raised the v4 pipeline is wired up.")
+    logger.info("If no exception was raised the pipeline is wired up.")
 
 
 if __name__ == "__main__":

@@ -14,18 +14,17 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # VQ-VAE Tokenizer Evaluation (v4 — spherical multi-head)
+    # VQ-VAE Tokenizer Evaluation
 
-    Spherical multi-feature VQ-VAE の学習後評価ノートブック。Z-matrix 版から
-    変わった点：
+    Spherical multi-feature VQ-VAE の学習後評価ノートブック。
 
     - **descriptor**: pocket centroid 起点の spherical (r, θ, sin φ, cos φ) +
       element / charge / hybrid / aromatic / ring / numH (ligand)、
       AA (protein)。
     - **decoder**: multi-head（連続 coord head + 各 categorical head）。
-    - 評価指標も per-head に再編：coord は Cartesian 空間 MSE、categorical は
-      classification accuracy。3D RMSD（per-atom / Kabsch / joint Kabsch）は
-      旧 baseline と同じ計算式で出すので apples-to-apples 比較できる。
+    - 評価指標は per-head: coord は Cartesian 空間 MSE、categorical は
+      classification accuracy。3D RMSD は per-atom / Kabsch / joint Kabsch を
+      出す。
     """)
     return
 
@@ -56,13 +55,13 @@ def _():
 
     plt.rcParams["figure.dpi"] = 120
     plt.rcParams.update({
-        "font.size": 14,
-        "axes.titlesize": 16,
-        "axes.labelsize": 14,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
-        "legend.fontsize": 12,
-        "figure.titlesize": 18,
+        "font.size": 18,
+        "axes.titlesize": 22,
+        "axes.labelsize": 18,
+        "xtick.labelsize": 16,
+        "ytick.labelsize": 16,
+        "legend.fontsize": 16,
+        "figure.titlesize": 26,
     })
     return (
         ComplexDescriptorDataModule,
@@ -72,7 +71,6 @@ def _():
         PROTEIN_AA_VOCAB,
         PROTEIN_LAYOUT,
         VQVAEModule,
-        VQVAETrainingConfig,
         fields_by_name,
         np,
         plt,
@@ -96,7 +94,7 @@ def _(VQVAEModule, project_root, torch):
     # Override via VQVAE_CKPT env var when exporting per-run PDFs.
     CKPT_PATH = os.environ.get(
         "VQVAE_CKPT",
-        str(project_root / "checkpoints" / "v4_latest.ckpt"),
+        str(project_root / "checkpoints" / "latest.ckpt"),
     )
     print(f"Loading: {CKPT_PATH}")
 
@@ -107,15 +105,23 @@ def _(VQVAEModule, project_root, torch):
 
     protein_vqvae = module.protein_vqvae
     ligand_vqvae = module.ligand_vqvae
+    # Use the checkpoint's own config so codebook sizes (and other dims) match
+    # the loaded weights; a fresh VQVAETrainingConfig() would carry stale
+    # defaults and mislabel / miscount the codebook.
+    config = module.config
     print(f"Device: {device}")
-    return device, ligand_vqvae, protein_vqvae
+    print(
+        f"Codebook sizes -> protein={config.protein.codebook_size}, "
+        f"ligand={config.ligand.codebook_size}"
+    )
+    return config, device, ligand_vqvae, protein_vqvae
 
 
 @app.cell
 def _(
     ComplexDescriptorDataModule,
     CrossDockedConfig,
-    VQVAETrainingConfig,
+    config,
     device,
     project_root,
     torch,
@@ -123,10 +129,9 @@ def _(
     import os as _os
     from pathlib import Path as _Path
 
-    config = VQVAETrainingConfig()
     data_config = CrossDockedConfig(data_dir=project_root / "data")
     dm = ComplexDescriptorDataModule(config, data_config)
-    cache_override = _os.environ.get("VQVAE_CACHE_DIR", "data/descriptor_cache_v4")
+    cache_override = _os.environ.get("VQVAE_CACHE_DIR", "data/descriptor_cache")
     cache_path = _Path(cache_override)
     if not cache_path.is_absolute():
         cache_path = project_root / cache_path
@@ -178,7 +183,7 @@ def _(
         f"Ligand test:  {len(ligand_test_molecules)} molecules, "
         f"{ligand_test_flat.shape[0]} atoms total"
     )
-    return config, ligand_test_molecules, norm_stats, protein_test_pockets
+    return ligand_test_molecules, norm_stats, protein_test_pockets
 
 
 @app.cell(hide_code=True)
@@ -351,11 +356,58 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### 2.1 Categorical confusion matrices
+    ### 2.1 Per-head accuracy summary
 
-    主要な categorical head（element / AA）の confusion matrix を可視化する。
-    対角線が支配的であれば codebook が atom identity / residue identity を
-    きちんと分離できている。
+    全 categorical head の accuracy を 1 つの bar chart にまとめる。
+    各 head が天井 (1.0) にどれだけ近いかが一目で分かる。
+    """)
+    return
+
+
+@app.cell
+def _(lig_metrics, plt, prot_metrics):
+    lig_cats = lig_metrics["categorical"]
+    prot_cats = prot_metrics["categorical"]
+    labels = (
+        [f"L:{n}" for n in lig_cats]
+        + [f"P:{n}" for n in prot_cats]
+    )
+    accs = (
+        [lig_cats[n]["accuracy"] for n in lig_cats]
+        + [prot_cats[n]["accuracy"] for n in prot_cats]
+    )
+    colors = ["steelblue"] * len(lig_cats) + ["seagreen"] * len(prot_cats)
+
+    _fig, _ax = plt.subplots(figsize=(14, 6))
+    _bars = _ax.bar(range(len(labels)), accs, color=colors)
+    _ax.set_xticks(range(len(labels)))
+    _ax.set_xticklabels(labels, rotation=30, ha="right")
+    _ax.set_ylabel("Accuracy")
+    _ax.set_ylim(0.0, 1.05)
+    _ax.axhline(1.0, color="grey", linestyle=":", linewidth=1)
+    _ax.set_title("Per-head categorical accuracy (L=ligand, P=protein)")
+    for _b, _a in zip(_bars, accs, strict=True):
+        _ax.text(
+            _b.get_x() + _b.get_width() / 2,
+            _a + 0.01,
+            f"{_a:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=14,
+        )
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 2.2 Categorical confusion matrices
+
+    各 categorical head の confusion matrix。対角線が支配的であれば
+    codebook がその属性を分離できている。小さい vocab (charge / hybrid /
+    aromatic / ring / numH) は格子状に並べる。
     """)
     return
 
@@ -369,7 +421,16 @@ def _(
     plt,
     prot_metrics,
 ):
-    def plot_confusion(target, pred, vocab, ax, title):
+    LIGAND_CHARGE_LABELS = ("-2", "-1", "0", "+1", "+2")
+    LIGAND_HYBRID_LABELS = ("SP", "SP2", "SP3", "AROM", "OTHER")
+    LIGAND_AROMATIC_LABELS = ("non-arom", "arom")
+    LIGAND_RING_LABELS = ("3", "4", "5", "6+", "none")
+    LIGAND_NUMH_LABELS = ("0", "1", "2", "3", "4")
+
+    SMALL_VOCAB = 5
+    HIGH_CONTRAST = 0.5
+
+    def plot_confusion(target, pred, vocab, ax, title, *, tick_fontsize=14):
         n = len(vocab)
         cm = np.zeros((n, n), dtype=np.int64)
         for t, p in zip(target, pred, strict=False):
@@ -379,29 +440,67 @@ def _(
         ax.imshow(cm_norm, cmap="Blues", vmin=0, vmax=1)
         ax.set_xticks(range(n))
         ax.set_yticks(range(n))
-        ax.set_xticklabels(vocab, rotation=90, fontsize=10)
-        ax.set_yticklabels(vocab, fontsize=10)
+        rotation = 90 if n > SMALL_VOCAB else 0
+        ax.set_xticklabels(vocab, rotation=rotation, fontsize=tick_fontsize)
+        ax.set_yticklabels(vocab, fontsize=tick_fontsize)
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
         ax.set_title(title)
+        if n <= SMALL_VOCAB:
+            for i in range(n):
+                for j in range(n):
+                    val = cm_norm[i, j]
+                    color = "white" if val > HIGH_CONTRAST else "black"
+                    ax.text(
+                        j,
+                        i,
+                        f"{val:.2f}",
+                        ha="center",
+                        va="center",
+                        color=color,
+                        fontsize=tick_fontsize,
+                    )
 
-    _fig, _axes = plt.subplots(1, 2, figsize=(20, 9))
+    # Large-vocab heads on their own row.
+    _fig1, _axes1 = plt.subplots(1, 2, figsize=(22, 10))
     plot_confusion(
         lig_metrics["categorical"]["element"]["target"],
         lig_metrics["categorical"]["element"]["pred"],
         LIGAND_ELEMENT_VOCAB,
-        _axes[0],
+        _axes1[0],
         f"Ligand element (acc={lig_metrics['categorical']['element']['accuracy']:.3f})",
     )
     plot_confusion(
         prot_metrics["categorical"]["aa"]["target"],
         prot_metrics["categorical"]["aa"]["pred"],
         PROTEIN_AA_VOCAB,
-        _axes[1],
+        _axes1[1],
         f"Protein AA (acc={prot_metrics['categorical']['aa']['accuracy']:.3f})",
     )
-    _fig.tight_layout()
-    _fig
+    _fig1.tight_layout()
+
+    # Small-vocab ligand heads on a 2x3 grid (5 used, 1 spare).
+    small_heads = [
+        ("charge", LIGAND_CHARGE_LABELS),
+        ("hybrid", LIGAND_HYBRID_LABELS),
+        ("aromatic", LIGAND_AROMATIC_LABELS),
+        ("ring", LIGAND_RING_LABELS),
+        ("numH", LIGAND_NUMH_LABELS),
+    ]
+    _fig2, _axes2 = plt.subplots(2, 3, figsize=(22, 14))
+    _flat = _axes2.ravel()
+    for _ax, (_head, _labels) in zip(_flat, small_heads, strict=False):
+        _m = lig_metrics["categorical"][_head]
+        plot_confusion(
+            _m["target"],
+            _m["pred"],
+            _labels,
+            _ax,
+            f"Ligand {_head} (acc={_m['accuracy']:.3f})",
+        )
+    _flat[-1].axis("off")
+    _fig2.tight_layout()
+    [_fig1, _fig2]
     return
 
 
@@ -451,12 +550,10 @@ def _(config, lig_counts, np, plt, prot_counts):
     _axes[0].set_xlabel("Code rank")
     _axes[0].set_ylabel("Count")
     _axes[0].set_title(f"Protein Codebook Usage (size={config.protein.codebook_size})")
-    _axes[0].set_yscale("log")
     _axes[1].bar(range(len(lig_counts)), np.sort(lig_counts)[::-1], width=1.0)
     _axes[1].set_xlabel("Code rank")
     _axes[1].set_ylabel("Count")
     _axes[1].set_title(f"Ligand Codebook Usage (size={config.ligand.codebook_size})")
-    _axes[1].set_yscale("log")
     _fig.tight_layout()
     _fig
     return
@@ -492,10 +589,14 @@ def _(
     protein_vqvae,
     torch,
 ):
+    import gzip
+    import re
+    import tarfile
+
     import pyarrow.parquet as pq
 
     from src.config import PocketExtractionConfig
-    from src.tokenizers.ligand import LigandDescriptor, parse_sdf
+    from src.tokenizers.ligand import LigandDescriptor, parse_sdf_text
     from src.tokenizers.protein import (
         BackboneSphericalDescriptor,
         _compute_canonical_frame,
@@ -537,11 +638,9 @@ def _(
         & (manifest_df["cdonly_fold0"] == "test")
     ].reset_index(drop=True)
     receptor_dir = hub_cache_dir / "receptors"
-    ligand_dir = hub_cache_dir / "ligands"
-    entries = [
-        (f"{row.complex_dir}/{row.receptor_pdb}", f"{row.pair_idx:07d}.sdf.gz")
-        for row in test_df.itertuples(index=False)
-    ]
+    # Ligand SDFs stay packed in per-shard tars (extracting the full ~25M-file
+    # set would exhaust the inode budget); receptors are extracted on disk.
+    ligand_repo_dir = hub_cache_dir / "repo" / "ligands"
 
     prot_mean_t = norm_stats["protein_mean"].to(device)
     prot_std_t = norm_stats["protein_std"].to(device)
@@ -554,27 +653,71 @@ def _(
 
     N_SAMPLES = 2000
     rng = np.random.default_rng(42)
-    sample_indices = rng.choice(
-        len(entries), size=min(N_SAMPLES * 5, len(entries)), replace=False,
+    cand_pos = rng.choice(
+        len(test_df), size=min(N_SAMPLES * 5, len(test_df)), replace=False,
     )
+    cand = test_df.iloc[cand_pos]
+
+    from collections import defaultdict  # noqa: PLC0415
+
+    # shard_idx -> {pair_idx: "complex_dir/receptor_pdb"} for the sampled pairs.
+    shard_to_pairs: dict[int, dict[int, str]] = defaultdict(dict)
+    for row in cand.itertuples(index=False):
+        shard_to_pairs[int(row.shard_idx)][int(row.pair_idx)] = (
+            f"{row.complex_dir}/{row.receptor_pdb}"
+        )
+    # Visit shards in a random order so the first N_SAMPLES successes are not
+    # biased toward low shard indices.
+    shard_order = list(shard_to_pairs)
+    rng.shuffle(shard_order)
+
+    def iter_sampled_molecules():
+        """Yield (receptor_path, first-pose mol) for the sampled test pairs.
+
+        Streams each ligand tar once (``r|``) and gunzip-parses only the
+        members whose pair_idx was sampled — never extracts the archive to disk
+        (mirrors ``src.data.tar_prep``).
+        """
+        member_re = re.compile(r"(\d+)\.sdf\.gz$")
+        for shard_idx in shard_order:
+            wanted = shard_to_pairs[shard_idx]
+            tar_path = ligand_repo_dir / f"{shard_idx:06d}.tar"
+            if not tar_path.exists():
+                continue
+            with tarfile.open(tar_path, "r|") as tar:
+                for member in tar:
+                    if not member.isfile():
+                        continue
+                    match = member_re.search(member.name.rsplit("/", 1)[-1])
+                    if match is None:
+                        continue
+                    rec_rel = wanted.get(int(match.group(1)))
+                    if rec_rel is None:
+                        continue
+                    fileobj = tar.extractfile(member)
+                    if fileobj is None:
+                        continue
+                    try:
+                        text = gzip.decompress(fileobj.read()).decode(
+                            "utf-8", "replace",
+                        )
+                        molecules = parse_sdf_text(text)
+                    except Exception:  # noqa: BLE001, S112
+                        continue
+                    if molecules:
+                        yield receptor_dir / rec_rel, molecules[0]
 
     prot_rmsd_list, prot_rmsd_aligned_list = [], []
     lig_rmsd_list, lig_rmsd_aligned_list = [], []
     joint_rmsd_list, prot_in_joint_list, lig_in_joint_list = [], [], []
+    joint_per_atom_list = []
     n_done = 0
-    for idx in sample_indices:
+    for rec_path, mol in iter_sampled_molecules():
         if n_done >= N_SAMPLES:
             break
-        rec_rel, lig_rel = entries[idx]
-        rec_path = receptor_dir / rec_rel
-        lig_path = ligand_dir / lig_rel
-        if not rec_path.exists() or not lig_path.exists():
+        if not rec_path.exists():
             continue
         try:
-            molecules = parse_sdf(lig_path)
-            if not molecules:
-                continue
-            mol = molecules[0]
             heavy = np.array(
                 [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"],
                 dtype=np.float32,
@@ -654,6 +797,12 @@ def _(
                 [prot_flat_recon, lig_coords_recon.astype(np.float64)],
             )
             n_prot = len(prot_flat_orig)
+            # Per-atom whole-complex RMSD: no alignment, atoms are already in
+            # the same global frame because both branches share the pocket
+            # canonical frame.
+            joint_per_atom = float(np.sqrt(
+                np.mean(np.sum((joint_orig - joint_recon) ** 2, axis=-1))
+            ))
             joint_orig_c, joint_recon_aligned, joint_rmsd = kabsch_align(
                 joint_orig, joint_recon,
             )
@@ -671,6 +820,7 @@ def _(
             lig_rmsd_list.append(lig_per_atom_rmsd)
             lig_rmsd_aligned_list.append(lig_kabsch)
             joint_rmsd_list.append(joint_rmsd)
+            joint_per_atom_list.append(joint_per_atom)
             prot_in_joint_list.append(prot_in_joint)
             lig_in_joint_list.append(lig_in_joint)
             n_done += 1
@@ -682,6 +832,7 @@ def _(
     lig_rmsd_arr = np.array(lig_rmsd_list)
     lig_rmsd_aligned_arr = np.array(lig_rmsd_aligned_list)
     joint_rmsd_arr = np.array(joint_rmsd_list)
+    joint_per_atom_rmsd_arr = np.array(joint_per_atom_list)
     prot_in_joint_rmsd_arr = np.array(prot_in_joint_list)
     lig_in_joint_rmsd_arr = np.array(lig_in_joint_list)
     print(f"Evaluated {len(prot_rmsd_arr)} complexes")
@@ -728,6 +879,7 @@ def _(
     _fig.tight_layout()
     _fig
     return (
+        joint_per_atom_rmsd_arr,
         joint_rmsd_arr,
         lig_in_joint_rmsd_arr,
         lig_rmsd_aligned_arr,
@@ -742,16 +894,25 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ### 4.1 Joint-aligned RMSD
+    ### 4.1 Whole-complex RMSD
 
-    タンパク質バックボーン + リガンド重原子を 1 つの剛体として連結した複合体
-    レベルの RMSD。
+    タンパク質バックボーン + リガンド重原子を 1 つの剛体として連結した
+    複合体レベルの RMSD。
+
+    - **per-atom (no alignment)**: 両者は同じ pocket canonical frame に
+      載っているので、そのまま全原子で RMSD を取る。生成 pipeline 全体の
+      "絶対座標" 精度。
+    - **joint Kabsch**: 複合体まるごとを rigid-body アラインしてから RMSD。
+      内部形状（相対ポーズ）の精度。
+    - **per-component in joint frame**: joint Kabsch 後に protein 部分と
+      ligand 部分それぞれの残差を分解したもの。
     """)
     return
 
 
 @app.cell
 def _(
+    joint_per_atom_rmsd_arr,
     joint_rmsd_arr,
     lig_in_joint_rmsd_arr,
     np,
@@ -765,16 +926,26 @@ def _(
         print(f"  Median: {np.median(arr):.4f}")
         print(f"  Std:    {arr.std():.4f}")
 
+    _print_joint(
+        "Whole-complex RMSD — per-atom (no alignment, Å)",
+        joint_per_atom_rmsd_arr,
+    )
+    print()
     _print_joint("Whole-complex RMSD — joint Kabsch (Å)", joint_rmsd_arr)
     print()
     _print_joint("Protein component in joint frame (Å)", prot_in_joint_rmsd_arr)
     print()
     _print_joint("Ligand component in joint frame (Å)", lig_in_joint_rmsd_arr)
 
-    _fig, _axes = plt.subplots(1, 3, figsize=(18, 5))
-    plot_rmsd_hist(_axes[0], joint_rmsd_arr, "Whole complex — joint Kabsch")
-    plot_rmsd_hist(_axes[1], prot_in_joint_rmsd_arr, "Protein in joint frame")
-    plot_rmsd_hist(_axes[2], lig_in_joint_rmsd_arr, "Ligand in joint frame")
+    _fig, _axes = plt.subplots(2, 2, figsize=(18, 12))
+    plot_rmsd_hist(
+        _axes[0, 0],
+        joint_per_atom_rmsd_arr,
+        "Whole complex — per-atom (no align)",
+    )
+    plot_rmsd_hist(_axes[0, 1], joint_rmsd_arr, "Whole complex — joint Kabsch")
+    plot_rmsd_hist(_axes[1, 0], prot_in_joint_rmsd_arr, "Protein in joint frame")
+    plot_rmsd_hist(_axes[1, 1], lig_in_joint_rmsd_arr, "Ligand in joint frame")
     _fig.tight_layout()
     _fig
     return
