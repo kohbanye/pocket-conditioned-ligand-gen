@@ -123,7 +123,11 @@ def run(
 
 
 def summarize(df: pd.DataFrame) -> pd.DataFrame:
-    """Mean metrics per (model, modality, eval_scope) over successes."""
+    """Per (model, modality, eval_scope) stats over successful reconstructions.
+
+    Reports the **median** as the headline (reconstruction RMSD is heavy-tailed —
+    a few hard structures inflate the mean), plus the mean for reference.
+    """
     ok = df[df["ok"]].copy()
     if ok.empty:
         return ok
@@ -131,10 +135,15 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
     if "eval_scope" in ok.columns:
         ok["eval_scope"] = ok["eval_scope"].fillna("native")
         keys.append("eval_scope")
-    metric_cols = [
-        c for c in ("kabsch_rmsd", "rmsd", "tm_score", "lddt", "n_tokens", "n_atoms")
-        if c in ok.columns
-    ]
-    g = ok.groupby(keys)[metric_cols].mean(numeric_only=True).round(4)
-    counts = ok.groupby(keys).size().rename("n")
-    return g.join(counts).reset_index()
+    g = ok.groupby(keys)
+    out = {"n": g.size()}
+    if "kabsch_rmsd" in ok.columns:
+        out["kabsch_rmsd_median"] = g["kabsch_rmsd"].median()
+        out["kabsch_rmsd_mean"] = g["kabsch_rmsd"].mean()
+    for col in ("tm_score", "lddt"):
+        if col in ok.columns:
+            out[f"{col}_median"] = g[col].median()
+    for col in ("n_tokens", "n_atoms"):
+        if col in ok.columns:
+            out[col] = g[col].mean()
+    return pd.DataFrame(out).round(4).reset_index()

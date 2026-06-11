@@ -113,16 +113,21 @@ ESM3 / FoldToken は**常に全長タンパク質を再構成**する（各モ�
 
 - ✅ submodule 3 つ、uv コア環境、FoldToken 用 uv venv、CASP16 準備（303 複合体）、各モデルの重み。
 - ✅ **3 モデルすべて CASP16 でエンドツーエンド検証済み（H100 GPU、n=303）**。
-  ESM3/FoldToken4 は **全長(full)** と **ポケット残基限定(pocket)** の両方で集計:
+  再構成 RMSD は重い裾を持つ（少数の難しい構造が平均を押し上げる）ので **median を主指標**に:
 
-  | Model | modality | eval_scope | kabsch_rmsd (Å) | tm_score | lddt |
-  |-------|----------|-----------|-----------------|----------|------|
-  | ESM3 | protein_backbone | full | 3.51 | 0.88 | 0.93 |
-  | ESM3 | protein_backbone | pocket | 1.16 | 0.81 | 0.95 |
-  | FoldToken4 | protein_backbone | full | 2.64 | 0.93 | 0.76 |
-  | FoldToken4 | protein_backbone | pocket | 1.34 | 0.55 | 0.77 |
-  | Ours | protein_backbone | native (pocket) | **0.85** | 0.69 | 0.87 |
-  | Ours | ligand | native | **0.35** | — | — |
+  | Model | modality | eval_scope | kabsch_rmsd median (Å) | (mean) | tm med | lddt med |
+  |-------|----------|-----------|------------------------|--------|--------|----------|
+  | ESM3 | protein_backbone | full | **0.88** | 3.51 | 0.99 | 0.96 |
+  | ESM3 | protein_backbone | pocket | **0.36** | 1.16 | 0.93 | 0.98 |
+  | FoldToken4 | protein_backbone | full | 2.42 | 2.12 | 0.95 | 0.76 |
+  | FoldToken4 | protein_backbone | pocket | 1.53 | 1.37 | 0.54 | 0.73 |
+  | Ours | protein_backbone | native (pocket) | 0.86 | 0.85 | 0.73 | 0.87 |
+  | Ours | ligand | native | 0.36 | 0.35 | — | — |
 
-  （Kabsch 整列後の `kabsch_rmsd` が有効指標。生 `rmsd` は全長再構成の global frame の差で
-  大きく出る。full は残基数が多いほど整列が難しく RMSD が増え、TM-score は逆に長いほど高い。）
+  ESM3 の median 0.88Å(full)/0.36Å(pocket) は論文の <1Å と一致。
+  - **重要な修正**: FoldToken4 の upstream `reconstruct.py` は 32 件バッチ再構成で長さの異なる
+    構造を混ぜると再構成が壊れる（単体 1.8Å の構造がバッチで 15Å に）。`scripts/foldtoken_reconstruct_cli.py`
+    でバッチ=1（モデルは 1 回ロード）にして解消。N128 平均 6.4Å→1.8Å。
+  - **codebook**: FoldToken4 は `vq_space=12` で 2^12=4096 が上限（levels 5–12）。2^16 は FoldToken2 の話。
+    既定は level 12（ESM3 の 4096 と同等）。
+  - Kabsch 整列後の `kabsch_rmsd` が有効指標（生 `rmsd` は全長再構成の global frame 差で大きく出る）。

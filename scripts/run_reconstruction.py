@@ -58,7 +58,7 @@ def main() -> None:
         "metrics to the own model's pocket residues for a same-residue, "
         "non-OOD comparison; 'full' scores the whole protein.",
     )
-    p.add_argument("--foldtoken-level", type=int, default=8)
+    p.add_argument("--foldtoken-level", type=int, default=12)
     p.add_argument("--own-ckpt", type=Path, default=None)
     p.add_argument("--out", type=Path, default=paths.RESULTS_DIR / "casp16.parquet")
     args = p.parse_args()

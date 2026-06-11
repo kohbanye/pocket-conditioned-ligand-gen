@@ -27,7 +27,9 @@ class FoldTokenAdapter(ReconstructionModel):
     can_protein = True
     can_ligand = False
 
-    def __init__(self, level: int = 8, python: str | None = None, **_: object) -> None:
+    def __init__(self, level: int = 12, python: str | None = None, **_: object) -> None:
+        # FoldToken4's codebook caps at 2**vq_space = 2**12 = 4096 (levels 5-12);
+        # 12 is the finest and matches ESM3's 4096-entry structure codebook.
         self.level = level
         self.python = python or paths.FOLDTOKEN_PYTHON
 
@@ -53,9 +55,13 @@ class FoldTokenAdapter(ReconstructionModel):
         for s in samples:
             shutil.copy(s.protein_pdb, in_dir / f"{s.sample_id}.pdb")
 
+        # Use our batch-of-1 driver (upstream reconstruct.py corrupts large
+        # length-heterogeneous batches); it loads the model once and writes the
+        # same {title}_pred.pdb / vqids.json layout.
+        cli = paths.REPO_ROOT / "scripts" / "foldtoken_reconstruct_cli.py"
         cmd = [
-            self.python,
-            "foldtoken/reconstruct.py",
+            self.python, str(cli),
+            "--workdir", str(paths.FOLDTOKEN_REPO),
             "--path_in", str(in_dir),
             "--path_out", str(out_base),
             "--config", str(paths.FOLDTOKEN_CONFIG),

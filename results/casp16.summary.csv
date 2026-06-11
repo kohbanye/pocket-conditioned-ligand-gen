@@ -1,7 +1,7 @@
-model,modality,eval_scope,kabsch_rmsd,rmsd,tm_score,lddt,n_tokens,n_atoms,n
-esm3,protein_backbone,full,3.5089,42.148,0.8759,0.9319,730.6271,730.6271,303
-esm3,protein_backbone,pocket,1.1595,37.7864,0.811,0.9519,730.6271,29.2475,303
-foldtoken,protein_backbone,full,2.6437,69.9056,0.9286,0.758,730.6271,730.6271,303
-foldtoken,protein_backbone,pocket,1.3441,52.9095,0.5464,0.7742,730.6271,29.2475,303
-own_vqvae,ligand,native,0.3489,0.4312,,,27.4719,27.4719,303
-own_vqvae,protein_backbone,native,0.8507,0.897,0.6946,0.8673,,29.2475,303
+model,modality,eval_scope,n,kabsch_rmsd_median,kabsch_rmsd_mean,tm_score_median,lddt_median,n_tokens,n_atoms
+esm3,protein_backbone,full,303,0.8812,3.5089,0.9922,0.9567,730.6271,730.6271
+esm3,protein_backbone,pocket,303,0.3584,1.1595,0.9296,0.9804,730.6271,29.2475
+foldtoken,protein_backbone,full,303,2.4182,2.1168,0.9456,0.7598,730.6271,730.6271
+foldtoken,protein_backbone,pocket,303,1.5299,1.3676,0.5433,0.7287,730.6271,29.2475
+own_vqvae,ligand,native,303,0.3557,0.3489,,,27.4719,27.4719
+own_vqvae,protein_backbone,native,303,0.8637,0.8507,0.732,0.8655,,29.2475
