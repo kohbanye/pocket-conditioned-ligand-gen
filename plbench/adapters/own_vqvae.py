@@ -134,28 +134,38 @@ class OwnVQVAEAdapter(ReconstructionModel):
         bb_ref = read_backbone(rec.orig_pocket_pdb)
         bb_rec = read_backbone(rec.recon_pdb)
         n = min(len(bb_ref), len(bb_rec))
+        ca_ref = bb_ref.ca[:n].astype(np.float64)
+        ca_rec = bb_rec.ca[:n].astype(np.float64)
         if n > 0:
             modalities.append(
                 ModalityRecon(
                     modality="protein_backbone",
-                    ref=bb_ref.ca[:n].astype(np.float64),
-                    rec=bb_rec.ca[:n].astype(np.float64),
-                    atom_kind="CA",
-                    n_residues=int(n),
+                    ref=ca_ref, rec=ca_rec, atom_kind="CA", n_residues=int(n),
                 )
             )
 
         _, lig_ref = read_hetatm(rec.orig_pocket_pdb)
         _, lig_rec = read_hetatm(rec.recon_pdb)
         m = min(len(lig_ref), len(lig_rec))
+        lig_ref, lig_rec = lig_ref[:m].astype(np.float64), lig_rec[:m].astype(np.float64)
         if m > 0:
             modalities.append(
                 ModalityRecon(
-                    modality="ligand",
-                    ref=lig_ref[:m].astype(np.float64),
-                    rec=lig_rec[:m].astype(np.float64),
-                    atom_kind="heavy",
-                    n_tokens=int(m),
+                    modality="ligand", ref=lig_ref, rec=lig_rec,
+                    atom_kind="heavy", n_tokens=int(m),
+                )
+            )
+
+        # Whole protein-ligand complex aligned together (pocket CA + ligand heavy
+        # in one Kabsch fit). Unlike the separate rows, this also penalises drift
+        # in the ligand's pose relative to the pocket.
+        if n > 0 and m > 0:
+            modalities.append(
+                ModalityRecon(
+                    modality="complex",
+                    ref=np.vstack([ca_ref, lig_ref]),
+                    rec=np.vstack([ca_rec, lig_rec]),
+                    atom_kind="CA+heavy",
                 )
             )
 

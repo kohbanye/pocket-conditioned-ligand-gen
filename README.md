@@ -124,12 +124,15 @@ ESM3 / FoldToken は**常に全長タンパク質を再構成**する（各モ�
   | FoldToken4 | protein_backbone | full | 2.12 ± 0.58 | 0.95 ± 0.02 | 0.79 ± 0.07 | 731 |
   | FoldToken4 | protein_backbone | pocket | 1.37 ± 0.45 | 0.53 ± 0.16 | 0.77 ± 0.09 | 731 |
   | Ours | protein_backbone | native (pocket) | 0.85 ± 0.15 | 0.69 ± 0.13 | 0.87 ± 0.03 | — |
+  | Ours | **complex** (pocket CA + ligand, joint align) | native | **0.69 ± 0.10** | — | — | — |
   | **Ours** | **ligand** | native | **0.35 ± 0.10** | — | — | 27 |
   | **Token-Mol** | **ligand** | native | **1.60 ± 0.82** | — | — | 6 |
 
   ESM3 の median は 0.88Å(full)/0.36Å(pocket) で論文の <1Å と一致（mean は外れ値で大）。
   **リガンド**: Ours（座標 VQ-VAE, 0.35Å, ~27 token/分子）は Token-Mol（torsion, 1.60Å, ~6 token/分子）
   より精密だが、Token-Mol は遥かにコンパクト——精度と圧縮率のトレードオフ。
+  **complex** はポケット背骨(CA)とリガンドを連結して 1 回の Kabsch で重ねた RMSD で、別々に
+  align した場合と違いリガンドのポケットに対する相対配置のズレも捉える（Ours 0.69Å）。
   - **重要な修正**: FoldToken4 の upstream `reconstruct.py` は 32 件バッチ再構成で長さの異なる
     構造を混ぜると再構成が壊れる（単体 1.8Å の構造がバッチで 15Å に）。`scripts/foldtoken_reconstruct_cli.py`
     でバッチ=1（モデルは 1 回ロード）にして解消。N128 平均 6.4Å→1.8Å。

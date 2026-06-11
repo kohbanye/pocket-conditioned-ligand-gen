@@ -100,16 +100,22 @@ def _(df, mo):
 
 @app.cell
 def _(df, mo, plt, sns):
-    # Ligand reconstruction — Ours (coordinate VQ-VAE) vs Token-Mol (torsion).
-    _lig = df[(df["ok"]) & (df["modality"] == "ligand")].copy()
-    mo.stop(_lig.empty, mo.md("_No ligand reconstructions._"))
-    _fig2, _ax2 = plt.subplots(1, 2, figsize=(11, 4))
-    _lorder = [m for m in ["Ours", "Token-Mol"] if m in set(_lig["model_disp"])]
-    sns.boxplot(data=_lig, x="model_disp", y="kabsch_rmsd", order=_lorder, ax=_ax2[0], showfliers=False)
-    _ax2[0].set_title("ligand heavy-atom RMSD (Å)")
+    # Ligand & complex reconstruction. "complex" = Ours' pocket CA + ligand
+    # aligned jointly (penalises ligand-pose drift relative to the pocket).
+    _lc = df[(df["ok"]) & (df["modality"].isin(["ligand", "complex"]))].copy()
+    mo.stop(_lc.empty, mo.md("_No ligand/complex reconstructions._"))
+    _lc["label"] = _lc["model_disp"] + " (" + _lc["modality"] + ")"
+    _lorder = [
+        x for x in ["Ours (ligand)", "Ours (complex)", "Token-Mol (ligand)"]
+        if x in set(_lc["label"])
+    ]
+    _fig2, _ax2 = plt.subplots(1, 2, figsize=(12, 4))
+    sns.boxplot(data=_lc, x="label", y="kabsch_rmsd", order=_lorder, ax=_ax2[0], showfliers=False)
+    _ax2[0].set_title("ligand / complex heavy-atom RMSD (Å)")
     _ax2[0].set_xlabel("")
-    sns.histplot(data=_lig, x="kabsch_rmsd", hue="model_disp", hue_order=_lorder, bins=30, ax=_ax2[1])
-    _ax2[1].set_title("ligand RMSD distribution")
+    _ax2[0].tick_params(axis="x", rotation=15)
+    sns.histplot(data=_lc, x="kabsch_rmsd", hue="label", hue_order=_lorder, bins=30, ax=_ax2[1])
+    _ax2[1].set_title("RMSD distribution")
     _fig2.tight_layout()
     _fig2
     return
