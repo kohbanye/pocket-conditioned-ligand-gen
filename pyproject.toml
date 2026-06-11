@@ -42,6 +42,9 @@ esm3 = [
 dev = [
     "ruff>=0.6",
     "pytest>=8.0",
+    "nbformat>=5.10.4",
+    "nbconvert>=7.17.1",
+    "playwright>=1.60.0",
 ]
 
 [tool.setuptools.packages.find]

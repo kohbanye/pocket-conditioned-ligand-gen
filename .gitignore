@@ -20,6 +20,7 @@ __pycache__/
 # Aggregated result tables are small enough to keep; ignore only bulky dumps.
 /results/**/*.pdb
 /results/**/*.npz
+/results/**/*.pdf
 
 # Notebook render artifacts
 notebooks/*.html
