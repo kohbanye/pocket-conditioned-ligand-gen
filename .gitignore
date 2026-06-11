@@ -21,6 +21,7 @@ __pycache__/
 /results/**/*.pdb
 /results/**/*.npz
 /results/**/*.pdf
+/results/_*
 
 # Notebook render artifacts
 notebooks/*.html

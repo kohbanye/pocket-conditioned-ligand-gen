@@ -8,6 +8,7 @@ _REGISTRY = {
     "esm3": ("plbench.adapters.esm3", "ESM3Adapter"),
     "foldtoken": ("plbench.adapters.foldtoken", "FoldTokenAdapter"),
     "own_vqvae": ("plbench.adapters.own_vqvae", "OwnVQVAEAdapter"),
+    "token_mol": ("plbench.adapters.token_mol", "TokenMolAdapter"),
 }
 
 

@@ -8,7 +8,8 @@
 |--------|------|-----------|-----------|
 | **ESM3** structure tokenizer | protein structure VQ-VAE | タンパク質背骨 (N, CA, C) | HuggingFace `biohub/esm3-sm-open-v1`（公開・非ゲート、structure enc/dec のみ ~1.3GB） |
 | **FoldToken4** | protein structure VQ-VAE | タンパク質背骨 | Zenodo [13901445](https://zenodo.org/records/13901445)（`model_zoom.zip`、取得済み） |
-| **pocket-ligand VQ-VAE**（自作） | protein pocket + ligand VQ-VAE | ポケット背骨 **＋** リガンド重原子 | 別ディレクトリの作業コピーから symlink（`weights/`） |
+| **Token-Mol 1.0** | ligand torsion tokenizer | リガンド（SMILES + 回転結合の torsion） | **重み不要**（再構成はトークナイザ往復のみ） |
+| **pocket-ligand VQ-VAE**（自作, Ours） | protein pocket + ligand VQ-VAE | ポケット背骨 **＋** リガンド重原子 | 別ディレクトリの作業コピーから symlink（`weights/`） |
 
 「再構成」とは、構造を離散トークンへ encode → そこから decode して 3D 構造を復元する
 往復処理。復元構造と入力構造の **RMSD / TM-score / lDDT** で品質を測る。
@@ -23,10 +24,11 @@ protein-ligand-3d-reconstruction-bench/
 ├── third_party/                         # git submodules（ソースのみ）
 │   ├── pocket-conditioned-ligand-gen/   # 自作モデル
 │   ├── esm/                             # ESM3 (evolutionaryscale/esm)
-│   └── FoldToken_open/                  # FoldToken4/5 (A4Bio/FoldToken_open)
+│   ├── FoldToken_open/                  # FoldToken4/5 (A4Bio/FoldToken_open)
+│   └── token-mol/                       # Token-Mol 1.0 (jkwang93/token-mol)
 ├── plbench/                             # ベンチ本体パッケージ
 │   ├── adapters/                        # 各モデルの再構成アダプタ
-│   │   ├── base.py · esm3.py · foldtoken.py · own_vqvae.py
+│   │   ├── base.py · esm3.py · foldtoken.py · own_vqvae.py · token_mol.py
 │   ├── datasets.py                      # casp16 / pdb-folder ローダ
 │   ├── metrics.py                       # RMSD / TM-score / lDDT
 │   ├── structio.py                      # PDB / SDF 入出力
@@ -112,19 +114,22 @@ ESM3 / FoldToken は**常に全長タンパク質を再構成**する（各モ�
 ## 状態（このコミット時点）
 
 - ✅ submodule 3 つ、uv コア環境、FoldToken 用 uv venv、CASP16 準備（303 複合体）、各モデルの重み。
-- ✅ **3 モデルすべて CASP16 でエンドツーエンド検証済み（H100 GPU、n=303）**。
-  再構成 RMSD は重い裾を持つ（少数の難しい構造が平均を押し上げる）ので **median を主指標**に:
+- ✅ **4 モデルすべて CASP16 でエンドツーエンド検証済み（H100 GPU、n=303）**。
+  集計は **mean ± std**（再構成 RMSD は重い裾を持つので median も併記推奨）:
 
-  | Model | modality | eval_scope | kabsch_rmsd median (Å) | (mean) | tm med | lddt med |
-  |-------|----------|-----------|------------------------|--------|--------|----------|
-  | ESM3 | protein_backbone | full | **0.88** | 3.51 | 0.99 | 0.96 |
-  | ESM3 | protein_backbone | pocket | **0.36** | 1.16 | 0.93 | 0.98 |
-  | FoldToken4 | protein_backbone | full | 2.42 | 2.12 | 0.95 | 0.76 |
-  | FoldToken4 | protein_backbone | pocket | 1.53 | 1.37 | 0.54 | 0.73 |
-  | Ours | protein_backbone | native (pocket) | 0.86 | 0.85 | 0.73 | 0.87 |
-  | Ours | ligand | native | 0.36 | 0.35 | — | — |
+  | Model | modality | eval_scope | kabsch_rmsd (Å) | tm_score | lddt | n_tokens |
+  |-------|----------|-----------|-----------------|----------|------|----------|
+  | ESM3 | protein_backbone | full | 3.51 ± 6.11 | 0.88 ± 0.25 | 0.93 ± 0.06 | 731 |
+  | ESM3 | protein_backbone | pocket | 1.16 ± 2.15 | 0.81 ± 0.25 | 0.95 ± 0.07 | 731 |
+  | FoldToken4 | protein_backbone | full | 2.12 ± 0.58 | 0.95 ± 0.02 | 0.79 ± 0.07 | 731 |
+  | FoldToken4 | protein_backbone | pocket | 1.37 ± 0.45 | 0.53 ± 0.16 | 0.77 ± 0.09 | 731 |
+  | Ours | protein_backbone | native (pocket) | 0.85 ± 0.15 | 0.69 ± 0.13 | 0.87 ± 0.03 | — |
+  | **Ours** | **ligand** | native | **0.35 ± 0.10** | — | — | 27 |
+  | **Token-Mol** | **ligand** | native | **1.60 ± 0.82** | — | — | 6 |
 
-  ESM3 の median 0.88Å(full)/0.36Å(pocket) は論文の <1Å と一致。
+  ESM3 の median は 0.88Å(full)/0.36Å(pocket) で論文の <1Å と一致（mean は外れ値で大）。
+  **リガンド**: Ours（座標 VQ-VAE, 0.35Å, ~27 token/分子）は Token-Mol（torsion, 1.60Å, ~6 token/分子）
+  より精密だが、Token-Mol は遥かにコンパクト——精度と圧縮率のトレードオフ。
   - **重要な修正**: FoldToken4 の upstream `reconstruct.py` は 32 件バッチ再構成で長さの異なる
     構造を混ぜると再構成が壊れる（単体 1.8Å の構造がバッチで 15Å に）。`scripts/foldtoken_reconstruct_cli.py`
     でバッチ=1（モデルは 1 回ロード）にして解消。N128 平均 6.4Å→1.8Å。

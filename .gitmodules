@@ -7,3 +7,6 @@
 [submodule "third_party/FoldToken_open"]
 	path = third_party/FoldToken_open
 	url = https://github.com/A4Bio/FoldToken_open.git
+[submodule "third_party/token-mol"]
+	path = third_party/token-mol
+	url = https://github.com/jkwang93/token-mol

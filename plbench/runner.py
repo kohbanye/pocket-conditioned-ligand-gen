@@ -122,11 +122,12 @@ def run(
     return pd.DataFrame(rows)
 
 
-def summarize(df: pd.DataFrame) -> pd.DataFrame:
+def summarize(df: pd.DataFrame, *, fmt: bool = True) -> pd.DataFrame:
     """Per (model, modality, eval_scope) stats over successful reconstructions.
 
-    Reports the **median** as the headline (reconstruction RMSD is heavy-tailed —
-    a few hard structures inflate the mean), plus the mean for reference.
+    With ``fmt=True`` (default) the metric columns are ``"mean ± std"`` strings
+    for direct display; with ``fmt=False`` numeric ``*_mean`` / ``*_std`` columns
+    are returned for plotting/processing.
     """
     ok = df[df["ok"]].copy()
     if ok.empty:
@@ -136,14 +137,20 @@ def summarize(df: pd.DataFrame) -> pd.DataFrame:
         ok["eval_scope"] = ok["eval_scope"].fillna("native")
         keys.append("eval_scope")
     g = ok.groupby(keys)
-    out = {"n": g.size()}
-    if "kabsch_rmsd" in ok.columns:
-        out["kabsch_rmsd_median"] = g["kabsch_rmsd"].median()
-        out["kabsch_rmsd_mean"] = g["kabsch_rmsd"].mean()
-    for col in ("tm_score", "lddt"):
-        if col in ok.columns:
-            out[f"{col}_median"] = g[col].median()
-    for col in ("n_tokens", "n_atoms"):
-        if col in ok.columns:
-            out[col] = g[col].mean()
-    return pd.DataFrame(out).round(4).reset_index()
+    metric_cols = [c for c in ("kabsch_rmsd", "tm_score", "lddt") if c in ok.columns]
+
+    out: dict = {"n": g.size()}
+    for c in metric_cols:
+        mean, std = g[c].mean(), g[c].std()
+        if fmt:
+            out[c] = [
+                "—" if pd.isna(m) else f"{m:.2f} ± {0.0 if pd.isna(s) else s:.2f}"
+                for m, s in zip(mean, std, strict=False)
+            ]
+        else:
+            out[f"{c}_mean"] = mean.round(4)
+            out[f"{c}_std"] = std.round(4)
+    for c in ("n_tokens", "n_atoms"):
+        if c in ok.columns:
+            out[c] = g[c].mean().round(1)
+    return pd.DataFrame(out).reset_index()

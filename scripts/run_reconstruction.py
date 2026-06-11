@@ -44,7 +44,10 @@ def pocket_keys_from_own(own: OwnVQVAEAdapter) -> dict[str, set]:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--models", nargs="+", default=["own_vqvae", "esm3", "foldtoken"])
+    p.add_argument(
+        "--models", nargs="+",
+        default=["own_vqvae", "esm3", "foldtoken", "token_mol"],
+    )
     p.add_argument("--dataset", default="casp16")
     p.add_argument("--pdb-dir", type=Path, default=None)
     p.add_argument("--limit", type=int, default=None)

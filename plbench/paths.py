@@ -15,6 +15,7 @@ THIRD_PARTY = REPO_ROOT / "third_party"
 ESM_REPO = THIRD_PARTY / "esm"
 FOLDTOKEN_REPO = THIRD_PARTY / "FoldToken_open"
 OWN_MODEL_REPO = THIRD_PARTY / "pocket-conditioned-ligand-gen"
+TOKEN_MOL_REPO = THIRD_PARTY / "token-mol"
 
 WEIGHTS_DIR = Path(os.environ.get("PLBENCH_WEIGHTS_DIR", REPO_ROOT / "weights"))
 DATA_DIR = Path(os.environ.get("PLBENCH_DATA_DIR", REPO_ROOT / "data"))

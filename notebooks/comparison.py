@@ -44,8 +44,9 @@ def _(mo, paths):
 def _(file_dropdown, mo, pd):
     mo.stop(not file_dropdown.value, mo.md("**No results yet.** Run `scripts/run_reconstruction.py` first."))
     # Display names used in every legend / axis / table.
-    DISPLAY = {"own_vqvae": "Ours", "esm3": "ESM3", "foldtoken": "FoldToken4"}
-    ORDER = ["Ours", "ESM3", "FoldToken4"]
+    DISPLAY = {"own_vqvae": "Ours", "esm3": "ESM3", "foldtoken": "FoldToken4",
+               "token_mol": "Token-Mol"}
+    ORDER = ["Ours", "ESM3", "FoldToken4", "Token-Mol"]
     df = pd.read_parquet(file_dropdown.value)
     df["model_disp"] = df["model"].map(DISPLAY).fillna(df["model"])
     mo.md(f"Loaded **{len(df)}** rows, models: {sorted(df['model'].unique())}")
@@ -98,13 +99,19 @@ def _(df, mo):
 
 
 @app.cell
-def _(df, mo, sns):
-    # Ligand reconstruction (Ours only).
-    _lig = df[(df["ok"]) & (df["modality"] == "ligand")]
-    mo.stop(_lig.empty, mo.md("_No ligand reconstructions (Ours only)._"))
-    _lax = sns.histplot(data=_lig, x="kabsch_rmsd", hue="model_disp", bins=30)
-    _lax.set_title("ligand heavy-atom reconstruction RMSD (Å) — Ours")
-    _lax.figure
+def _(df, mo, plt, sns):
+    # Ligand reconstruction — Ours (coordinate VQ-VAE) vs Token-Mol (torsion).
+    _lig = df[(df["ok"]) & (df["modality"] == "ligand")].copy()
+    mo.stop(_lig.empty, mo.md("_No ligand reconstructions._"))
+    _fig2, _ax2 = plt.subplots(1, 2, figsize=(11, 4))
+    _lorder = [m for m in ["Ours", "Token-Mol"] if m in set(_lig["model_disp"])]
+    sns.boxplot(data=_lig, x="model_disp", y="kabsch_rmsd", order=_lorder, ax=_ax2[0], showfliers=False)
+    _ax2[0].set_title("ligand heavy-atom RMSD (Å)")
+    _ax2[0].set_xlabel("")
+    sns.histplot(data=_lig, x="kabsch_rmsd", hue="model_disp", hue_order=_lorder, bins=30, ax=_ax2[1])
+    _ax2[1].set_title("ligand RMSD distribution")
+    _fig2.tight_layout()
+    _fig2
     return
 
 
