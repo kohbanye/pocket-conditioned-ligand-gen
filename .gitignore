@@ -218,3 +218,6 @@ wget-log
 *.err
 outputs/
 .codex
+
+# Rendered notebook exports
+notebooks/*.html

@@ -216,7 +216,22 @@ def main() -> None:  # noqa: C901, PLR0915
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-new-tokens", type=int, default=160)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--empty-pocket",
+        action="store_true",
+        help="Generate ligands UNconditionally (prompt <bos><p></p><l>), the "
+        "native mode of the GEOM-pretrained ligand-only LM. Shape metrics are "
+        "frame-invariant so they stay comparable; centroid_dist is not "
+        "meaningful for these (the ligand is not placed in the pocket).",
+    )
+    parser.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Human label stored in the npz (defaults to the checkpoint stem).",
+    )
     args = parser.parse_args()
+    label = args.label or Path(args.lm_ckpt).stem
 
     torch.manual_seed(args.seed)
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -268,7 +283,10 @@ def main() -> None:  # noqa: C901, PLR0915
         gt_true = _build_rdkit_mol(mol["atoms"], mol["bonds"]) is not None
         gt.append(_metrics(gt_elems, gt_coords, centroid, ref_valid=gt_true))
 
-        prompt = [BOS_ID, P_OPEN_ID, *(vocab.protein_offset + c for c in prot_codes), P_CLOSE_ID, L_OPEN_ID]
+        if args.empty_pocket:
+            prompt = [BOS_ID, P_OPEN_ID, P_CLOSE_ID, L_OPEN_ID]
+        else:
+            prompt = [BOS_ID, P_OPEN_ID, *(vocab.protein_offset + c for c in prot_codes), P_CLOSE_ID, L_OPEN_ID]
         prompt_ids = torch.tensor([prompt], device=device).repeat(args.num_samples, 1)
         with torch.no_grad():
             out = model.generate(
@@ -320,6 +338,8 @@ def main() -> None:  # noqa: C901, PLR0915
         num_gen=len(gen),
         num_gt=len(gt),
         lm_ckpt=str(args.lm_ckpt),
+        label=label,
+        empty_pocket=bool(args.empty_pocket),
         methods=np.array(VALIDITY_METHODS, dtype=object),
         **{f"gen_{k}": v for k, v in gp.items()},
         **{f"gt_{k}": v for k, v in tp.items()},

@@ -175,6 +175,11 @@ LIGAND_RECON_HEADS: list[tuple[str, str, int]] = [
     ("aromatic", "categorical", 2),
     ("ring", "categorical", len(LIGAND_RING_VOCAB)),
     ("numH", "categorical", len(LIGAND_NUMH_VOCAB)),
+    # Stage 1: decode the K-NN relative offsets too (4 neighbours x spherical).
+    # Currently these are encoder hints only; decoding them forces each code to
+    # carry local geometry so reconstruction can solve clash-free coordinates
+    # (per-atom absolute coords alone are pairwise-blind -> frequent clashes).
+    ("knn_offsets", "continuous", 4 * K_NEIGHBORS),  # 16
 ]
 
 PROTEIN_RECON_HEADS: list[tuple[str, str, int]] = [

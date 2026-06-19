@@ -294,8 +294,7 @@ class TransformerVQVAE(nn.Module):
         z_flat = z.reshape(b * seq_len, -1).float()
         _, indices_flat, _, _ = self.codebook(z_flat)
         indices = indices_flat.view(b, seq_len)
-        indices = indices.masked_fill(~mask, -1)
-        return indices
+        return indices.masked_fill(~mask, -1)
 
     def decode_to_outputs(self, indices: Tensor) -> dict[str, Tensor]:
         """Decode ``(N,)`` codebook indices into raw recon-head outputs.
@@ -352,7 +351,7 @@ class TransformerVQVAE(nn.Module):
         sphi, cphi = project_unit_circle(reshaped[..., 2], reshaped[..., 3])
         return r, theta, sphi, cphi
 
-    def _compute_recon_loss(
+    def _compute_recon_loss(  # noqa: PLR0915
         self,
         x: Tensor,
         recon_outputs: dict[str, Tensor],
@@ -404,6 +403,24 @@ class TransformerVQVAE(nn.Module):
             if mask.any()
             else x.new_zeros(())
         )
+
+        # Extra continuous head: K-NN relative offsets (Stage 1). Same spherical
+        # → Cartesian MSE as coord, over the 4 neighbour sub-vectors. Present for
+        # the ligand only (protein has no such head).
+        if "knn_offsets" in recon_outputs:
+            ko = f["knn_offsets"]
+            ko_mean = self._desc_mean[ko.start : ko.end].to(x.dtype)
+            ko_std = self._desc_std[ko.start : ko.end].to(x.dtype)
+            ko_target = x[..., ko.start : ko.end] * ko_std + ko_mean
+            ko_pred = recon_outputs["knn_offsets"] * ko_std + ko_mean
+            kr_t, kth_t, ks_t, kc_t = self._split_coord_head(ko_target)
+            kr_p, kth_p, ks_p, kc_p = self._split_coord_head(ko_pred)
+            kxyz_t = spherical_to_cartesian_batched(kr_t, kth_t, ks_t, kc_t)
+            kxyz_p = spherical_to_cartesian_batched(kr_p, kth_p, ks_p, kc_p)
+            ko_diff = (kxyz_t - kxyz_p).pow(2).sum(dim=-1).mean(dim=-1)  # (B, L)
+            head_losses["knn_offsets"] = (
+                ko_diff[mask].mean() if mask.any() else x.new_zeros(())
+            )
 
         # Categorical heads: target indices live in the same slot as input.
         for name, kind, _dim in self.recon_heads:

@@ -7,6 +7,16 @@ match the VQ-VAE training stack.
 Run on TSUBAME node_f (4x H100, DDP)::
 
     uv run python scripts/train_lm.py --token-dir data/lm_tokens --run-name lm_v1
+
+Two-stage curriculum: pretrain on GEOM, then fine-tune on CrossDocked by
+warm-starting the LM weights (a fresh optimizer + LR schedule, *not* a resume)::
+
+    # 1) pretrain (ligand-only GEOM tokens)
+    uv run python scripts/train_lm.py --token-dir data/lm_tokens_geom \
+        --run-name lm_pretrain --max-epochs 3
+    # 2) fine-tune (CrossDocked complexes) from the pretrained weights
+    uv run python scripts/train_lm.py --token-dir data/lm_tokens \
+        --run-name lm_finetune --init-from <pretrain checkpoint>.ckpt
 """
 
 from __future__ import annotations
@@ -35,6 +45,14 @@ def main() -> None:
     parser.add_argument("--block-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--accumulate", type=int, default=None)
+    parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="Warm-start LM weights from this checkpoint (e.g. a GEOM-pretrained "
+        "run). Loads weights only -- a fresh optimizer + LR schedule, NOT a "
+        "training resume. The model config (vocab/dims) must match.",
+    )
     args = parser.parse_args()
 
     config = LMTrainingConfig()
@@ -55,6 +73,16 @@ def main() -> None:
 
     dm = LMTokenDataModule(config)
     module = LigandLMModule(config)
+    if args.init_from is not None:
+        ckpt = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        state_dict = ckpt.get("state_dict", ckpt)
+        missing, unexpected = module.load_state_dict(state_dict, strict=False)
+        logging.getLogger(__name__).info(
+            "Warm-started weights from %s (missing=%d, unexpected=%d)",
+            args.init_from,
+            len(missing),
+            len(unexpected),
+        )
 
     trainer = L.Trainer(
         max_epochs=config.max_epochs,

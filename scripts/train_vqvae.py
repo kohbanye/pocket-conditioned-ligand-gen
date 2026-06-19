@@ -51,6 +51,7 @@ def main() -> None:
         default=None,
         help="Override the protein VQ-VAE codebook size.",
     )
+    parser.add_argument("--max-epochs", type=int, default=None)
     args = parser.parse_args()
 
     config = VQVAETrainingConfig()
@@ -60,6 +61,8 @@ def main() -> None:
         config.ligand.codebook_size = args.ligand_codebook_size
     if args.protein_codebook_size is not None:
         config.protein.codebook_size = args.protein_codebook_size
+    if args.max_epochs is not None:
+        config.max_epochs = args.max_epochs
 
     hub_config = None
     if args.from_hub:
@@ -69,8 +72,19 @@ def main() -> None:
         if args.source_types is not None:
             hub_config.source_types = args.source_types
 
-        hub_dm = HubCrossDockedDataModule(hub_config)
-        hub_dm.prepare_data()
+        # Only download + extract raw data if the descriptor cache is missing.
+        # When the cache already exists, the manifest (for the fold split) and
+        # the shards are all we need — extracting the ligand tars would create
+        # ~2.5M files and blow the inode quota.
+        cache_dir = args.cache_dir or (data_config.data_dir / "descriptor_cache")
+        if not (Path(cache_dir) / "shard_metadata.pt").exists():
+            hub_dm = HubCrossDockedDataModule(hub_config)
+            hub_dm.prepare_data()
+        else:
+            logging.getLogger(__name__).info(
+                "Descriptor cache exists at %s; skipping raw-data extraction.",
+                cache_dir,
+            )
 
     # Enable TF32 for A100/H100 (free ~3x speedup for float32 matmuls).
     torch.set_float32_matmul_precision("high")

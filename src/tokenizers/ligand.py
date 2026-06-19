@@ -36,7 +36,12 @@ from src.tokenizers.descriptor_schema import (
     LIGAND_RING_NONE_IDX,
     fields_by_name,
 )
-from src.tokenizers.geometry import cartesian_to_spherical, spherical_to_cartesian
+from src.tokenizers.geometry import (
+    cartesian_to_spherical,
+    cartesian_to_spherical_np,
+    spherical_to_cartesian,
+    spherical_to_cartesian_np,
+)
 from src.tokenizers.vqvae import TransformerVQVAE as LigandVQVAE  # noqa: TC001
 
 if TYPE_CHECKING:
@@ -312,6 +317,52 @@ def _knn_offsets_and_elements(
     return offsets, nbr_elements
 
 
+def rotate_ligand_descriptor(
+    descriptor: np.ndarray,
+    rotation: np.ndarray,
+) -> np.ndarray:
+    """Re-express a ligand descriptor under an extra frame rotation ``R``.
+
+    The orientation-dependent slots are the absolute ``coord`` spherical
+    ``(r, θ, sin φ, cos φ)`` and each of the K ``knn_offsets`` spherical
+    blocks; everything else (radii are folded into those blocks, plus all
+    categorical / KNN-element slots) is rotation-invariant and copied through.
+
+    This is the cheap augmentation primitive used by GEOM pretraining: compute
+    the descriptor **once** (identity frame), then synthesise each random
+    orientation by rotating the stored spherical slots instead of re-running
+    the RDKit feature extraction K times. Equivalent to calling
+    :meth:`LigandDescriptor.compute` with ``pocket_frame=(centroid, R @ R0)``
+    (verified in tests).
+
+    Args:
+        descriptor: ``(N, 30)`` descriptor produced by ``compute``.
+        rotation: ``(3, 3)`` rotation matrix applied as ``p' = p @ R.T`` to
+            every Cartesian (canonical) position, matching the convention in
+            :meth:`LigandDescriptor.compute`.
+
+    Returns:
+        A new ``(N, 30)`` float32 descriptor; the input is not modified.
+    """
+    if descriptor.shape[0] == 0:
+        return descriptor.copy()
+
+    out = descriptor.astype(np.float64, copy=True)
+    f = fields_by_name(LIGAND_LAYOUT)
+
+    def _rotate_block(start: int) -> None:
+        sph = out[:, start : start + 4]
+        cart = spherical_to_cartesian_np(sph) @ rotation.T
+        out[:, start : start + 4] = cartesian_to_spherical_np(cart)
+
+    _rotate_block(f["coord"].start)
+    knn = f["knn_offsets"]
+    for k in range(knn.length // 4):
+        _rotate_block(knn.start + 4 * k)
+
+    return out.astype(np.float32)
+
+
 # ---------------------------------------------------------------------------
 # Descriptor class
 # ---------------------------------------------------------------------------
@@ -449,6 +500,74 @@ class LigandDescriptor:
                 float(r), float(theta), float(sphi), float(cphi)
             )
         return canonical @ rotation + centroid
+
+
+def solve_ligand_coords(  # noqa: PLR0913
+    coord_sph: np.ndarray,  # (N, 4)  decoded absolute spherical (canonical frame)
+    knn_offsets_sph: np.ndarray,  # (N, 4*K)  decoded K-NN relative spherical offsets
+    pocket_frame: tuple[np.ndarray, np.ndarray],
+    *,
+    k: int = K_NEIGHBORS,
+    n_steps: int = 50,
+    lr: float = 0.05,
+    d_floor: float = 1.1,
+    w_abs: float = 1.0,
+    w_rel: float = 5.0,
+    w_clash: float = 1.0,
+) -> np.ndarray:
+    """Reconstruct global Cartesian coords by solving a small geometry problem.
+
+    Instead of trusting the per-atom absolute coord head alone (pairwise-blind →
+    frequent clashes), we minimise a weighted objective over atom positions ``X``:
+
+    - ``w_abs``   * |X - X_abs|^2                  weak global anchor (placement)
+    - ``w_rel``   * |(X[nbr] - X) - offset_pred|^2 strong local geometry
+    - ``w_clash`` * relu(d_floor - |X_i - X_j|)^2  hard no-overlap
+
+    Neighbour correspondence ``nbr`` is the K nearest atoms in the decoded
+    absolute coords (matching how the descriptor's K-NN were built). The solve is
+    a few Adam steps; weights/steps are decode-time knobs (no retraining needed).
+    """
+    centroid, rotation = pocket_frame
+    n = coord_sph.shape[0]
+    if n == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    abs_cart = spherical_to_cartesian_np(coord_sph)  # (N, 3) canonical
+    if n <= 2:  # noqa: PLR2004
+        return abs_cart @ rotation + centroid
+
+    off = knn_offsets_sph.reshape(n, -1, 4)[:, :k, :]
+    off_cart = np.stack(
+        [spherical_to_cartesian_np(off[:, j, :]) for j in range(off.shape[1])],
+        axis=1,
+    )  # (N, k, 3)
+
+    dist = np.linalg.norm(abs_cart[:, None, :] - abs_cart[None, :, :], axis=-1)
+    np.fill_diagonal(dist, np.inf)
+    take = min(k, n - 1)
+    nbr = np.argsort(dist, axis=1)[:, :take]  # (N, take)
+
+    a = torch.tensor(abs_cart, dtype=torch.float32)
+    off_t = torch.tensor(off_cart[:, :take, :], dtype=torch.float32)  # (N, take, 3)
+    nbr_t = torch.tensor(nbr, dtype=torch.long)
+    offdiag = ~torch.eye(n, dtype=torch.bool)
+    # Re-enable grad: this optimisation runs inside ``_decode_ligand``'s
+    # ``@torch.no_grad()`` context, but the solve itself needs autograd.
+    with torch.enable_grad():
+        x = a.clone().requires_grad_(True)  # noqa: FBT003
+        opt = torch.optim.Adam([x], lr=lr)
+        for _ in range(n_steps):
+            opt.zero_grad()
+            l_abs = (x - a).pow(2).sum(-1).mean()
+            rel = x[nbr_t] - x.unsqueeze(1)  # (N, take, 3)
+            l_rel = (rel - off_t).pow(2).sum(-1).mean()
+            pair = torch.cdist(x, x)
+            l_clash = torch.relu(d_floor - pair)[offdiag].pow(2).mean()
+            loss = w_abs * l_abs + w_rel * l_rel + w_clash * l_clash
+            loss.backward()
+            opt.step()
+    solved = x.detach().numpy().astype(np.float64)
+    return solved @ rotation + centroid
 
 
 class LigandTokenizer:
