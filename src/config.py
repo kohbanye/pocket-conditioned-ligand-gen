@@ -63,9 +63,11 @@ def _default_ligand_recon_weights() -> dict[str, float]:
         "aromatic": 0.1,
         "ring": 0.1,
         "numH": 0.1,
-        # Local geometry (Å² MSE, same scale as coord) — equal weight so the
-        # codebook is pushed to encode neighbour distances/directions.
-        "knn_offsets": 1.0,
+        # Clash penalty: hinge on reconstructed ligand atom pairs closer than
+        # ~1.2 Å (the diagnosed failure: per-atom coord decode is pairwise-blind
+        # -> ~77% of reconstructions have a sub-1.2 Å clash vs ~10% for GT).
+        # Weighted up because the per-pair mean is diluted by non-clashing pairs.
+        "clash": 5.0,
     }
 
 
