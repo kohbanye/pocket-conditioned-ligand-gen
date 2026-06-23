@@ -63,6 +63,9 @@ def _default_ligand_recon_weights() -> dict[str, float]:
         "aromatic": 0.1,
         "ring": 0.1,
         "numH": 0.1,
+        # Local geometry (Å² MSE, same scale as coord) — equal weight so the
+        # codebook is pushed to encode neighbour distances/directions.
+        "knn_offsets": 1.0,
     }
 
 

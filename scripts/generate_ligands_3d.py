@@ -56,7 +56,11 @@ from src.tokenizers.descriptor_schema import (  # noqa: E402
     LIGAND_LAYOUT,
     fields_by_name,
 )
-from src.tokenizers.ligand import LigandDescriptor, parse_sdf_text  # noqa: E402
+from src.tokenizers.ligand import (  # noqa: E402
+    LigandDescriptor,
+    parse_sdf_text,
+    solve_ligand_coords,
+)
 from src.tokenizers.lm_vocab import (  # noqa: E402
     BOS_ID,
     L_CLOSE_ID,
@@ -140,24 +144,42 @@ def _pocket_codes(  # noqa: PLR0913
 
 
 @torch.no_grad()
-def _decode_ligand(
+def _decode_ligand(  # noqa: PLR0913
     codes: list[int],
     ligand_vqvae: object,
     norm_stats: dict[str, torch.Tensor],
     frame: tuple[np.ndarray, np.ndarray],
     device: torch.device,
+    *,
+    use_solve: bool = False,
 ) -> tuple[np.ndarray, list[str]]:
-    """Decode generated ligand codes to (coords in global frame, elements)."""
+    """Decode generated ligand codes to (coords in global frame, elements).
+
+    By default uses ONLY the absolute coord head (the knn_offsets head, if the
+    VQ-VAE has one, acts purely as a training-time regulariser). Set
+    ``use_solve=True`` to instead reconstruct via the absolute+relative geometry
+    solve (:func:`solve_ligand_coords`).
+    """
     idx = torch.tensor(codes, dtype=torch.long, device=device)
     outputs = ligand_vqvae.decode_to_outputs(idx)
-    coord_field = fields_by_name(LIGAND_LAYOUT)["coord"]
+    fields = fields_by_name(LIGAND_LAYOUT)
+    coord_field = fields["coord"]
     cmean = norm_stats["ligand_mean"][coord_field.start : coord_field.end]
     cstd = norm_stats["ligand_std"][coord_field.start : coord_field.end]
     coord_denorm = outputs["coord"] * cstd + cmean
-    desc = _reconstruct_descriptor_from_coord_head(
-        coord_denorm, LIGAND_DESCRIPTOR_DIM, coord_field.start, coord_field.length
-    )
-    coords = LigandDescriptor.descriptor_to_coords(desc, {}, pocket_frame=frame)
+    if use_solve and "knn_offsets" in outputs:
+        ko_field = fields["knn_offsets"]
+        ko_mean = norm_stats["ligand_mean"][ko_field.start : ko_field.end]
+        ko_std = norm_stats["ligand_std"][ko_field.start : ko_field.end]
+        ko_denorm = outputs["knn_offsets"] * ko_std + ko_mean
+        coords = solve_ligand_coords(
+            coord_denorm.cpu().numpy(), ko_denorm.cpu().numpy(), frame
+        )
+    else:
+        desc = _reconstruct_descriptor_from_coord_head(
+            coord_denorm, LIGAND_DESCRIPTOR_DIM, coord_field.start, coord_field.length
+        )
+        coords = LigandDescriptor.descriptor_to_coords(desc, {}, pocket_frame=frame)
     elem_idx = outputs["element"].argmax(dim=-1).cpu().numpy()
     elements = [
         LIGAND_ELEMENT_VOCAB[i] if LIGAND_ELEMENT_VOCAB[i] != "OTHER" else "X"

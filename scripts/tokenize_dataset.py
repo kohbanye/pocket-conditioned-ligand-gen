@@ -28,14 +28,18 @@ import argparse
 import json
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 
 from src.config import CrossDockedConfig, HubDatasetConfig, VQVAETrainingConfig
 from src.data.descriptors import ComplexDescriptorDataModule, collate_molecules
+from src.data.token_io import SplitWriter
 from src.model.vqvae_module import VQVAEModule
 from src.tokenizers.lm_vocab import LMVocab
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -70,44 +74,13 @@ def _encode_buffer(
     return sequences
 
 
-class _SplitWriter:
-    """Streams packed uint16 tokens + per-doc lengths to disk."""
-
-    def __init__(self, out_dir: Path, split: str) -> None:
-        self.bin_path = out_dir / f"{split}.bin"
-        self.len_path = out_dir / f"{split}.len"
-        self._bin = self.bin_path.open("wb")
-        self._len = self.len_path.open("wb")
-        self.num_docs = 0
-        self.num_tokens = 0
-        self.max_len = 0
-
-    def write(self, sequences: list[list[int]]) -> None:
-        if not sequences:
-            return
-        flat = np.fromiter(
-            (t for seq in sequences for t in seq),
-            dtype=np.uint16,
-        )
-        lengths = np.fromiter((len(seq) for seq in sequences), dtype=np.uint16)
-        self._bin.write(flat.tobytes())
-        self._len.write(lengths.tobytes())
-        self.num_docs += len(sequences)
-        self.num_tokens += int(flat.size)
-        self.max_len = max(self.max_len, int(lengths.max()))
-
-    def close(self) -> None:
-        self._bin.close()
-        self._len.close()
-
-
 def _tokenize_split(  # noqa: PLR0913
     module: VQVAEModule,
     vocab: LMVocab,
     shard_dir: Path,
     plan: list[tuple[int, list[int]]],
     norm: dict[str, np.ndarray],
-    writer: _SplitWriter,
+    writer: SplitWriter,
     batch_size: int,
     device: torch.device,
 ) -> None:
@@ -242,7 +215,7 @@ def main() -> None:  # noqa: PLR0915
         if not plan:
             logger.warning("Split %s has no entries; skipping", split)
             continue
-        writer = _SplitWriter(args.out_dir, split)
+        writer = SplitWriter(args.out_dir, split)
         _tokenize_split(
             module,
             vocab,
