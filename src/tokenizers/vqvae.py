@@ -404,23 +404,25 @@ class TransformerVQVAE(nn.Module):
             else x.new_zeros(())
         )
 
-        # Extra continuous head: K-NN relative offsets (Stage 1). Same spherical
-        # → Cartesian MSE as coord, over the 4 neighbour sub-vectors. Present for
-        # the ligand only (protein has no such head).
-        if "knn_offsets" in recon_outputs:
-            ko = f["knn_offsets"]
-            ko_mean = self._desc_mean[ko.start : ko.end].to(x.dtype)
-            ko_std = self._desc_std[ko.start : ko.end].to(x.dtype)
-            ko_target = x[..., ko.start : ko.end] * ko_std + ko_mean
-            ko_pred = recon_outputs["knn_offsets"] * ko_std + ko_mean
-            kr_t, kth_t, ks_t, kc_t = self._split_coord_head(ko_target)
-            kr_p, kth_p, ks_p, kc_p = self._split_coord_head(ko_pred)
-            kxyz_t = spherical_to_cartesian_batched(kr_t, kth_t, ks_t, kc_t)
-            kxyz_p = spherical_to_cartesian_batched(kr_p, kth_p, ks_p, kc_p)
-            ko_diff = (kxyz_t - kxyz_p).pow(2).sum(dim=-1).mean(dim=-1)  # (B, L)
-            head_losses["knn_offsets"] = (
-                ko_diff[mask].mean() if mask.any() else x.new_zeros(())
+        # Clash penalty (ligand only): hinge on reconstructed atom pairs closer
+        # than ``d_floor``. The per-atom coord head has no pairwise term, so
+        # reconstructions frequently overlap (~77% sub-1.2 Å clashes vs ~10% for
+        # GT); this directly penalises that. ``xyz_p`` is the decoded Cartesian
+        # (denormalised) computed above; ligand has 1 atom per coord head.
+        if self.config.domain == "ligand":
+            d_floor = 1.2
+            xyz = xyz_p.squeeze(2)  # (B, L, 3)
+            pair = torch.cdist(xyz, xyz)  # (B, L, L)
+            seq = xyz.shape[1]
+            eye = torch.eye(seq, dtype=torch.bool, device=xyz.device).unsqueeze(0)
+            valid = (mask.unsqueeze(1) & mask.unsqueeze(2)) & ~eye
+            head_losses["clash"] = (
+                torch.relu(d_floor - pair).pow(2)[valid].mean()
+                if bool(valid.any())
+                else x.new_zeros(())
             )
+            n_clash = ((pair < d_floor) & valid).float().sum()
+            diag["clash_pair_frac"] = n_clash / valid.float().sum().clamp_min(1)
 
         # Categorical heads: target indices live in the same slot as input.
         for name, kind, _dim in self.recon_heads:
