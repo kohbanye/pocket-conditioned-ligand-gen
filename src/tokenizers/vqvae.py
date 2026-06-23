@@ -23,10 +23,15 @@ from torch import Tensor, nn
 
 from src.tokenizers.codebook import EMACodebook
 from src.tokenizers.descriptor_schema import (
+    ATOM_LAYOUT,
+    ATOM_PROTEIN_ONLY_HEADS,
+    ATOM_RECON_HEADS,
     LIGAND_LAYOUT,
     LIGAND_RECON_HEADS,
     PROTEIN_LAYOUT,
     PROTEIN_RECON_HEADS,
+    SOURCE_LIGAND_IDX,
+    SOURCE_PROTEIN_IDX,
     FieldSpec,
     fields_by_name,
 )
@@ -65,16 +70,22 @@ class TransformerVQVAE(nn.Module):
     def __init__(self, config: TransformerVQVAEConfig) -> None:
         super().__init__()
         self.config = config
-        if config.domain not in ("ligand", "protein"):
+        if config.domain not in ("ligand", "protein", "atom"):
             msg = f"Unknown domain: {config.domain!r}"
             raise ValueError(msg)
 
-        self.layout: list[FieldSpec] = (
-            LIGAND_LAYOUT if config.domain == "ligand" else PROTEIN_LAYOUT
-        )
-        self.recon_heads: list[tuple[str, str, int]] = (
-            LIGAND_RECON_HEADS if config.domain == "ligand" else PROTEIN_RECON_HEADS
-        )
+        _layouts: dict[str, list[FieldSpec]] = {
+            "ligand": LIGAND_LAYOUT,
+            "protein": PROTEIN_LAYOUT,
+            "atom": ATOM_LAYOUT,
+        }
+        _heads: dict[str, list[tuple[str, str, int]]] = {
+            "ligand": LIGAND_RECON_HEADS,
+            "protein": PROTEIN_RECON_HEADS,
+            "atom": ATOM_RECON_HEADS,
+        }
+        self.layout: list[FieldSpec] = _layouts[config.domain]
+        self.recon_heads: list[tuple[str, str, int]] = _heads[config.domain]
 
         # ---- Embeddings for categorical input slots --------------------
         d_cat = config.categorical_embed_dim
@@ -404,18 +415,29 @@ class TransformerVQVAE(nn.Module):
             else x.new_zeros(())
         )
 
-        # Clash penalty (ligand only): hinge on reconstructed atom pairs closer
-        # than ``d_floor``. The per-atom coord head has no pairwise term, so
-        # reconstructions frequently overlap (~77% sub-1.2 Å clashes vs ~10% for
-        # GT); this directly penalises that. ``xyz_p`` is the decoded Cartesian
-        # (denormalised) computed above; ligand has 1 atom per coord head.
+        # Per-source row masks for the unified ``atom`` domain. ``source`` is a
+        # singleton categorical input slot (absent for the legacy ligand/protein
+        # domains, in which every row is the same source).
+        source = x[..., f["source"].start].long() if "source" in f else None
+
+        # Clash penalty (ligand atoms only): hinge on reconstructed atom pairs
+        # closer than ``d_floor``. The per-atom coord head has no pairwise term,
+        # so reconstructions frequently overlap (~77% sub-1.2 Å clashes vs ~10%
+        # for GT); this directly penalises that. ``xyz_p`` is the decoded
+        # Cartesian (denormalised) computed above; 1 atom per coord head.
         if self.config.domain == "ligand":
+            clash_mask = mask
+        elif self.config.domain == "atom" and source is not None:
+            clash_mask = mask & (source == SOURCE_LIGAND_IDX)
+        else:
+            clash_mask = None
+        if clash_mask is not None:
             d_floor = 1.2
             xyz = xyz_p.squeeze(2)  # (B, L, 3)
             pair = torch.cdist(xyz, xyz)  # (B, L, L)
             seq = xyz.shape[1]
             eye = torch.eye(seq, dtype=torch.bool, device=xyz.device).unsqueeze(0)
-            valid = (mask.unsqueeze(1) & mask.unsqueeze(2)) & ~eye
+            valid = (clash_mask.unsqueeze(1) & clash_mask.unsqueeze(2)) & ~eye
             head_losses["clash"] = (
                 torch.relu(d_floor - pair).pow(2)[valid].mean()
                 if bool(valid.any())
@@ -425,20 +447,30 @@ class TransformerVQVAE(nn.Module):
             diag["clash_pair_frac"] = n_clash / valid.float().sum().clamp_min(1)
 
         # Categorical heads: target indices live in the same slot as input.
+        # Protein-context heads (aa / bb_sc) are only meaningful for protein
+        # atoms, so their loss is restricted to ``source == protein`` rows.
         for name, kind, _dim in self.recon_heads:
             if kind == "continuous":
                 continue
+            if (
+                self.config.domain == "atom"
+                and source is not None
+                and name in ATOM_PROTEIN_ONLY_HEADS
+            ):
+                head_mask = mask & (source == SOURCE_PROTEIN_IDX)
+            else:
+                head_mask = mask
             spec = f[name]
             target_idx = x[..., spec.start].long()  # singleton categorical
             logits = recon_outputs[name]  # (B, L, V)
-            if mask.any():
+            if head_mask.any():
                 head_loss = F.cross_entropy(
-                    logits[mask],
-                    target_idx[mask],
+                    logits[head_mask],
+                    target_idx[head_mask],
                     reduction="mean",
                 )
-                pred = logits[mask].argmax(dim=-1)
-                acc = (pred == target_idx[mask]).float().mean()
+                pred = logits[head_mask].argmax(dim=-1)
+                acc = (pred == target_idx[head_mask]).float().mean()
             else:
                 head_loss = x.new_zeros(())
                 acc = x.new_zeros(())

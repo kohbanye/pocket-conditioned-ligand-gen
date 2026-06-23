@@ -149,6 +149,15 @@ def _load_pairs_from_manifest(
     df = table.to_pandas()
     if hub_config.source_types:
         df = df[df["source_type"].isin(hub_config.source_types)]
+    if getattr(hub_config, "good_poses_only", False):
+        if "label" not in df.columns:
+            msg = "good_poses_only requested but manifest has no 'label' column"
+            raise KeyError(msg)
+        before = len(df)
+        df = df[df["label"] == 1]
+        logger.info(
+            "good_poses_only: kept %d / %d label==1 poses", len(df), before
+        )
     if max_pairs is not None:
         df = df.head(max_pairs)
 

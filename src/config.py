@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.tokenizers.descriptor_schema import (
+    ATOM_DESCRIPTOR_DIM,
     LIGAND_DESCRIPTOR_DIM,
     PROTEIN_DESCRIPTOR_DIM,
 )
@@ -19,6 +20,11 @@ class HubDatasetConfig:
     fold: int = 0
     source_types: list[str] = field(default_factory=lambda: ["cdonly"])
     revision: str | None = None
+    # When True, keep only ``label == 1`` (native-like / good) poses at manifest
+    # load. CrossDocked ``label == 0`` poses are decoys (RMSD > 2 Å) built as
+    # classifier negatives; training a *generative* model on them hurts molecule
+    # fitness. Used by the all-atom pipeline.
+    good_poses_only: bool = False
 
 
 @dataclass
@@ -78,6 +84,27 @@ def _default_protein_recon_weights() -> dict[str, float]:
     }
 
 
+def _default_atom_recon_weights() -> dict[str, float]:
+    """Recon weights for the unified all-atom VQ-VAE (protein + ligand).
+
+    ``coord`` + the six chemistry heads are trained on every atom; ``aa`` /
+    ``bb_sc`` only on protein rows; ``clash`` only on ligand rows (all handled
+    by per-source masking in :meth:`TransformerVQVAE._compute_recon_loss`).
+    """
+    return {
+        "coord": 1.0,
+        "element": 0.5,
+        "charge": 0.1,
+        "hybrid": 0.1,
+        "aromatic": 0.1,
+        "ring": 0.1,
+        "numH": 0.1,
+        "aa": 0.5,
+        "bb_sc": 0.1,
+        "clash": 5.0,
+    }
+
+
 @dataclass
 class ProteinVQVAEConfig:
     """Config for protein backbone structure VQ-VAE."""
@@ -123,6 +150,34 @@ class LigandVQVAEConfig:
 
 
 @dataclass
+class AtomVQVAEConfig:
+    """Config for the unified all-atom VQ-VAE (one codebook, protein + ligand).
+
+    ``max_seq_len`` sizes the positional-encoding buffer and must exceed the
+    longest single atom sequence (a whole pocket, up to ~max_residues * heavy
+    atoms/residue). 1024 covers an 8 Å pocket comfortably; lower
+    ``max_residues`` or raise this if a pocket ever exceeds it.
+    """
+
+    descriptor_dim: int = ATOM_DESCRIPTOR_DIM
+    hidden_dim: int = 256
+    latent_dim: int = 16
+    codebook_size: int = 8192
+    commitment_cost: float = 0.25
+    ema_decay: float = 0.99
+    num_transformer_layers: int = 4
+    num_attention_heads: int = 8
+    transformer_feedforward_dim: int = 512
+    transformer_dropout: float = 0.1
+    max_seq_len: int = 1024
+    domain: str = "atom"
+    categorical_embed_dim: int = 8
+    recon_weights: dict[str, float] = field(
+        default_factory=_default_atom_recon_weights,
+    )
+
+
+@dataclass
 class VQVAETrainingConfig:
     """Config for joint VQ-VAE training."""
 
@@ -133,6 +188,25 @@ class VQVAETrainingConfig:
     precision: str = "bf16-mixed"
     protein: ProteinVQVAEConfig = field(default_factory=ProteinVQVAEConfig)
     ligand: LigandVQVAEConfig = field(default_factory=LigandVQVAEConfig)
+    pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)
+
+
+@dataclass
+class AtomVQVAETrainingConfig:
+    """Config for unified all-atom VQ-VAE training (single stream / codebook).
+
+    ``mol_batch_size`` is much smaller than the legacy ligand-only VQ-VAE:
+    protein-atom sequences are ~10x longer (a whole pocket), so padding a large
+    batch to the pocket length would OOM. Tune against the regenerated
+    all-atom cache.
+    """
+
+    learning_rate: float = 3e-4
+    mol_batch_size: int = 256
+    max_epochs: int = 100
+    num_workers: int = 16
+    precision: str = "bf16-mixed"
+    atom: AtomVQVAEConfig = field(default_factory=AtomVQVAEConfig)
     pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)
 
 
@@ -158,6 +232,10 @@ class LigandLMConfig:
     # VQ-VAE checkpoint (protein=8192, ligand=4096).
     protein_codebook_size: int = 8192
     ligand_codebook_size: int = 4096
+    # When set, use the unified all-atom vocabulary: one shared codebook range
+    # for protein + ligand (``vocab_size = specials + atom_codebook_size``).
+    # Overrides the separate protein/ligand ranges above.
+    atom_codebook_size: int | None = None
 
     # Dims chosen to land at ~0.3B parameters with the ~12.3k vocabulary
     # (measured: 302M). Token/param ≈ 3 against the ~1B-token corpus.
@@ -180,6 +258,8 @@ class LigandLMConfig:
 
     @property
     def vocab_size(self) -> int:
+        if self.atom_codebook_size is not None:
+            return _NUM_SPECIAL_TOKENS + self.atom_codebook_size
         return (
             _NUM_SPECIAL_TOKENS
             + self.protein_codebook_size
