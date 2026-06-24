@@ -28,7 +28,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
-from src.tokenizers.lm_vocab import PAD_ID
+from src.tokenizers.lm_vocab import L_OPEN_ID, PAD_ID
 
 if TYPE_CHECKING:
     from src.config import LMTrainingConfig
@@ -60,8 +60,18 @@ def _pack_blocks(doc_lengths: np.ndarray, block_size: int) -> np.ndarray:
 class PackedTokenDataset(Dataset):
     """Yields packed, padded ``block_size`` blocks with per-document structure."""
 
-    def __init__(self, bin_path: Path, len_path: Path, block_size: int) -> None:
+    def __init__(
+        self,
+        bin_path: Path,
+        len_path: Path,
+        block_size: int,
+        *,
+        mask_prompt: bool = False,
+    ) -> None:
         self.block_size = block_size
+        # condition-only training: mask the ``<bos><p> pocket </p>`` prompt of
+        # each doc from the loss (loss only on the generated ``<l>`` block).
+        self.mask_prompt = mask_prompt
         self.tokens = np.memmap(bin_path, dtype=np.uint16, mode="r")
         self.doc_lengths = np.fromfile(len_path, dtype=np.uint16).astype(np.int64)
         self.doc_offsets = np.concatenate(
@@ -96,6 +106,15 @@ class PackedTokenDataset(Dataset):
         # First token of each document (cumulative starts) -> ignore in loss.
         starts = np.concatenate([[0], np.cumsum(lengths)[:-1]]).astype(np.int64)
         labels[starts] = IGNORE_INDEX
+        if self.mask_prompt:
+            # condition-only: mask each doc's prompt (everything before ``<l>``)
+            # so loss falls only on the generated ligand block. A doc with no
+            # ``<l>`` (e.g. protein-only) is fully masked.
+            ends = np.cumsum(lengths).astype(np.int64)
+            for doc_start, doc_end in zip(starts, ends, strict=False):
+                rel = np.flatnonzero(arr[doc_start:doc_end] == L_OPEN_ID)
+                cut = doc_start + int(rel[0]) if rel.size else doc_end
+                labels[doc_start:cut] = IGNORE_INDEX
 
         bs = self.block_size
         input_ids = np.full(bs, PAD_ID, dtype=np.int64)
@@ -138,7 +157,10 @@ class LMTokenDataModule(L.LightningDataModule):
             len_path = self.token_dir / f"{split}.len"
             if bin_path.exists() and len_path.exists():
                 self._datasets[split] = PackedTokenDataset(
-                    bin_path, len_path, self.config.block_size
+                    bin_path,
+                    len_path,
+                    self.config.block_size,
+                    mask_prompt=getattr(self.config, "mask_prompt", False),
                 )
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:

@@ -276,6 +276,11 @@ class LMTrainingConfig:
     # Sequences packed per device per step (a "micro batch" of packed blocks).
     micro_batch_size: int = 64
     gradient_accumulation: int = 1
+    # condition-only fine-tuning: mask the ``<p> pocket </p>`` prompt from the
+    # loss so only the generated ``<l>`` ligand block is trained. Leave False
+    # for pretraining (protein-only / ligand-only), where loss on all tokens
+    # teaches the marginals.
+    mask_prompt: bool = False
 
     learning_rate: float = 6e-4
     min_lr_ratio: float = 0.1

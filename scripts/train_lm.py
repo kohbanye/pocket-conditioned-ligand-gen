@@ -46,6 +46,19 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--accumulate", type=int, default=None)
     parser.add_argument(
+        "--atom-codebook-size",
+        type=int,
+        default=None,
+        help="Use the unified all-atom vocab (specials + this single codebook) "
+        "instead of the legacy protein+ligand ranges. Match the token cache.",
+    )
+    parser.add_argument(
+        "--mask-prompt",
+        action="store_true",
+        help="Condition-only fine-tuning: mask the <p> pocket prompt from the "
+        "loss (loss only on the generated <l> block). Leave off for pretraining.",
+    )
+    parser.add_argument(
         "--init-from",
         type=str,
         default=None,
@@ -68,6 +81,9 @@ def main() -> None:
         config.learning_rate = args.lr
     if args.accumulate is not None:
         config.gradient_accumulation = args.accumulate
+    if args.atom_codebook_size is not None:
+        config.model.atom_codebook_size = args.atom_codebook_size
+    config.mask_prompt = args.mask_prompt
 
     torch.set_float32_matmul_precision("high")
 

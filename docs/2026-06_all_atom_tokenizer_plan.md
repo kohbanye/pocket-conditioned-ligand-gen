@@ -204,12 +204,13 @@ New / changed files:
   (cdonly, label==1 ∧ `_min`), 14 GB / 35 shards. Fold0 split: train 203,760 /
   val 22,640 / test 124,606. `normalization_stats.pt` (`atom_mean`/`atom_std`,
   33-D) written. Built on r3n11 (~20 min, tar streaming).
-- **Step 2 — VQ-VAE: RUNNING.** qsub `8002541` (gpu_1, h_rt 16h), `scripts/
-  job_train_vqvae_atom.sh`: atom VQ-VAE 100 epochs, bs256, codebook 8192,
-  latent 16, WANDB offline, ckpt top-3 by `val/atom_coord` under
-  `pocket-ligand-vqvae/<id>/checkpoints/atomvqvae-*.ckpt`. ~7 min/epoch
-  (GPU compute-bound; throughput flat in batch/workers ~970 samp/s) → ~13 h.
-  Smoke confirmed loss 186→58 over 114 steps.
+- **Step 2 — VQ-VAE: DONE.** qsub `8002541` (gpu_1), 100 epochs, bs256,
+  codebook 8192, latent 16. **Best ckpt** (note the `/` in the metric nests it
+  in a dir, same as the legacy run):
+  `pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt`.
+  Test: coord 0.129 Å² (RMSD ~0.36 Å), element/charge/aa/bb_sc acc 99.9–99.99%,
+  codebook_util 0.65, perplexity 3377, **0 dead codes** — healthy tokenizer
+  (coord beats the legacy ligand VQ's 0.150). ~7 min/epoch.
 - **Next:** inspect VQ quality (val/atom_coord, codebook util) → pick best ckpt
   → `tokenize_dataset_atom.py` (rotation aug) + `tokenize_geom_atom.py` →
   LM GEOM-pretrain → fine-tune → `eval_sbdd_full.py`.

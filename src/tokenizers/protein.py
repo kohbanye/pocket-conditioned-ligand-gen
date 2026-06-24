@@ -297,13 +297,32 @@ class PocketAtomData:
 def precompute_pocket_atom_candidates(
     pdb_path: str | Path,
 ) -> PrecomputedPocketAtoms:
-    """Parse a PDB and return per-residue heavy-atom data (standard AAs only)."""
+    """Parse a PDB file and return per-residue heavy-atom data (standard AAs)."""
     from Bio.PDB import PDBParser  # noqa: PLC0415
 
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("receptor", str(pdb_path))
-    model = structure[0]
+    return _precompute_pocket_atoms_from_model(structure[0])
 
+
+def precompute_pocket_atom_candidates_from_text(
+    pdb_text: str,
+) -> PrecomputedPocketAtoms:
+    """Same as :func:`precompute_pocket_atom_candidates` but from PDB text.
+
+    Used to stream receptor structures out of zip/tar archives without writing
+    them to disk (inode-safe).
+    """
+    from io import StringIO  # noqa: PLC0415
+
+    from Bio.PDB import PDBParser  # noqa: PLC0415
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("receptor", StringIO(pdb_text))
+    return _precompute_pocket_atoms_from_model(structure[0])
+
+
+def _precompute_pocket_atoms_from_model(model: object) -> PrecomputedPocketAtoms:
     ca_list: list[np.ndarray] = []
     chain_ids: list[str] = []
     residue_indices: list[int] = []

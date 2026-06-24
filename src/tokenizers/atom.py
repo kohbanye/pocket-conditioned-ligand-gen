@@ -292,6 +292,27 @@ def precompute_receptor_atom_features(
     from rdkit import Chem  # noqa: PLC0415
 
     mol = Chem.MolFromPDBFile(str(pdb_path), sanitize=False, removeHs=True)
+    return _receptor_atom_features_from_mol(mol)
+
+
+def precompute_receptor_atom_features_from_text(
+    pdb_text: str,
+) -> dict[tuple[str, int, str], tuple[int, ...]]:
+    """Same as :func:`precompute_receptor_atom_features` but from PDB text.
+
+    Used to stream receptor structures out of zip/tar archives (inode-safe).
+    """
+    from rdkit import Chem  # noqa: PLC0415
+
+    mol = Chem.MolFromPDBBlock(pdb_text, sanitize=False, removeHs=True)
+    return _receptor_atom_features_from_mol(mol)
+
+
+def _receptor_atom_features_from_mol(
+    mol: object,
+) -> dict[tuple[str, int, str], tuple[int, ...]]:
+    from rdkit import Chem  # noqa: PLC0415
+
     if mol is None:
         return {}
     try:
