@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 import lightning as L
 import torch
@@ -122,7 +123,10 @@ def main() -> None:
         ],
     )
     trainer.fit(module, dm)
-    trainer.test(module, dm)
+    # Only run the final test pass if a test split exists (the mixed
+    # pretraining cache is train/val only; the fine-tune cache has test).
+    if (Path(config.token_dir) / "test.bin").exists():
+        trainer.test(module, dm)
 
 
 if __name__ == "__main__":
