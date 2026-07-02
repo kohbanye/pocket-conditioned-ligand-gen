@@ -1,27 +1,27 @@
-"""Tokenize PLINDER holo pockets into protein-only LM pretraining sequences.
+"""Tokenize PLINDER holo pockets into all-atom LM sequences.
 
-Stage-0 (protein side) of the curriculum: build a large, diverse pocket-language
-corpus from PLINDER (>300k holo binding sites) so the LM learns ``p(pocket)``
-beyond CrossDocked's ~1.7k pockets, before the pocket-conditioned fine-tune.
+Two modes over the same PLINDER stream (inode-safe; never extracts the zips):
 
-Pipeline (inode-safe; never extracts the zips):
-1. Read PLINDER ``splits/split.parquet`` -> train/val systems. Drop systems
-   whose PDB id is a CrossDocked fold-0 TEST receptor (leakage).
-2. Stream each ``systems/*.zip`` member in memory. For each kept system, parse
-   ``receptor.pdb`` + ``ligand_files/*.sdf``, extract the all-atom pocket (8 A /
-   <=50 residues around the bound ligand) with the same extraction the
-   CrossDocked path uses (CPU, multiprocess one worker per zip).
-3. Encode each pocket with the frozen all-atom VQ-VAE and emit
-   ``<bos><p> pocket atoms </p><l></l><eos>`` (empty ligand block, matching the
-   complex format) with rotation augmentation.
+- **protein-only** (default): ``<bos><p> pocket </p><l></l><eos>`` -- the
+  p(pocket) side of the mixed pretraining corpus (>300k holo pockets, far more
+  than CrossDocked's ~1.7k).
+- **--complex**: ``<bos><p> pocket </p><l> ligand </l><eos>`` -- pocket-LIGAND
+  pairs for the conditional fine-tune. PLINDER's ~300k distinct pockets (vs
+  CrossDocked's ~2.9k) directly attack the pocket-generalisation over-fitting;
+  a drug-like MW / heavy-atom filter keeps the ligand distribution sane.
+
+For each kept system: parse ``receptor.pdb`` + ``ligand_files/*.sdf``, take the
+largest ligand molecule, extract the all-atom pocket (8 A / <=50 res) around it,
+and atom-VQ tokenize (CPU extraction multiprocessed one worker per zip; GPU
+encode in the parent). Rotation augmentation. Train/val routed by PLINDER split.
+Systems whose PDB is a CrossDocked fold-0 TEST receptor are dropped (leakage).
 
 Run (single GPU)::
 
-    uv run python scripts/tokenize_plinder_protein.py \
+    uv run python scripts/tokenize_plinder_protein.py --complex \
         --ckpt "<atom-vqvae>.ckpt" \
         --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
-        --systems-dir data/plinder/systems --split data/plinder/split.parquet \
-        --num-rotations 4 --out-dir data/lm_tokens_protein_plinder
+        --num-rotations 2 --out-dir data/lm_tokens_complex_plinder
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ import json
 import logging
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -41,6 +40,7 @@ from src.data.descriptors import collate_molecules
 from src.data.token_io import SplitWriter
 from src.model.vqvae_module import AtomVQVAEModule
 from src.tokenizers.atom import (
+    LigandAtomDescriptor,
     ProteinAtomDescriptor,
     precompute_receptor_atom_features_from_text,
     rotate_atom_descriptor,
@@ -54,16 +54,17 @@ from src.tokenizers.protein import (
     precompute_pocket_atom_candidates_from_text,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Iterable
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Per-worker state.
 _w_prot_desc: ProteinAtomDescriptor | None = None
+_w_lig_desc: LigandAtomDescriptor | None = None
 _w_pocket_config: PocketExtractionConfig | None = None
 _w_allowed: dict[str, str] = {}
+_w_complex: bool = False
+_w_min_heavy: int = 6
+_w_max_heavy: int = 60
 
 
 def _system_pdb(system_id: str) -> str:
@@ -74,8 +75,12 @@ def _system_pdb(system_id: str) -> str:
 def _load_allowed_systems(
     split_path: Path,
     cd_manifest: Path,
+    *,
+    complex_mode: bool,
+    mw_min: float,
+    mw_max: float,
 ) -> dict[str, str]:
-    """Map kept ``system_id -> split`` ('train'/'val'), leak-filtered vs CD test."""
+    """Map kept ``system_id -> split`` ('train'/'val'), leak-filtered + drug-like."""
     import pyarrow.parquet as pq  # noqa: PLC0415
 
     sp = pq.read_table(split_path).to_pandas()
@@ -85,6 +90,7 @@ def _load_allowed_systems(
         else next(c for c in sp.columns if "split" in c.lower())
     )
     sid_col = "system_id" if "system_id" in sp.columns else sp.columns[0]
+    mw_col = "system_proper_ligand_max_molecular_weight"
 
     cd = pq.read_table(
         cd_manifest, columns=["receptor_pdb", "source_type", "cdonly_fold0"]
@@ -95,50 +101,72 @@ def _load_allowed_systems(
     )
 
     allowed: dict[str, str] = {}
-    n_leak = 0
-    for sid, label in zip(sp[sid_col], sp[split_col], strict=True):
+    n_leak = n_mw = 0
+    for row in sp.itertuples(index=False):
+        label = getattr(row, split_col)
         if label not in ("train", "val"):
             continue
-        if _system_pdb(str(sid)) in cd_test_pdbs:
+        sid = str(getattr(row, sid_col))
+        if _system_pdb(sid) in cd_test_pdbs:
             n_leak += 1
             continue
-        allowed[str(sid)] = label
+        if complex_mode and mw_col in sp.columns:
+            mw = getattr(row, mw_col, None)
+            if mw is None or not (mw_min <= float(mw) <= mw_max):
+                n_mw += 1
+                continue
+        allowed[sid] = label
     logger.info(
-        "PLINDER systems kept: %d (train/val), leak-dropped vs CD test: %d",
+        "PLINDER kept: %d | leak-dropped: %d | MW-filtered: %d (complex=%s)",
         len(allowed),
         n_leak,
+        n_mw,
+        complex_mode,
     )
     return allowed
 
 
-def _worker_init(pocket_config_dict: dict, allowed: dict[str, str]) -> None:
-    global _w_prot_desc, _w_pocket_config, _w_allowed  # noqa: PLW0603
+def _worker_init(
+    pocket_config_dict: dict,
+    allowed: dict[str, str],
+    *,
+    complex_mode: bool,
+    min_heavy: int,
+    max_heavy: int,
+) -> None:
+    global _w_prot_desc, _w_lig_desc, _w_pocket_config  # noqa: PLW0603
+    global _w_allowed, _w_complex, _w_min_heavy, _w_max_heavy  # noqa: PLW0603
     _w_prot_desc = ProteinAtomDescriptor()
+    _w_lig_desc = LigandAtomDescriptor()
     _w_pocket_config = PocketExtractionConfig(**pocket_config_dict)
     _w_allowed = allowed
+    _w_complex = complex_mode
+    _w_min_heavy = min_heavy
+    _w_max_heavy = max_heavy
 
 
-def _ligand_heavy_coords(zf: zipfile.ZipFile, lig_members: list[str]) -> np.ndarray:
-    coords: list[tuple[float, float, float]] = []
+def _largest_ligand(zf: zipfile.ZipFile, lig_members: list[str]) -> dict | None:
+    """Parse all ligand SDFs; return the molecule with the most heavy atoms."""
+    best = None
+    best_n = 0
     for m in lig_members:
         text = zf.read(m).decode("utf-8", "replace")
         for mol in parse_sdf_text(text):
-            coords.extend((a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H")
-    return (
-        np.array(coords, dtype=np.float32) if coords else np.empty((0, 3), np.float32)
-    )
+            n = sum(1 for a in mol["atoms"] if a[0] != "H")
+            if n > best_n:
+                best_n, best = n, mol
+    return best
 
 
-def _process_zip(zip_path: str) -> list[tuple[str, np.ndarray]]:  # noqa: C901
-    """Extract base (un-normalized) pocket descriptors for kept systems in a zip."""
-    out: list[tuple[str, np.ndarray]] = []
+def _process_zip(zip_path: str) -> list[tuple]:  # noqa: C901, PLR0912
+    """Extract (label, prot_desc, lig_desc|None) for kept systems in a zip."""
+    out: list[tuple] = []
     try:
         zf = zipfile.ZipFile(zip_path)
     except Exception:
         logger.exception("Bad zip %s", zip_path)
         return out
 
-    # Group members by top-level system dir.
     systems: dict[str, list[str]] = {}
     for name in zf.namelist():
         top = name.split("/", 1)[0]
@@ -154,32 +182,46 @@ def _process_zip(zip_path: str) -> list[tuple[str, np.ndarray]]:  # noqa: C901
         if rec is None or not ligs:
             continue
         try:
-            rec_text = zf.read(rec).decode("utf-8", "replace")
-            lig_coords = _ligand_heavy_coords(zf, ligs)
-            if lig_coords.shape[0] == 0:
+            mol = _largest_ligand(zf, ligs)
+            if mol is None:
                 continue
+            heavy = np.array(
+                [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"],
+                dtype=np.float32,
+            )
+            if _w_complex and not (_w_min_heavy <= heavy.shape[0] <= _w_max_heavy):
+                continue
+            if heavy.shape[0] == 0:
+                continue
+            rec_text = zf.read(rec).decode("utf-8", "replace")
             precomp = precompute_pocket_atom_candidates_from_text(rec_text)
             pocket = extract_pocket_atoms_from_candidates(
-                precomp, lig_coords, _w_pocket_config
+                precomp, heavy, _w_pocket_config
             )
             if pocket is None or pocket.atom_coords.shape[0] == 0:
                 continue
             feats = precompute_receptor_atom_features_from_text(rec_text)
-            centroid, rotation = _compute_canonical_frame(
-                pocket.ca_coords.astype(np.float64)
-            )
-            desc, _meta = _w_prot_desc.compute(pocket, feats, (centroid, rotation))
+            frame = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
+            prot_desc, _pm = _w_prot_desc.compute(pocket, feats, frame)
+            if prot_desc.shape[0] == 0:
+                continue
+            lig_desc = None
+            if _w_complex:
+                lig_desc, _e, _lm = _w_lig_desc.compute(
+                    mol["atoms"], mol["bonds"], frame
+                )
+                if lig_desc.shape[0] == 0:
+                    continue
         except Exception:
             logger.exception("Error on system %s in %s", sid, zip_path)
             continue
-        if desc.shape[0] > 0:
-            out.append((label, desc))
+        out.append((label, prot_desc, lig_desc))
     zf.close()
     return out
 
 
 class _Encoder:
-    """Buffers (split, descriptor) rows and flushes them through the atom VQ-VAE."""
+    """Buffers (prot, lig|None) rows and flushes them through the atom VQ-VAE."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -198,33 +240,52 @@ class _Encoder:
         self.writers = writers
         self.batch_size = batch_size
         self.device = device
-        self._buf: dict[str, list[torch.Tensor]] = {s: [] for s in writers}
+        self._prot: dict[str, list[torch.Tensor]] = {s: [] for s in writers}
+        self._lig: dict[str, list[torch.Tensor | None]] = {s: [] for s in writers}
 
-    def add(self, split: str, descriptor: np.ndarray) -> None:
-        if split not in self._buf:
+    def _norm(self, arr: np.ndarray) -> torch.Tensor:
+        return torch.from_numpy((arr - self.mean) / self.std).float()
+
+    def add(self, split: str, prot: np.ndarray, lig: np.ndarray | None) -> None:
+        if split not in self._prot:
             return
-        norm = (descriptor - self.mean) / self.std
-        self._buf[split].append(torch.from_numpy(norm).float())
-        if len(self._buf[split]) >= self.batch_size:
+        self._prot[split].append(self._norm(prot))
+        self._lig[split].append(self._norm(lig) if lig is not None else None)
+        if len(self._prot[split]) >= self.batch_size:
             self.flush(split)
 
-    def flush(self, split: str) -> None:
-        buf = self._buf[split]
-        if not buf:
-            return
-        x, mask = collate_molecules(buf)
+    def _encode(self, descs: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        x, mask = collate_molecules(descs)
         idx = self.module.vqvae.encode_batch(
             x.to(self.device), mask.to(self.device)
         ).cpu()
-        seqs = [
-            self.vocab.build_sequence(idx[i][mask[i]].tolist(), [])
-            for i in range(len(buf))
-        ]
+        return idx, mask
+
+    def flush(self, split: str) -> None:
+        prot = self._prot[split]
+        if not prot:
+            return
+        pidx, pmask = self._encode(prot)
+        ligs = self._lig[split]
+        if all(x is None for x in ligs):
+            seqs = [
+                self.vocab.build_sequence(pidx[i][pmask[i]].tolist(), [])
+                for i in range(len(prot))
+            ]
+        else:
+            lidx, lmask = self._encode([x for x in ligs if x is not None])
+            seqs = [
+                self.vocab.build_sequence(
+                    pidx[i][pmask[i]].tolist(), lidx[i][lmask[i]].tolist()
+                )
+                for i in range(len(prot))
+            ]
         self.writers[split].write(seqs)
-        buf.clear()
+        prot.clear()
+        ligs.clear()
 
     def flush_all(self) -> None:
-        for split in self._buf:
+        for split in list(self._prot):
             self.flush(split)
 
 
@@ -239,16 +300,27 @@ def main() -> None:  # noqa: PLR0915
         "--split", type=Path, default=Path("data/plinder/split.parquet")
     )
     parser.add_argument(
-        "--cd-manifest", type=Path, default=Path("data/hub_cache/repo/manifest.parquet")
+        "--cd-manifest",
+        type=Path,
+        default=Path("data/hub_cache/repo/manifest.parquet"),
     )
     parser.add_argument(
         "--out-dir", type=Path, default=Path("data/lm_tokens_protein_plinder")
+    )
+    parser.add_argument(
+        "--complex",
+        action="store_true",
+        help="Emit <p>pocket</p><l>ligand</l> (default: protein-only <l></l>).",
     )
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument("--max-residues", type=int, default=50)
     parser.add_argument("--num-rotations", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--mw-min", type=float, default=150.0)
+    parser.add_argument("--mw-max", type=float, default=600.0)
+    parser.add_argument("--min-heavy", type=int, default=6)
+    parser.add_argument("--max-heavy", type=int, default=60)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-zips", type=int, default=None, help="Debug subset.")
     args = parser.parse_args()
@@ -269,11 +341,17 @@ def main() -> None:  # noqa: PLR0915
     std = norm_stats["atom_std"].numpy()
     vocab = AtomLMVocab(codebook_size=args.codebook_size)
 
-    allowed = _load_allowed_systems(args.split, args.cd_manifest)
+    allowed = _load_allowed_systems(
+        args.split,
+        args.cd_manifest,
+        complex_mode=args.complex,
+        mw_min=args.mw_min,
+        mw_max=args.mw_max,
+    )
     zips = sorted(str(p) for p in args.systems_dir.glob("*.zip"))
     if args.max_zips is not None:
         zips = zips[: args.max_zips]
-    logger.info("Streaming %d PLINDER system zips", len(zips))
+    logger.info("Streaming %d PLINDER zips (complex=%s)", len(zips), args.complex)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     writers = {s: SplitWriter(args.out_dir, s) for s in ("train", "val")}
@@ -283,37 +361,47 @@ def main() -> None:  # noqa: PLR0915
     from dataclasses import asdict  # noqa: PLC0415
 
     pocket_cfg = PocketExtractionConfig(max_residues=args.max_residues)
-    n_pockets = 0
+    n_used = 0
 
-    def _consume(results: Iterable[tuple[str, np.ndarray]]) -> None:
-        nonlocal n_pockets
-        for label, desc in results:
-            n_pockets += 1
+    def _consume(results: list[tuple]) -> None:
+        nonlocal n_used
+        for label, prot, lig in results:
+            n_used += 1
             n_rot = args.num_rotations if label == "train" else 1
             for r in range(n_rot):
-                da = (
-                    desc
-                    if r == 0
-                    else rotate_atom_descriptor(desc, random_rotation_matrix(rng))
-                )
-                enc.add(label, da)
+                if r == 0:
+                    enc.add(label, prot, lig)
+                else:
+                    rot = random_rotation_matrix(rng)
+                    enc.add(
+                        label,
+                        rotate_atom_descriptor(prot, rot),
+                        rotate_atom_descriptor(lig, rot) if lig is not None else None,
+                    )
 
     from tqdm import tqdm  # noqa: PLC0415
 
+    init_args = (asdict(pocket_cfg), allowed)
+    init_kwargs = {
+        "complex_mode": args.complex,
+        "min_heavy": args.min_heavy,
+        "max_heavy": args.max_heavy,
+    }
     if args.num_workers > 0:
+        import functools  # noqa: PLC0415
         import multiprocessing  # noqa: PLC0415
 
         with multiprocessing.Pool(
             args.num_workers,
-            initializer=_worker_init,
-            initargs=(asdict(pocket_cfg), allowed),
+            initializer=functools.partial(_worker_init, **init_kwargs),
+            initargs=init_args,
         ) as pool:
             for results in tqdm(
                 pool.imap_unordered(_process_zip, zips), total=len(zips), desc="zips"
             ):
                 _consume(results)
     else:
-        _worker_init(asdict(pocket_cfg), allowed)
+        _worker_init(*init_args, **init_kwargs)
         for zp in tqdm(zips, desc="zips"):
             _consume(_process_zip(zp))
 
@@ -325,9 +413,9 @@ def main() -> None:  # noqa: PLR0915
         "all_atom": True,
         "pretrain": {
             "source": "plinder",
+            "mode": "complex" if args.complex else "protein_only",
             "num_rotations": args.num_rotations,
-            "pockets_used": n_pockets,
-            "protein_only": True,
+            "systems_used": n_used,
         },
         "splits": {},
     }
@@ -346,7 +434,7 @@ def main() -> None:  # noqa: PLR0915
             writer.max_len,
         )
     (args.out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-    logger.info("Wrote PLINDER protein-only token cache to %s", args.out_dir)
+    logger.info("Wrote PLINDER token cache to %s", args.out_dir)
 
 
 if __name__ == "__main__":

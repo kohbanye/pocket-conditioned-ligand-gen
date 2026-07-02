@@ -113,6 +113,70 @@ def _tokenize_split(  # noqa: PLR0913
     flush()
 
 
+def _build_pocket_plans(  # noqa: PLR0913
+    shard_dir: Path,
+    shard_counts: list[int],
+    manifest_path: Path,
+    source_types: list[str],
+    val_frac: float,
+    max_per_pocket: int,
+    seed: int,
+) -> tuple[list, list]:
+    """Pocket-level train/val plans over fold0-train pockets, capped per pocket.
+
+    Holds out ``val_frac`` of the fold0-TRAIN pockets as a held-out-pocket val
+    (disjoint from the fold0-test eval pockets), and caps complexes per pocket so
+    no pocket dominates the corpus.
+    """
+    from collections import defaultdict  # noqa: PLC0415
+
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    df = pq.read_table(
+        manifest_path,
+        columns=["pair_idx", "complex_dir", "source_type", "cdonly_fold0"],
+    ).to_pandas()
+    df = df[df["source_type"].isin(source_types)]
+    pair_to_pocket = dict(zip(df["pair_idx"], df["complex_dir"], strict=False))
+    train_pockets = sorted(
+        df[df["cdonly_fold0"] == "train"]["complex_dir"].dropna().unique()
+    )
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(train_pockets))
+    n_val = int(len(train_pockets) * val_frac)
+    val_pockets = {train_pockets[i] for i in perm[:n_val]}
+    pocket_split = {p: ("val" if p in val_pockets else "train") for p in train_pockets}
+
+    by_pocket: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for shard_idx, _count in enumerate(shard_counts):
+        shard = torch.load(shard_dir / f"shard_{shard_idx:04d}.pt", weights_only=False)
+        for local_idx, cplx in enumerate(shard):
+            pocket = pair_to_pocket.get(int(cplx["pair_idx"]))
+            if pocket in pocket_split:
+                by_pocket[pocket].append((shard_idx, local_idx))
+        del shard
+
+    train_by_shard: dict[int, list[int]] = defaultdict(list)
+    val_by_shard: dict[int, list[int]] = defaultdict(list)
+    for pocket, entries in by_pocket.items():
+        kept = entries
+        if len(entries) > max_per_pocket:
+            keep = rng.choice(len(entries), max_per_pocket, replace=False)
+            kept = [entries[i] for i in keep]
+        target = val_by_shard if pocket_split[pocket] == "val" else train_by_shard
+        for shard_idx, local_idx in kept:
+            target[shard_idx].append(local_idx)
+    train_plan = sorted((si, sorted(lis)) for si, lis in train_by_shard.items())
+    val_plan = sorted((si, sorted(lis)) for si, lis in val_by_shard.items())
+    logger.info(
+        "Pocket split: %d train / %d val pockets (cap %d/pocket)",
+        len(train_pockets) - n_val,
+        n_val,
+        max_per_pocket,
+    )
+    return train_plan, val_plan
+
+
 def main() -> None:  # noqa: PLR0915
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=Path, required=True, help="Atom VQ-VAE ckpt.")
@@ -131,6 +195,17 @@ def main() -> None:  # noqa: PLR0915
     parser.add_argument("--num-rotations", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--pocket-split",
+        action="store_true",
+        help="Split by POCKET over fold0-train pockets (hold out a fraction as a "
+        "held-out-pocket val; disjoint from the fold0-test eval pockets) and cap "
+        "complexes per pocket. Emits train+val only. Use for the conditional "
+        "fine-tune so CrossDocked's ~1.7k pockets don't dominate / overfit.",
+    )
+    parser.add_argument("--pocket-val-frac", type=float, default=0.12)
+    parser.add_argument("--max-per-pocket", type=int, default=32)
+    parser.add_argument("--split-seed", type=int, default=0)
     parser.add_argument("--max-pairs", type=int, default=None, help="Debug subset.")
     parser.add_argument("--include-decoys", action="store_true")
     parser.add_argument(
@@ -173,13 +248,31 @@ def main() -> None:  # noqa: PLR0915
 
     vocab = AtomLMVocab(codebook_size=args.codebook_size)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    plans = {
-        "train": dm._train_plan,  # noqa: SLF001
-        "val": dm._val_plan,  # noqa: SLF001
-        "test": dm._test_plan,  # noqa: SLF001
-    }
     shard_dir = dm._shard_dir  # noqa: SLF001
     assert shard_dir is not None  # noqa: S101
+
+    if args.pocket_split:
+        shard_counts = torch.load(
+            dm.cache_dir / "shard_metadata.pt", weights_only=False
+        )["shard_counts"]
+        manifest_path = Path(hub_config.cache_dir) / "repo" / "manifest.parquet"
+        train_plan, val_plan = _build_pocket_plans(
+            shard_dir,
+            shard_counts,
+            manifest_path,
+            args.source_types,
+            args.pocket_val_frac,
+            args.max_per_pocket,
+            args.split_seed,
+        )
+        plans = {"train": train_plan, "val": val_plan}
+        args.splits = ["train", "val"]
+    else:
+        plans = {
+            "train": dm._train_plan,  # noqa: SLF001
+            "val": dm._val_plan,  # noqa: SLF001
+            "test": dm._test_plan,  # noqa: SLF001
+        }
     rng = np.random.default_rng(args.seed)
 
     meta: dict = {
