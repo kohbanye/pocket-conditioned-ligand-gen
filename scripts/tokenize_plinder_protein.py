@@ -47,7 +47,7 @@ from src.tokenizers.atom import (
 )
 from src.tokenizers.geometry import random_rotation_matrix
 from src.tokenizers.ligand import parse_sdf_text
-from src.tokenizers.lm_vocab import AtomLMVocab
+from src.tokenizers.lm_vocab import AtomLMVocab, LMVocab
 from src.tokenizers.protein import (
     _compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
@@ -72,17 +72,24 @@ def _system_pdb(system_id: str) -> str:
     return system_id.split("__", 1)[0].lower()
 
 
-def _load_allowed_systems(
+def _load_allowed_systems(  # noqa: PLR0913
     split_path: Path,
     cd_manifest: Path,
     *,
     complex_mode: bool,
     mw_min: float,
     mw_max: float,
+    casf_pdbs: set[str] | None = None,
 ) -> dict[str, str]:
-    """Map kept ``system_id -> split`` ('train'/'val'), leak-filtered + drug-like."""
+    """Map kept ``system_id -> split`` ('train'/'val'), leak-filtered + drug-like.
+
+    ``casf_pdbs`` (lowercase 4-char PDB ids) are dropped so the CASF-2016 core is
+    held out of pretraining -- required for an honest rescoring benchmark, since
+    continuing to train on them causes native-pose memorization.
+    """
     import pyarrow.parquet as pq  # noqa: PLC0415
 
+    casf = casf_pdbs or set()
     sp = pq.read_table(split_path).to_pandas()
     split_col = (
         "split"
@@ -101,12 +108,15 @@ def _load_allowed_systems(
     )
 
     allowed: dict[str, str] = {}
-    n_leak = n_mw = 0
+    n_leak = n_mw = n_casf = 0
     for row in sp.itertuples(index=False):
         label = getattr(row, split_col)
         if label not in ("train", "val"):
             continue
         sid = str(getattr(row, sid_col))
+        if _system_pdb(sid) in casf:
+            n_casf += 1
+            continue
         if _system_pdb(sid) in cd_test_pdbs:
             n_leak += 1
             continue
@@ -117,8 +127,10 @@ def _load_allowed_systems(
                 continue
         allowed[sid] = label
     logger.info(
-        "PLINDER kept: %d | leak-dropped: %d | MW-filtered: %d (complex=%s)",
+        "PLINDER kept: %d | CASF-dropped: %d | CD-leak-dropped: %d | "
+        "MW-filtered: %d (complex=%s)",
         len(allowed),
+        n_casf,
         n_leak,
         n_mw,
         complex_mode,
@@ -289,7 +301,7 @@ class _Encoder:
             self.flush(split)
 
 
-def main() -> None:  # noqa: PLR0915
+def main() -> None:  # noqa: PLR0915, C901
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", type=Path, required=True, help="Atom VQ-VAE ckpt.")
     parser.add_argument("--norm-stats", type=Path, required=True)
@@ -305,6 +317,12 @@ def main() -> None:  # noqa: PLR0915
         default=Path("data/hub_cache/repo/manifest.parquet"),
     )
     parser.add_argument(
+        "--casf-pdbs",
+        type=Path,
+        default=None,
+        help="Newline-separated CASF-2016 core PDB ids to hold out of pretraining.",
+    )
+    parser.add_argument(
         "--out-dir", type=Path, default=Path("data/lm_tokens_protein_plinder")
     )
     parser.add_argument(
@@ -313,6 +331,12 @@ def main() -> None:  # noqa: PLR0915
         help="Emit <p>pocket</p><l>ligand</l> (default: protein-only <l></l>).",
     )
     parser.add_argument("--codebook-size", type=int, default=8192)
+    parser.add_argument(
+        "--split-codebook",
+        action="store_true",
+        help="Split-codebook VQ (protein + ligand books) -> 2-range LMVocab.",
+    )
+    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
     parser.add_argument("--max-residues", type=int, default=50)
     parser.add_argument("--num-rotations", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=16)
@@ -330,6 +354,9 @@ def main() -> None:  # noqa: PLR0915
 
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
+    if args.split_codebook:
+        config.atom.split_codebook = True
+        config.atom.ligand_codebook_size = args.ligand_codebook_size
     module = AtomVQVAEModule.load_from_checkpoint(
         args.ckpt, config=config, map_location=device
     )
@@ -339,14 +366,26 @@ def main() -> None:  # noqa: PLR0915
     module.vqvae.set_normalization(norm_stats["atom_mean"], norm_stats["atom_std"])
     mean = norm_stats["atom_mean"].numpy()
     std = norm_stats["atom_std"].numpy()
-    vocab = AtomLMVocab(codebook_size=args.codebook_size)
+    if args.split_codebook:
+        vocab: AtomLMVocab | LMVocab = LMVocab(
+            protein_codebook_size=args.codebook_size,
+            ligand_codebook_size=args.ligand_codebook_size,
+        )
+    else:
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
 
+    casf_pdbs = None
+    if args.casf_pdbs is not None and args.casf_pdbs.exists():
+        casf_pdbs = {
+            p.strip().lower() for p in args.casf_pdbs.read_text().split() if p.strip()
+        }
     allowed = _load_allowed_systems(
         args.split,
         args.cd_manifest,
         complex_mode=args.complex,
         mw_min=args.mw_min,
         mw_max=args.mw_max,
+        casf_pdbs=casf_pdbs,
     )
     zips = sorted(str(p) for p in args.systems_dir.glob("*.zip"))
     if args.max_zips is not None:
@@ -408,8 +447,6 @@ def main() -> None:  # noqa: PLR0915
     enc.flush_all()
     meta: dict = {
         "vocab_size": vocab.vocab_size,
-        "atom_codebook_size": args.codebook_size,
-        "atom_offset": vocab.offset,
         "all_atom": True,
         "pretrain": {
             "source": "plinder",
@@ -419,6 +456,15 @@ def main() -> None:  # noqa: PLR0915
         },
         "splits": {},
     }
+    if args.split_codebook:
+        meta["split_codebook"] = True
+        meta["protein_codebook_size"] = args.codebook_size
+        meta["ligand_codebook_size"] = args.ligand_codebook_size
+        meta["protein_offset"] = vocab.protein_offset
+        meta["ligand_offset"] = vocab.ligand_offset
+    else:
+        meta["atom_codebook_size"] = args.codebook_size
+        meta["atom_offset"] = vocab.offset
     for split, writer in writers.items():
         writer.close()
         meta["splits"][split] = {

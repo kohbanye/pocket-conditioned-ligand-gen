@@ -38,7 +38,7 @@ from src.data.token_io import SplitWriter
 from src.model.vqvae_module import AtomVQVAEModule
 from src.tokenizers.atom import LigandAtomDescriptor, rotate_atom_descriptor
 from src.tokenizers.geometry import random_rotation_matrix
-from src.tokenizers.lm_vocab import AtomLMVocab
+from src.tokenizers.lm_vocab import AtomLMVocab, LMVocab
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -131,6 +131,13 @@ def main() -> None:  # noqa: C901, PLR0915
     parser.add_argument("--num-rotations", type=int, default=8)
     parser.add_argument("--heavy-atom-max", type=int, default=120)
     parser.add_argument("--codebook-size", type=int, default=8192)
+    parser.add_argument(
+        "--split-codebook",
+        action="store_true",
+        help="Split-codebook VQ (protein + ligand books) -> 2-range LMVocab. "
+        "GEOM is ligand-only, so tokens land in the ligand range.",
+    )
+    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
     parser.add_argument("--val-frac", type=float, default=0.005)
     parser.add_argument("--test-frac", type=float, default=0.005)
     parser.add_argument("--seed", type=int, default=0)
@@ -146,6 +153,9 @@ def main() -> None:  # noqa: C901, PLR0915
 
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
+    if args.split_codebook:
+        config.atom.split_codebook = True
+        config.atom.ligand_codebook_size = args.ligand_codebook_size
     module = AtomVQVAEModule.load_from_checkpoint(
         args.ckpt, config=config, map_location=device
     )
@@ -156,7 +166,13 @@ def main() -> None:  # noqa: C901, PLR0915
     mean = norm_stats["atom_mean"].numpy()
     std = norm_stats["atom_std"].numpy()
 
-    vocab = AtomLMVocab(codebook_size=args.codebook_size)
+    if args.split_codebook:
+        vocab: AtomLMVocab | LMVocab = LMVocab(
+            protein_codebook_size=args.codebook_size,
+            ligand_codebook_size=args.ligand_codebook_size,
+        )
+    else:
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
     wanted = set(args.splits)
 
     from tqdm import tqdm  # noqa: PLC0415
@@ -218,8 +234,6 @@ def main() -> None:  # noqa: C901, PLR0915
 
     meta: dict = {
         "vocab_size": vocab.vocab_size,
-        "atom_codebook_size": args.codebook_size,
-        "atom_offset": vocab.offset,
         "all_atom": True,
         "pretrain": {
             "source": "geom",
@@ -233,6 +247,15 @@ def main() -> None:  # noqa: C901, PLR0915
         },
         "splits": {},
     }
+    if args.split_codebook:
+        meta["split_codebook"] = True
+        meta["protein_codebook_size"] = args.codebook_size
+        meta["ligand_codebook_size"] = args.ligand_codebook_size
+        meta["protein_offset"] = vocab.protein_offset
+        meta["ligand_offset"] = vocab.ligand_offset
+    else:
+        meta["atom_codebook_size"] = args.codebook_size
+        meta["atom_offset"] = vocab.offset
     for split, writer in writers.items():
         writer.close()
         meta["splits"][split] = {

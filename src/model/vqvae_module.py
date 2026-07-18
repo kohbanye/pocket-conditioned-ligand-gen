@@ -351,22 +351,50 @@ class AtomVQVAEModule(L.LightningModule):
         self.log(f"{prefix}_commit", out["commitment_loss"], sync_dist=not train)
         for name, hl in out["head_losses"].items():
             self.log(f"{prefix}_{name}", hl, sync_dist=not train)
-        real_indices = out["indices"][mask]
-        unique_codes = real_indices.unique().numel()
-        self.log(
-            f"{prefix}_codebook_util",
-            unique_codes / self.config.atom.codebook_size,
-        )
-        counts = torch.bincount(
-            real_indices, minlength=self.config.atom.codebook_size
-        ).float()
-        probs = counts / counts.sum().clamp_min(1.0)
-        probs = probs[probs > 0]
-        entropy = -(probs * probs.log()).sum()
-        self.log(f"{prefix}_perplexity", entropy.exp())
+        if getattr(self.config.atom, "split_codebook", False):
+            self._log_split_utilization(prefix, x, out["indices"], mask, train=train)
+        else:
+            self._log_utilization(
+                prefix, out["indices"][mask], self.config.atom.codebook_size
+            )
         for key, value in out["diagnostics"].items():
             self.log(f"{prefix}_{key}", value.float(), sync_dist=not train)
         return loss
+
+    def _log_utilization(self, prefix: str, indices: Tensor, size: int) -> None:
+        if indices.numel() == 0:
+            return
+        self.log(f"{prefix}_codebook_util", indices.unique().numel() / size)
+        counts = torch.bincount(indices, minlength=size).float()
+        probs = counts / counts.sum().clamp_min(1.0)
+        probs = probs[probs > 0]
+        self.log(f"{prefix}_perplexity", (-(probs * probs.log()).sum()).exp())
+
+    def _log_split_utilization(
+        self,
+        prefix: str,
+        x: Tensor,
+        indices: Tensor,
+        mask: Tensor,
+        *,
+        train: bool,  # noqa: ARG002
+    ) -> None:
+        # Protein and ligand indices share the 0-based value range but come from
+        # different books; utilisation / perplexity must be computed per source.
+        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+            ATOM_LAYOUT,
+            SOURCE_LIGAND_IDX,
+            SOURCE_PROTEIN_IDX,
+            fields_by_name,
+        )
+
+        source = x[..., fields_by_name(ATOM_LAYOUT)["source"].start].long()
+        for tag, sidx, size in (
+            ("protein", SOURCE_PROTEIN_IDX, self.config.atom.codebook_size),
+            ("ligand", SOURCE_LIGAND_IDX, self.config.atom.ligand_codebook_size),
+        ):
+            sel = mask & (source == sidx)
+            self._log_utilization(f"{prefix}_{tag}", indices[sel], size)
 
     def training_step(
         self,

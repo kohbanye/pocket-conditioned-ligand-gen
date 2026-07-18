@@ -35,7 +35,7 @@ from src.data.token_io import SplitWriter
 from src.model.vqvae_module import AtomVQVAEModule
 from src.tokenizers.atom import rotate_atom_descriptor
 from src.tokenizers.geometry import random_rotation_matrix
-from src.tokenizers.lm_vocab import AtomLMVocab
+from src.tokenizers.lm_vocab import AtomLMVocab, LMVocab
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -121,6 +121,7 @@ def _build_pocket_plans(  # noqa: PLR0913
     val_frac: float,
     max_per_pocket: int,
     seed: int,
+    casf_pdbs: set[str] | None = None,
 ) -> tuple[list, list]:
     """Pocket-level train/val plans over fold0-train pockets, capped per pocket.
 
@@ -134,9 +135,20 @@ def _build_pocket_plans(  # noqa: PLR0913
 
     df = pq.read_table(
         manifest_path,
-        columns=["pair_idx", "complex_dir", "source_type", "cdonly_fold0"],
+        columns=[
+            "pair_idx",
+            "complex_dir",
+            "source_type",
+            "cdonly_fold0",
+            "receptor_pdb",
+        ],
     ).to_pandas()
     df = df[df["source_type"].isin(source_types)]
+    if casf_pdbs:
+        pdb = df["receptor_pdb"].str.extract(r"^([0-9a-zA-Z]{4})_")[0].str.lower()
+        n_before = len(df)
+        df = df[~pdb.isin(casf_pdbs)]
+        logger.info("CASF-excluded %d CrossDocked pairs", n_before - len(df))
     pair_to_pocket = dict(zip(df["pair_idx"], df["complex_dir"], strict=False))
     train_pockets = sorted(
         df[df["cdonly_fold0"] == "train"]["complex_dir"].dropna().unique()
@@ -187,6 +199,14 @@ def main() -> None:  # noqa: PLR0915
     parser.add_argument("--source-types", type=str, nargs="+", default=["cdonly"])
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument(
+        "--split-codebook",
+        action="store_true",
+        help="Split-codebook VQ (protein + ligand books). Emits a 2-range "
+        "LMVocab (protein range + ligand range) instead of the single-range "
+        "AtomLMVocab. Must match the VQ checkpoint.",
+    )
+    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
+    parser.add_argument(
         "--norm-stats",
         type=Path,
         default=None,
@@ -207,6 +227,12 @@ def main() -> None:  # noqa: PLR0915
     parser.add_argument("--max-per-pocket", type=int, default=32)
     parser.add_argument("--split-seed", type=int, default=0)
     parser.add_argument("--max-pairs", type=int, default=None, help="Debug subset.")
+    parser.add_argument(
+        "--casf-pdbs",
+        type=Path,
+        default=None,
+        help="Newline-separated CASF-2016 core PDB ids to hold out (leak-free).",
+    )
     parser.add_argument("--include-decoys", action="store_true")
     parser.add_argument(
         "--splits", type=str, nargs="+", default=["train", "val", "test"]
@@ -215,6 +241,9 @@ def main() -> None:  # noqa: PLR0915
 
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
+    if args.split_codebook:
+        config.atom.split_codebook = True
+        config.atom.ligand_codebook_size = args.ligand_codebook_size
 
     data_config = CrossDockedConfig()
     if args.max_pairs is not None:
@@ -246,7 +275,13 @@ def main() -> None:  # noqa: PLR0915
         dm.norm_stats["atom_mean"], dm.norm_stats["atom_std"]
     )
 
-    vocab = AtomLMVocab(codebook_size=args.codebook_size)
+    if args.split_codebook:
+        vocab = LMVocab(
+            protein_codebook_size=args.codebook_size,
+            ligand_codebook_size=args.ligand_codebook_size,
+        )
+    else:
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     shard_dir = dm._shard_dir  # noqa: SLF001
     assert shard_dir is not None  # noqa: S101
@@ -256,6 +291,13 @@ def main() -> None:  # noqa: PLR0915
             dm.cache_dir / "shard_metadata.pt", weights_only=False
         )["shard_counts"]
         manifest_path = Path(hub_config.cache_dir) / "repo" / "manifest.parquet"
+        casf_pdbs = None
+        if args.casf_pdbs is not None and args.casf_pdbs.exists():
+            casf_pdbs = {
+                p.strip().lower()
+                for p in args.casf_pdbs.read_text().split()
+                if p.strip()
+            }
         train_plan, val_plan = _build_pocket_plans(
             shard_dir,
             shard_counts,
@@ -264,6 +306,7 @@ def main() -> None:  # noqa: PLR0915
             args.pocket_val_frac,
             args.max_per_pocket,
             args.split_seed,
+            casf_pdbs=casf_pdbs,
         )
         plans = {"train": train_plan, "val": val_plan}
         args.splits = ["train", "val"]
@@ -277,12 +320,19 @@ def main() -> None:  # noqa: PLR0915
 
     meta: dict = {
         "vocab_size": vocab.vocab_size,
-        "atom_codebook_size": args.codebook_size,
-        "atom_offset": vocab.offset,
         "num_rotations": args.num_rotations,
         "all_atom": True,
         "splits": {},
     }
+    if args.split_codebook:
+        meta["split_codebook"] = True
+        meta["protein_codebook_size"] = args.codebook_size
+        meta["ligand_codebook_size"] = args.ligand_codebook_size
+        meta["protein_offset"] = vocab.protein_offset
+        meta["ligand_offset"] = vocab.ligand_offset
+    else:
+        meta["atom_codebook_size"] = args.codebook_size
+        meta["atom_offset"] = vocab.offset
     for split in args.splits:
         plan = plans[split]
         if not plan:

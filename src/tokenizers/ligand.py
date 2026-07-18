@@ -144,6 +144,76 @@ def parse_sdf_text(text: str) -> list[dict]:  # noqa: C901, PLR0912, PLR0915
     return molecules
 
 
+def parse_ligand_pdb_text(
+    text: str,
+    template_smiles: str | None = None,
+    max_template_atoms: int = 70,
+) -> dict | None:
+    """Parse a ligand PDB block (e.g. BioLIP ``ligand/*.pdb``) into a mol dict.
+
+    BioLIP ligands ship as PDB with coordinates + elements but no reliable bond
+    orders. Connectivity is recovered by RDKit proximity bonding; bond ORDERS
+    (needed for the aromatic/hybridisation/ring atom features) are then fixed
+    from the CCD template SMILES when one is supplied (``ligand.tsv`` gives one
+    or more ``;``-separated SMILES per 3-letter CCD id). Falls back to the
+    proximity graph (single bonds) if no template matches.
+
+    Returns the same ``{"atoms": [(elem, x, y, z)], "bonds": [(i, j, type)]}``
+    shape as :func:`parse_sdf_text` (0-indexed, atom order preserved), or
+    ``None`` on parse failure.
+    """
+    import contextlib  # noqa: PLC0415
+
+    from rdkit import Chem  # noqa: PLC0415
+    from rdkit.Chem import AllChem  # noqa: PLC0415
+
+    mol = Chem.MolFromPDBBlock(
+        text, sanitize=False, removeHs=False, proximityBonding=True
+    )
+    if mol is None or mol.GetNumAtoms() == 0:
+        return None
+    with contextlib.suppress(Exception):
+        mol.UpdatePropertyCache(strict=False)
+
+    # AssignBondOrdersFromTemplate can hang on large / highly-symmetric molecules
+    # (combinatorial substructure matching). Such ligands are cofactor-sized and
+    # dropped by the downstream heavy-atom filter anyway, so skip the template for
+    # them and keep the cheap proximity graph.
+    if template_smiles and mol.GetNumHeavyAtoms() <= max_template_atoms:
+        for smi in template_smiles.split(";"):
+            tmpl = Chem.MolFromSmiles(smi.strip())
+            if tmpl is None:
+                continue
+            try:
+                mol = AllChem.AssignBondOrdersFromTemplate(tmpl, mol)
+                break
+            except Exception:  # noqa: BLE001, S112
+                continue
+
+    try:
+        conf = mol.GetConformer()
+    except ValueError:
+        return None
+
+    bond_type_map = {
+        Chem.BondType.SINGLE: 1,
+        Chem.BondType.DOUBLE: 2,
+        Chem.BondType.TRIPLE: 3,
+        Chem.BondType.AROMATIC: 4,
+    }
+    atoms = []
+    for i, atom in enumerate(mol.GetAtoms()):
+        pos = conf.GetAtomPosition(i)
+        atoms.append((atom.GetSymbol(), pos.x, pos.y, pos.z))
+    bonds = [
+        (b.GetBeginAtomIdx(), b.GetEndAtomIdx(), bond_type_map.get(b.GetBondType(), 1))
+        for b in mol.GetBonds()
+    ]
+    if not atoms:
+        return None
+    return {"atoms": atoms, "bonds": bonds}
+
+
 # ---------------------------------------------------------------------------
 # RDKit atom-feature extraction
 # ---------------------------------------------------------------------------

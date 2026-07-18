@@ -34,7 +34,21 @@ def main() -> None:
     parser.add_argument("--source-types", type=str, nargs="+", default=["cdonly"])
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--cache-dir", type=Path, default=None)
-    parser.add_argument("--codebook-size", type=int, default=None)
+    parser.add_argument(
+        "--codebook-size",
+        type=int,
+        default=None,
+        help="Protein codebook size (also the sole codebook when not --split).",
+    )
+    parser.add_argument(
+        "--split-codebook",
+        action="store_true",
+        help="Split the discrete bottleneck by source: protein atoms -> "
+        "--codebook-size codes, ligand atoms -> --ligand-codebook-size codes "
+        "(one shared descriptor/encoder/decoder). Fixes ligand connectivity "
+        "being diluted by the ~10x more numerous protein atoms.",
+    )
+    parser.add_argument("--ligand-codebook-size", type=int, default=None)
     parser.add_argument("--mol-batch-size", type=int, default=None)
     parser.add_argument(
         "--max-residues",
@@ -44,6 +58,14 @@ def main() -> None:
     )
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument(
+        "--devices",
+        type=int,
+        default=None,
+        help="GPUs to use (default auto = all). Set 1 for single-GPU: this "
+        "small VQ is communication-bound, so multi-GPU DDP gives ~no speedup "
+        "-- one full node_f H100 is faster than 4-GPU DDP or a gpu_1 slice.",
+    )
     parser.add_argument(
         "--include-decoys",
         action="store_true",
@@ -55,6 +77,10 @@ def main() -> None:
     data_config = CrossDockedConfig()
     if args.codebook_size is not None:
         config.atom.codebook_size = args.codebook_size
+    if args.split_codebook:
+        config.atom.split_codebook = True
+    if args.ligand_codebook_size is not None:
+        config.atom.ligand_codebook_size = args.ligand_codebook_size
     if args.mol_batch_size is not None:
         config.mol_batch_size = args.mol_batch_size
     if args.num_workers is not None:
@@ -84,6 +110,7 @@ def main() -> None:
     trainer = L.Trainer(
         max_epochs=config.max_epochs,
         accelerator="auto",
+        devices=args.devices if args.devices is not None else "auto",
         precision=config.precision,
         logger=WandbLogger(project="pocket-ligand-vqvae", name=args.run_name),
         callbacks=[

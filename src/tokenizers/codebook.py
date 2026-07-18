@@ -79,22 +79,39 @@ class EMACodebook(nn.Module):
         return quantized, indices, commitment_loss, diagnostics
 
     def _ema_update(self, z: Tensor, indices: Tensor) -> None:
-        """Update codebook embeddings via exponential moving average."""
+        """Update codebook embeddings via exponential moving average.
+
+        Under DDP the codebook is a buffer updated in-place during forward, so
+        each rank would otherwise EMA-update from only its local shard (and the
+        default ``broadcast_buffers=True`` would then keep only rank 0's view,
+        i.e. train the codebook on 1/N of the data). All-reducing the per-batch
+        cluster sizes / embedding sums makes every rank update from the GLOBAL
+        batch and stay in sync. No-op on a single process.
+        """
         one_hot = torch.zeros(
             indices.shape[0],
             self.num_codes,
             device=z.device,
         ).scatter_(1, indices.unsqueeze(1), 1.0)
 
-        # Update cluster sizes
         batch_cluster_size = one_hot.sum(dim=0)
+        batch_embedding_sum = one_hot.t() @ z
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(
+                batch_cluster_size, op=torch.distributed.ReduceOp.SUM
+            )
+            torch.distributed.all_reduce(
+                batch_embedding_sum, op=torch.distributed.ReduceOp.SUM
+            )
+
+        # Update cluster sizes
         self.ema_cluster_size.mul_(self.ema_decay).add_(
             batch_cluster_size,
             alpha=1 - self.ema_decay,
         )
 
         # Update embedding sums
-        batch_embedding_sum = one_hot.t() @ z
         self.ema_embedding_sum.mul_(self.ema_decay).add_(
             batch_embedding_sum,
             alpha=1 - self.ema_decay,
