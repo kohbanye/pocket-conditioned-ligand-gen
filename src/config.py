@@ -175,6 +175,13 @@ class AtomVQVAEConfig:
     recon_weights: dict[str, float] = field(
         default_factory=_default_atom_recon_weights,
     )
+    # Split the discrete bottleneck by source: protein atoms quantize against
+    # ``codebook_size`` codes, ligand atoms against ``ligand_codebook_size``.
+    # The unified 33-D descriptor + one shared encoder/decoder are kept; only
+    # the codebook is per-source, so ligand geometry is not diluted by the ~10x
+    # more numerous protein atoms (which collapsed ligand connectivity to 47%).
+    split_codebook: bool = False
+    ligand_codebook_size: int = 4096
 
 
 @dataclass
@@ -261,9 +268,7 @@ class LigandLMConfig:
         if self.atom_codebook_size is not None:
             return _NUM_SPECIAL_TOKENS + self.atom_codebook_size
         return (
-            _NUM_SPECIAL_TOKENS
-            + self.protein_codebook_size
-            + self.ligand_codebook_size
+            _NUM_SPECIAL_TOKENS + self.protein_codebook_size + self.ligand_codebook_size
         )
 
 
@@ -295,3 +300,156 @@ class LMTrainingConfig:
     precision: str = "bf16-mixed"
 
     model: LigandLMConfig = field(default_factory=LigandLMConfig)
+
+
+@dataclass
+class ComplexMLMConfig:
+    """Architecture config for the self-implemented ESM-style complex-token MLM.
+
+    A from-scratch bidirectional transformer encoder (rotary attention, pre-LN
+    blocks, tied MLM head) -- ESM-*style* but not HuggingFace's ``EsmModel``.
+    Same VQ-VAE token vocabulary as the decoder LM, plus one appended ``<mask>``
+    token at id ``base_vocab_size`` (so existing codebook offsets are untouched
+    and the token caches remain valid). The MLM head predicts over the full
+    embedding table; the ``<mask>`` id is only ever an input, never a target.
+    """
+
+    # Base vocabulary (mirror LigandLMConfig): single shared all-atom codebook
+    # when ``atom_codebook_size`` is set, else the legacy protein+ligand ranges.
+    protein_codebook_size: int = 8192
+    ligand_codebook_size: int = 4096
+    atom_codebook_size: int | None = None
+
+    # ~100M-param ESM3-style encoder: 13 x (hidden 768, 12 heads, SwiGLU 8/3).
+    # head_dim = 64. Faithful to Biohub/esm UnifiedTransformerBlock: rotary attn,
+    # QK-LayerNorm, SwiGLU FFN (hidden rounded to a 256-multiple), residual
+    # scaling by sqrt(n_layers/36), final LayerNorm(bias=False), bias-free.
+    hidden_size: int = 768
+    num_hidden_layers: int = 13
+    num_attention_heads: int = 12
+    ffn_expansion_ratio: float = 8 / 3
+    qk_layernorm: bool = True
+    bias: bool = False
+    scale_residue: bool = True
+    dropout: float = 0.0
+    layer_norm_eps: float = 1e-5
+    rope_theta: float = 10000.0
+    # Upper bound for the rotary cos/sin cache; complex docs are <= ~496.
+    max_position_embeddings: int = 1024
+    tie_word_embeddings: bool = True
+
+    @property
+    def head_dim(self) -> int:
+        return self.hidden_size // self.num_attention_heads
+
+    @property
+    def base_vocab_size(self) -> int:
+        """Number of real token ids (specials + codebook), before ``<mask>``."""
+        if self.atom_codebook_size is not None:
+            return _NUM_SPECIAL_TOKENS + self.atom_codebook_size
+        return (
+            _NUM_SPECIAL_TOKENS + self.protein_codebook_size + self.ligand_codebook_size
+        )
+
+    @property
+    def mask_token_id(self) -> int:
+        """``<mask>`` appended after all real ids (does not shift codebook offsets)."""
+        return self.base_vocab_size
+
+    @property
+    def vocab_size(self) -> int:
+        """Embedding / head size: base vocabulary + the appended ``<mask>``."""
+        return self.base_vocab_size + 1
+
+
+@dataclass
+class MLMTrainingConfig:
+    """Config for from-scratch training of the bidirectional complex-token MLM."""
+
+    token_dir: Path = Path("data/lm_tokens_finetune_mixed")
+    # Max sequence length (complex docs are <= ~496; block_size caps/truncates).
+    block_size: int = 512
+    micro_batch_size: int = 64
+    gradient_accumulation: int = 1
+
+    # BERT-style dynamic masking. Of the ``mask_prob`` selected positions:
+    # ``mask_replace_prob`` -> <mask>, ``mask_random_prob`` -> random codebook
+    # token, remainder -> unchanged. Only codebook tokens are ever masked
+    # (specials <p>/<l>/<bos>/... are excluded so structure markers stay intact).
+    mask_prob: float = 0.15
+    mask_replace_prob: float = 0.8
+    mask_random_prob: float = 0.1
+    # When True, only ligand (``<l>..</l>``) tokens are masked -> the model learns
+    # P(ligand | pocket) bidirectionally (a condition-only / rescoring-tuned MLM).
+    ligand_only_masking: bool = False
+
+    learning_rate: float = 4e-4
+    min_lr_ratio: float = 0.1
+    weight_decay: float = 0.01
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.98
+    grad_clip: float = 1.0
+    warmup_steps: int = 2000
+
+    max_epochs: int = 10
+    num_workers: int = 8
+    precision: str = "bf16-mixed"
+
+    model: ComplexMLMConfig = field(default_factory=ComplexMLMConfig)
+
+
+@dataclass
+class RescoreTrainingConfig:
+    """Config for fine-tuning a pose-scoring head on the pretrained MLM encoder.
+
+    The encoder (:class:`ComplexMLMConfig`) is warm-started from a pretrained MLM
+    checkpoint; a small MLP head over the mean-pooled ligand-token representations
+    regresses the pose RMSD (lower = more native-like). Trained on RMSD-labelled
+    decoys (:mod:`scripts.tokenize_decoys`).
+    """
+
+    token_dir: Path = Path("data/lm_tokens_decoys")
+    block_size: int = 512
+    micro_batch_size: int = 32
+    gradient_accumulation: int = 1
+
+    head_dropout: float = 0.1
+    # Target RMSDs are clipped here (a 12 A decoy is no worse than an 8 A one for
+    # ranking) and losses beyond ~this add noise.
+    rmsd_cap: float = 8.0
+
+    # Pairwise ranking loss (docking power is a ranking task, not regression).
+    # When > 0, batches are grouped by complex (native pose has RMSD 0.0 marks
+    # each group boundary) and a margin loss pushes pred(lower-RMSD) below
+    # pred(higher-RMSD) within each complex, added to the regression loss.
+    ranking_loss_weight: float = 0.0
+    ranking_margin: float = 0.5
+    complexes_per_batch: int = 8
+    # Cap on docs drawn per group in one batch. Needed for the affinity corpus,
+    # where a group is a protein and sizes range from 1 to ~700 ligands.
+    # 0 = take the whole group (pose corpus: ~20 poses/complex).
+    max_per_group: int = 0
+
+    # Ligand-token pooling for the head. "mean" averages (a single bad-contact
+    # atom is washed out); "meanmax" concatenates mean + max so the worst atom
+    # -- the strongest wrong-pose signal -- survives to the head.
+    pooling: str = "mean"
+
+    # Freeze the pretrained encoder and train only the pooling + head. Cuts the
+    # trainable capacity from 99M to ~1M so a ranking loss can't memorize the
+    # small affinity corpus; the head re-weights fixed features instead.
+    freeze_encoder: bool = False
+
+    learning_rate: float = 1e-4  # low: the encoder is pretrained
+    min_lr_ratio: float = 0.1
+    weight_decay: float = 0.01
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.98
+    grad_clip: float = 1.0
+    warmup_steps: int = 500
+
+    max_epochs: int = 10
+    num_workers: int = 8
+    precision: str = "bf16-mixed"
+
+    model: ComplexMLMConfig = field(default_factory=ComplexMLMConfig)
