@@ -53,8 +53,13 @@ from scripts.dock_vina import (  # noqa: E402
 from scripts.eval_posebusters import _reconstruct  # noqa: E402
 from scripts.generate_ligands_3d import (  # noqa: E402
     _decode_ligand,
+    _decode_ligand_atom,
     _pocket_codes,
+    _pocket_codes_atom,
     _read_mol_from_tar,
+    load_atom_lm,
+    load_atom_norm_stats,
+    load_atom_vqvae,
 )
 from src.config import (  # noqa: E402
     CrossDockedConfig,
@@ -65,6 +70,8 @@ from src.config import (  # noqa: E402
 from src.data.descriptors import ComplexDescriptorDataModule  # noqa: E402
 from src.model.lm_module import LigandLMModule  # noqa: E402
 from src.model.vqvae_module import VQVAEModule  # noqa: E402
+from src.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
+from src.tokenizers.descriptor_schema import SOURCE_LIGAND_IDX  # noqa: E402
 from src.tokenizers.lm_vocab import (  # noqa: E402
     BOS_ID,
     L_CLOSE_ID,
@@ -72,6 +79,7 @@ from src.tokenizers.lm_vocab import (  # noqa: E402
     P_CLOSE_ID,
     P_OPEN_ID,
     PAD_ID,
+    AtomLMVocab,
     LMVocab,
 )
 from src.tokenizers.protein import BackboneSphericalDescriptor  # noqa: E402
@@ -195,6 +203,26 @@ def main() -> None:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-new-tokens", type=int, default=160)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--all-atom",
+        action="store_true",
+        help="Use the unified all-atom tokenizer (AtomLMVocab + AtomVQVAEModule); "
+        "every --lm-ckpts entry is then an all-atom LM sharing one atom VQ-VAE.",
+    )
+    parser.add_argument(
+        "--split-codebook",
+        action="store_true",
+        help="All-atom VQ with SPLIT codebooks (protein + ligand) -> 2-range "
+        "LMVocab. Implies all-atom.",
+    )
+    parser.add_argument("--codebook-size", type=int, default=8192)
+    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
+    parser.add_argument(
+        "--norm-stats",
+        type=Path,
+        default=PROJECT_ROOT / "data" / "descriptor_cache_allatom"
+        / "normalization_stats.pt",
+    )
     parser.add_argument("--dock-workers", type=int, default=32)
     parser.add_argument("--vina", type=str, default=DEFAULT_VINA)
     parser.add_argument("--obabel", type=str, default=DEFAULT_OBABEL)
@@ -208,28 +236,67 @@ def main() -> None:
     rec_cache_dir = args.out.parent / "receptors_pdbqt"
     torch.manual_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    vocab = LMVocab()
-    lig_lo, lig_cb = vocab.ligand_offset, vocab.ligand_codebook_size
+    pc = PocketExtractionConfig()
+    receptor_cache: dict[str, tuple] = {}
 
     vqvae_ckpt = args.vqvae_ckpt if Path(args.vqvae_ckpt).is_absolute() else PROJECT_ROOT / args.vqvae_ckpt
-    vqvae = VQVAEModule.load_from_checkpoint(str(vqvae_ckpt), map_location=device).eval().to(device)
-    models = {}
-    for spec in args.lm_ckpts:
-        name, path = spec.split(":", 1)
-        models[name] = LigandLMModule.load_from_checkpoint(path, config=LMTrainingConfig(), map_location=device).eval().to(device).model
+    if args.all_atom or args.split_codebook:
+        split = args.split_codebook
+        atom_vqvae = load_atom_vqvae(vqvae_ckpt, args.codebook_size, device, split=split, ligand_codebook_size=args.ligand_codebook_size)
+        norm = load_atom_norm_stats(args.norm_stats, device)
+        prot_atom_desc = ProteinAtomDescriptor()
+        if split:
+            vocab = LMVocab(protein_codebook_size=args.codebook_size, ligand_codebook_size=args.ligand_codebook_size)
+            code_lo, code_hi = vocab.ligand_offset, vocab.ligand_offset + vocab.ligand_codebook_size
+            dec_source = SOURCE_LIGAND_IDX
+        else:
+            vocab = AtomLMVocab(codebook_size=args.codebook_size)
+            code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
+            dec_source = None
+        models = {}
+        for spec in args.lm_ckpts:
+            name, path = spec.split(":", 1)
+            models[name] = load_atom_lm(path, args.codebook_size, device, split=split, ligand_codebook_size=args.ligand_codebook_size)
 
-    dm = ComplexDescriptorDataModule(VQVAETrainingConfig(), CrossDockedConfig(data_dir=PROJECT_ROOT / "data"))
-    dm.cache_dir = args.cache_dir
-    dm.setup()
-    norm = {k: v.to(device) for k, v in dm.norm_stats.items()}
+        def encode_pocket(rec_pdb: Path, mol: dict):  # noqa: ANN202
+            return _pocket_codes_atom(
+                rec_pdb, mol, pc, prot_atom_desc, atom_vqvae, norm, device,
+                receptor_cache=receptor_cache,
+            )
+
+        def decode_codes(codes, frame):  # noqa: ANN001, ANN202
+            return _decode_ligand_atom(codes, atom_vqvae, norm, frame, device, source_idx=dec_source)
+
+        def build_prompt(prot_codes: list[int]) -> list[int]:
+            return vocab.build_sequence(prot_codes, [])[:-2]  # drop </l><eos>
+    else:
+        vqvae = VQVAEModule.load_from_checkpoint(str(vqvae_ckpt), map_location=device).eval().to(device)
+        vocab = LMVocab()
+        code_lo, code_hi = vocab.ligand_offset, vocab.ligand_offset + vocab.ligand_codebook_size
+        pdc = BackboneSphericalDescriptor()
+        models = {}
+        for spec in args.lm_ckpts:
+            name, path = spec.split(":", 1)
+            models[name] = LigandLMModule.load_from_checkpoint(path, config=LMTrainingConfig(), map_location=device).eval().to(device).model
+        dm = ComplexDescriptorDataModule(VQVAETrainingConfig(), CrossDockedConfig(data_dir=PROJECT_ROOT / "data"))
+        dm.cache_dir = args.cache_dir
+        dm.setup()
+        norm = {k: v.to(device) for k, v in dm.norm_stats.items()}
+
+        def encode_pocket(rec_pdb: Path, mol: dict):  # noqa: ANN202
+            return _pocket_codes(rec_pdb, mol, pc, pdc, vqvae.protein_vqvae, norm, device)
+
+        def decode_codes(codes, frame):  # noqa: ANN001, ANN202
+            return _decode_ligand(codes, vqvae.ligand_vqvae, norm, frame, device)
+
+        def build_prompt(prot_codes: list[int]) -> list[int]:
+            return [BOS_ID, P_OPEN_ID, *(vocab.protein_offset + c for c in prot_codes), P_CLOSE_ID, L_OPEN_ID]
 
     hub = PROJECT_ROOT / "data" / "hub_cache"
     mdf = pq.read_table(hub / "repo" / "manifest.parquet").to_pandas()
     tdf = mdf[(mdf["source_type"] == "cdonly") & (mdf["cdonly_fold0"] == "test")].reset_index(drop=True)
     rng = np.random.default_rng(args.seed)
     order = rng.permutation(len(tdf))
-    pc = PocketExtractionConfig()
-    pdc = BackboneSphericalDescriptor()
     rec_pdbqt_cache: dict[str, str] = {}
 
     # ---- Phase 1: generation (GPU) ----------------------------------------
@@ -246,7 +313,7 @@ def main() -> None:
         if mol is None:
             continue
         try:
-            res = _pocket_codes(rec_pdb, mol, pc, pdc, vqvae.protein_vqvae, norm, device)
+            res = encode_pocket(rec_pdb, mol)
         except Exception as e:  # noqa: BLE001
             logger.warning("skip %s: %s", row["complex_dir"], e)
             continue
@@ -264,8 +331,8 @@ def main() -> None:
         recp = rec_pdbqt_cache[key]
         base = {"pocket": done, "complex_dir": row["complex_dir"], "receptor": recp}
         records.append({**base, "model": "GT", "sample": 0, "coords": gt_coords, "elements": gt_elems})
+        prompt = build_prompt(prot_codes)
         for name, model in models.items():
-            prompt = [BOS_ID, P_OPEN_ID, *(vocab.protein_offset + c for c in prot_codes), P_CLOSE_ID, L_OPEN_ID]
             pids = torch.tensor([prompt], device=device).repeat(args.num_samples, 1)
             with torch.no_grad():
                 gen = model.generate(input_ids=pids, attention_mask=torch.ones_like(pids), do_sample=True,
@@ -274,10 +341,10 @@ def main() -> None:
             for k in range(gen.shape[0]):
                 toks = gen[k].tolist()[len(prompt):]
                 lig = toks[: toks.index(L_CLOSE_ID)] if L_CLOSE_ID in toks else toks
-                codes = [t - lig_lo for t in lig if lig_lo <= t < lig_lo + lig_cb]
+                codes = [t - code_lo for t in lig if code_lo <= t < code_hi]
                 if len(codes) < 2:
                     continue
-                coords, elems = _decode_ligand(codes, vqvae.ligand_vqvae, norm, frame, device)
+                coords, elems = decode_codes(codes, frame)
                 records.append({**base, "model": name, "sample": k, "coords": coords, "elements": elems})
         done += 1
         if done % 10 == 0:
@@ -286,7 +353,7 @@ def main() -> None:
     logger.info("Phase 1 done: %d pockets, %d ligands. Receptors prepared: %d", done, len(records), len(rec_pdbqt_cache))
 
     # free GPU before threaded docking
-    del vqvae, models
+    del models
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 

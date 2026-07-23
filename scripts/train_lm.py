@@ -23,10 +23,15 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 import lightning as L
 import torch
-from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    LearningRateMonitor,
+    ModelCheckpoint,
+)
 from lightning.pytorch.loggers import WandbLogger
 
 from src.config import LMTrainingConfig
@@ -36,7 +41,7 @@ from src.model.lm_module import LigandLMModule
 logging.basicConfig(level=logging.INFO)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901
     parser = argparse.ArgumentParser()
     parser.add_argument("--token-dir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
@@ -45,6 +50,27 @@ def main() -> None:
     parser.add_argument("--block-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--accumulate", type=int, default=None)
+    parser.add_argument(
+        "--atom-codebook-size",
+        type=int,
+        default=None,
+        help="Use the unified all-atom vocab (specials + this single codebook) "
+        "instead of the legacy protein+ligand ranges. Match the token cache.",
+    )
+    parser.add_argument(
+        "--mask-prompt",
+        action="store_true",
+        help="Condition-only fine-tuning: mask the <p> pocket prompt from the "
+        "loss (loss only on the generated <l> block). Leave off for pretraining.",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop when val/loss has not improved for this many checks (0=off). "
+        "Use for fine-tuning so a held-out-pocket val picks a generalising model "
+        "before it over-fits.",
+    )
     parser.add_argument(
         "--init-from",
         type=str,
@@ -68,8 +94,30 @@ def main() -> None:
         config.learning_rate = args.lr
     if args.accumulate is not None:
         config.gradient_accumulation = args.accumulate
+    if args.atom_codebook_size is not None:
+        config.model.atom_codebook_size = args.atom_codebook_size
+    config.mask_prompt = args.mask_prompt
 
     torch.set_float32_matmul_precision("high")
+
+    callbacks: list = [
+        ModelCheckpoint(
+            monitor="val/loss",
+            mode="min",
+            save_top_k=3,
+            # auto_insert_metric_name=False so the "/" in "val/loss" does not
+            # create a nested checkpoint subdirectory.
+            filename="lm-e{epoch:02d}-vl{val/loss:.4f}",
+            auto_insert_metric_name=False,
+        ),
+        LearningRateMonitor(logging_interval="step"),
+    ]
+    if args.early_stop_patience > 0:
+        callbacks.append(
+            EarlyStopping(
+                monitor="val/loss", mode="min", patience=args.early_stop_patience
+            )
+        )
 
     dm = LMTokenDataModule(config)
     module = LigandLMModule(config)
@@ -92,21 +140,13 @@ def main() -> None:
         gradient_clip_val=config.grad_clip,
         accumulate_grad_batches=config.gradient_accumulation,
         logger=WandbLogger(project="pocket-ligand-lm", name=args.run_name),
-        callbacks=[
-            ModelCheckpoint(
-                monitor="val/loss",
-                mode="min",
-                save_top_k=3,
-                # auto_insert_metric_name=False so the "/" in "val/loss" does not
-                # create a nested checkpoint subdirectory.
-                filename="lm-e{epoch:02d}-vl{val/loss:.4f}",
-                auto_insert_metric_name=False,
-            ),
-            LearningRateMonitor(logging_interval="step"),
-        ],
+        callbacks=callbacks,
     )
     trainer.fit(module, dm)
-    trainer.test(module, dm)
+    # Only run the final test pass if a test split exists (the mixed
+    # pretraining cache is train/val only; the fine-tune cache has test).
+    if (Path(config.token_dir) / "test.bin").exists():
+        trainer.test(module, dm)
 
 
 if __name__ == "__main__":

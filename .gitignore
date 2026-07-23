@@ -221,3 +221,7 @@ outputs/
 
 # Rendered notebook exports
 notebooks/*.html
+
+# SGE/TSUBAME job stdout/stderr (name.e<jobid> / name.o<jobid>[.<taskid>])
+*.e[0-9]*
+*.o[0-9]*

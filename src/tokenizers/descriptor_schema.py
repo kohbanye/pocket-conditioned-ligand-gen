@@ -67,6 +67,29 @@ PROTEIN_AA_VOCAB: tuple[str, ...] = tuple("ACDEFGHIKLMNPQRSTVWYX")
 PROTEIN_AA_TO_IDX: dict[str, int] = {a: i for i, a in enumerate(PROTEIN_AA_VOCAB)}
 PROTEIN_AA_X_IDX = PROTEIN_AA_TO_IDX["X"]
 
+# ---------------------------------------------------------------------------
+# Unified all-atom descriptor vocabularies (protein + ligand heavy atoms share
+# one descriptor and one codebook). The ``source`` flag tells the encoder which
+# domain an atom belongs to; ``bb_sc`` marks protein backbone vs side chain.
+# ---------------------------------------------------------------------------
+
+# Atom source: protein pocket atom (0) vs ligand atom (1). Carried as an input
+# feature only (no reconstruction head): it is always known at encode time and
+# conditions the shared codebook, while staying implicit in the code itself.
+SOURCE_VOCAB: tuple[str, ...] = ("protein", "ligand")
+SOURCE_TO_IDX: dict[str, int] = {s: i for i, s in enumerate(SOURCE_VOCAB)}
+SOURCE_PROTEIN_IDX = SOURCE_TO_IDX["protein"]
+SOURCE_LIGAND_IDX = SOURCE_TO_IDX["ligand"]
+
+# Backbone / side-chain / not-applicable. Protein backbone atoms are
+# ``N, CA, C, O, OXT``; everything else in a residue is a side-chain atom.
+# Ligand atoms have no notion of backbone, so they take the ``NA`` bucket.
+BB_SC_VOCAB: tuple[str, ...] = ("backbone", "sidechain", "NA")
+BB_SC_BACKBONE_IDX = 0
+BB_SC_SIDECHAIN_IDX = 1
+BB_SC_NA_IDX = 2
+PROTEIN_BACKBONE_ATOM_NAMES: frozenset[str] = frozenset({"N", "CA", "C", "O", "OXT"})
+
 
 # ---------------------------------------------------------------------------
 # Field layouts
@@ -146,6 +169,36 @@ PROTEIN_LAYOUT: list[FieldSpec] = _build_layout(
 )
 PROTEIN_DESCRIPTOR_DIM: int = PROTEIN_LAYOUT[-1].end  # 65
 
+# Unified all-atom descriptor: 33-D total. One row per heavy atom, used for
+# BOTH protein pocket atoms and ligand atoms (one VQ-VAE, one codebook).
+#   - 4 continuous spherical (r, θ, sin φ, cos φ) from the pocket centroid
+#   - 1 categorical source flag (protein / ligand) — input only, no recon head
+#   - 6 categorical chemistry slots shared by both domains: element, charge,
+#     hybrid, aromatic, ring, numH (Full ligand-parity: protein atoms get these
+#     from an RDKit parse of the receptor too)
+#   - 2 categorical protein-context slots: residue type (aa) and backbone/
+#     side-chain flag (bb_sc). Ligand atoms take the ``X`` / ``NA`` buckets and
+#     their loss on these heads is masked out.
+#   - 16 continuous KNN spherical offsets (K=4 same-source atoms x 4D)
+#   - 4 categorical KNN element indices
+ATOM_LAYOUT: list[FieldSpec] = _build_layout(
+    [
+        ("coord", "continuous", 4, 0),
+        ("source", "categorical", 1, len(SOURCE_VOCAB)),
+        ("element", "categorical", 1, len(LIGAND_ELEMENT_VOCAB)),
+        ("charge", "categorical", 1, len(LIGAND_CHARGE_VOCAB)),
+        ("hybrid", "categorical", 1, len(LIGAND_HYBRID_VOCAB)),
+        ("aromatic", "categorical", 1, 2),
+        ("ring", "categorical", 1, len(LIGAND_RING_VOCAB)),
+        ("numH", "categorical", 1, len(LIGAND_NUMH_VOCAB)),
+        ("aa", "categorical", 1, len(PROTEIN_AA_VOCAB)),
+        ("bb_sc", "categorical", 1, len(BB_SC_VOCAB)),
+        ("knn_offsets", "continuous", 4 * K_NEIGHBORS, 0),
+        ("knn_elements", "categorical", K_NEIGHBORS, len(LIGAND_ELEMENT_VOCAB)),
+    ]
+)
+ATOM_DESCRIPTOR_DIM: int = ATOM_LAYOUT[-1].end  # 33
+
 
 def fields_by_name(layout: list[FieldSpec]) -> dict[str, FieldSpec]:
     return {f.name: f for f in layout}
@@ -181,3 +234,23 @@ PROTEIN_RECON_HEADS: list[tuple[str, str, int]] = [
     ("coord", "continuous", 12),  # 3 atoms x 4 spherical dims
     ("aa", "categorical", len(PROTEIN_AA_VOCAB)),
 ]
+
+# Unified all-atom decoder heads. ``source`` is intentionally absent (input
+# only). ``coord`` + the six chemistry heads are trained on every atom; the
+# protein-context heads (``aa``, ``bb_sc``) are only meaningful for protein
+# atoms, so their loss is masked to ``source == protein`` rows in the VQ-VAE.
+ATOM_RECON_HEADS: list[tuple[str, str, int]] = [
+    ("coord", "continuous", 4),  # spherical: r, theta, sin phi, cos phi
+    ("element", "categorical", len(LIGAND_ELEMENT_VOCAB)),
+    ("charge", "categorical", len(LIGAND_CHARGE_VOCAB)),
+    ("hybrid", "categorical", len(LIGAND_HYBRID_VOCAB)),
+    ("aromatic", "categorical", 2),
+    ("ring", "categorical", len(LIGAND_RING_VOCAB)),
+    ("numH", "categorical", len(LIGAND_NUMH_VOCAB)),
+    ("aa", "categorical", len(PROTEIN_AA_VOCAB)),
+    ("bb_sc", "categorical", len(BB_SC_VOCAB)),
+]
+
+# Heads whose reconstruction loss is restricted to protein atoms (ligand rows
+# carry placeholder ``X`` / ``NA`` targets that must not be learned).
+ATOM_PROTEIN_ONLY_HEADS: frozenset[str] = frozenset({"aa", "bb_sc"})
