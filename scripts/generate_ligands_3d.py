@@ -159,6 +159,8 @@ def _decode_ligand(  # noqa: PLR0913
     device: torch.device,
     *,
     use_solve: bool = False,
+    refiner: object | None = None,
+    pocket_ctx: tuple | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """Decode generated ligand codes to (coords in global frame, elements).
 
@@ -166,6 +168,12 @@ def _decode_ligand(  # noqa: PLR0913
     VQ-VAE has one, acts purely as a training-time regulariser). Set
     ``use_solve=True`` to instead reconstruct via the absolute+relative geometry
     solve (:func:`solve_ligand_coords`).
+
+    When ``refiner`` (a ``PoseRefinerModule``) and ``pocket_ctx`` (``(pocket
+    canonical coords, pocket node features)`` in this ``frame``) are given, the
+    per-atom coord head is refined by the E(3)-equivariant pose refiner before
+    the global-frame transform -- a learned, pocket-aware replacement for
+    ``solve_ligand_coords`` that removes clashes/strain from the raw pose.
     """
     idx = torch.tensor(codes, dtype=torch.long, device=device)
     outputs = ligand_vqvae.decode_to_outputs(idx)
@@ -174,7 +182,36 @@ def _decode_ligand(  # noqa: PLR0913
     cmean = norm_stats["ligand_mean"][coord_field.start : coord_field.end]
     cstd = norm_stats["ligand_std"][coord_field.start : coord_field.end]
     coord_denorm = outputs["coord"] * cstd + cmean
-    if use_solve and "knn_offsets" in outputs:
+    if refiner is not None and pocket_ctx is not None:
+        from src.model.pose_refiner import (  # noqa: PLC0415
+            LIG_CHEM_HEADS,
+            ligand_feats_from_heads,
+            refine_ligand_canonical,
+        )
+
+        canonical = spherical_to_cartesian_np(coord_denorm.cpu().numpy())
+        chem = {h: outputs[h].argmax(dim=-1).cpu().numpy() for h in LIG_CHEM_HEADS}
+        lig_feat = ligand_feats_from_heads(chem, canonical.shape[0])
+        elems_r = [
+            LIGAND_ELEMENT_VOCAB[i] if LIGAND_ELEMENT_VOCAB[i] != "OTHER" else "X"
+            for i in chem["element"]
+        ]
+        bonds_r = np.asarray(infer_bonds(elems_r, canonical), dtype=np.int64).reshape(
+            -1, 2
+        )
+        pkt_canon, pkt_feat = pocket_ctx
+        refined = refine_ligand_canonical(
+            refiner,
+            canonical,
+            lig_feat,
+            pkt_canon,
+            pkt_feat,
+            bonds=bonds_r,
+            device=device,
+        )
+        centroid, rotation = frame
+        coords = refined @ rotation + centroid
+    elif use_solve and "knn_offsets" in outputs:
         ko_field = fields["knn_offsets"]
         ko_mean = norm_stats["ligand_mean"][ko_field.start : ko_field.end]
         ko_std = norm_stats["ligand_std"][ko_field.start : ko_field.end]
@@ -261,13 +298,18 @@ def _decode_ligand_atom(  # noqa: PLR0913
     device: torch.device,
     *,
     source_idx: int | None = None,
+    refiner: object | None = None,
+    pocket_ctx: tuple | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     """Decode generated ligand codes (all-atom VQ-VAE) to global coords + elements.
 
     The unified coord head is the same 4-D spherical ``(r, θ, sin φ, cos φ)`` in
     the pocket canonical frame as the ligand VQ-VAE, so reconstruction mirrors
     :func:`src.tokenizers.atom.atom_descriptor_to_coords`. Pass ``source_idx``
-    (ligand) for a split-codebook VQ so the ligand book is used.
+    (ligand) for a split-codebook VQ so the ligand book is used. When ``refiner``
+    + ``pocket_ctx`` (``(pocket canonical coords, pocket node features)``) are
+    given, the E(3)-equivariant pose refiner cleans the pose before the global
+    transform (same as the legacy :func:`_decode_ligand`).
     """
     idx = torch.tensor(codes, dtype=torch.long, device=device)
     outputs = atom_vqvae.decode_to_outputs(idx, source_idx)
@@ -277,6 +319,32 @@ def _decode_ligand_atom(  # noqa: PLR0913
     coord_denorm = (outputs["coord"] * cstd + cmean).cpu().numpy()
     canonical = spherical_to_cartesian_np(coord_denorm)
     centroid, rotation = frame
+    if refiner is not None and pocket_ctx is not None:
+        from src.model.pose_refiner import (  # noqa: PLC0415
+            LIG_CHEM_HEADS,
+            ligand_feats_from_heads,
+            refine_ligand_canonical,
+        )
+
+        chem = {h: outputs[h].argmax(dim=-1).cpu().numpy() for h in LIG_CHEM_HEADS}
+        lig_feat = ligand_feats_from_heads(chem, canonical.shape[0])
+        elems_r = [
+            LIGAND_ELEMENT_VOCAB[i] if LIGAND_ELEMENT_VOCAB[i] != "OTHER" else "X"
+            for i in chem["element"]
+        ]
+        bonds_r = np.asarray(infer_bonds(elems_r, canonical), dtype=np.int64).reshape(
+            -1, 2
+        )
+        pkt_canon, pkt_feat = pocket_ctx
+        canonical = refine_ligand_canonical(
+            refiner,
+            canonical.astype(np.float32),
+            lig_feat,
+            pkt_canon,
+            pkt_feat,
+            bonds=bonds_r,
+            device=device,
+        )
     coords = canonical @ rotation + centroid
     elem_idx = outputs["element"].argmax(dim=-1).cpu().numpy()
     elements = [
@@ -391,7 +459,9 @@ def main() -> None:  # noqa: PLR0915, C901
     parser.add_argument(
         "--norm-stats",
         type=Path,
-        default=PROJECT_ROOT / "data" / "descriptor_cache_allatom"
+        default=PROJECT_ROOT
+        / "data"
+        / "descriptor_cache_allatom"
         / "normalization_stats.pt",
         help="All-atom normalization stats (.pt with atom_mean/atom_std).",
     )
@@ -411,12 +481,18 @@ def main() -> None:  # noqa: PLR0915, C901
     if args.all_atom or args.split_codebook:
         split = args.split_codebook
         atom_vqvae = load_atom_vqvae(
-            vqvae_ckpt, args.codebook_size, device,
-            split=split, ligand_codebook_size=args.ligand_codebook_size,
+            vqvae_ckpt,
+            args.codebook_size,
+            device,
+            split=split,
+            ligand_codebook_size=args.ligand_codebook_size,
         )
         model = load_atom_lm(
-            args.lm_ckpt, args.codebook_size, device,
-            split=split, ligand_codebook_size=args.ligand_codebook_size,
+            args.lm_ckpt,
+            args.codebook_size,
+            device,
+            split=split,
+            ligand_codebook_size=args.ligand_codebook_size,
         )
         norm_stats = load_atom_norm_stats(args.norm_stats, device)
         if split:
@@ -437,8 +513,14 @@ def main() -> None:  # noqa: PLR0915, C901
 
         def encode_pocket(rec_path: Path, mol: dict):  # noqa: ANN202
             return _pocket_codes_atom(
-                rec_path, mol, pocket_config, prot_atom_desc, atom_vqvae,
-                norm_stats, device, receptor_cache=receptor_cache,
+                rec_path,
+                mol,
+                pocket_config,
+                prot_atom_desc,
+                atom_vqvae,
+                norm_stats,
+                device,
+                receptor_cache=receptor_cache,
             )
 
         def decode_codes(codes, frame):  # noqa: ANN001, ANN202
@@ -475,8 +557,13 @@ def main() -> None:  # noqa: PLR0915, C901
 
         def encode_pocket(rec_path: Path, mol: dict):  # noqa: ANN202
             return _pocket_codes(
-                rec_path, mol, pocket_config, protein_desc_calc,
-                vqvae.protein_vqvae, norm_stats, device,
+                rec_path,
+                mol,
+                pocket_config,
+                protein_desc_calc,
+                vqvae.protein_vqvae,
+                norm_stats,
+                device,
             )
 
         def decode_codes(codes, frame):  # noqa: ANN001, ANN202

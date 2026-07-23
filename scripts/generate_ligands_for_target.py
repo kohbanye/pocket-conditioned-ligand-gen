@@ -40,7 +40,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-import numpy as np  # noqa: TC002
+import numpy as np
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -78,7 +78,18 @@ logger = logging.getLogger(__name__)
 # Real chemical elements we are willing to dock; "X" is the VQ-VAE OTHER
 # catch-all and cannot be written to XYZ / docked.
 _REAL_ELEMENTS = {
-    "C", "N", "O", "S", "F", "Cl", "Br", "I", "P", "B", "Si", "H",
+    "C",
+    "N",
+    "O",
+    "S",
+    "F",
+    "Cl",
+    "Br",
+    "I",
+    "P",
+    "B",
+    "Si",
+    "H",
 }
 _MIN_ATOMS = 5
 _MAX_ATOMS = 80
@@ -99,8 +110,9 @@ def _n_fragments(n_atoms: int, bonds: list[tuple[int, int]]) -> int:
     return len({find(i) for i in range(n_atoms)})
 
 
-def _molblock(elements: list[str], coords: np.ndarray, bonds: list[tuple[int, int]],
-              title: str) -> str:
+def _molblock(
+    elements: list[str], coords: np.ndarray, bonds: list[tuple[int, int]], title: str
+) -> str:
     """Minimal V2000 mol block (single bonds) for storage / visualisation."""
     n_atoms, n_bonds = len(elements), len(bonds)
     counts = f"{n_atoms:>3d}{n_bonds:>3d}  0  0  0  0  0  0  0  0999 V2000"
@@ -118,8 +130,47 @@ def _molblock(elements: list[str], coords: np.ndarray, bonds: list[tuple[int, in
     return "\n".join(lines) + "\n"
 
 
+def _pocket_context(receptor_path: Path, ref_mol: dict, frame: tuple) -> tuple | None:
+    """Pocket atoms (canonical coords + node features) for the pose refiner.
+
+    Extracted independently of the LM's backbone protein VQ-VAE, in the SAME
+    canonical ``frame`` the ligand is decoded into, so refiner sees ligand and
+    pocket in one coordinate system. Only atoms within the refiner's cutoff of
+    the ligand end up mattering (the collate filters by radius).
+    """
+    from src.model.pose_refiner import pocket_feats_from_descriptor  # noqa: PLC0415
+    from src.tokenizers.atom import (  # noqa: PLC0415
+        ProteinAtomDescriptor,
+        precompute_receptor_atom_features_from_text,
+    )
+    from src.tokenizers.protein import (  # noqa: PLC0415
+        extract_pocket_atoms_from_candidates,
+        precompute_pocket_atom_candidates_from_text,
+    )
+
+    rec_text = Path(receptor_path).read_text()
+    ref_heavy = np.array(
+        [(a[1], a[2], a[3]) for a in ref_mol["atoms"] if a[0] != "H"], dtype=np.float32
+    )
+    precomp = precompute_pocket_atom_candidates_from_text(rec_text)
+    pocket = extract_pocket_atoms_from_candidates(
+        precomp, ref_heavy, PocketExtractionConfig()
+    )
+    if pocket is None or pocket.atom_coords.shape[0] == 0:
+        return None
+    feats = precompute_receptor_atom_features_from_text(rec_text)
+    prot_desc, _ = ProteinAtomDescriptor().compute(pocket, feats, frame)
+    if prot_desc.shape[0] != pocket.atom_coords.shape[0]:
+        return None
+    centroid, rotation = frame
+    pkt_canon = (
+        (pocket.atom_coords.astype(np.float64) - centroid) @ rotation.T
+    ).astype(np.float32)
+    return pkt_canon, pocket_feats_from_descriptor(prot_desc)
+
+
 @torch.no_grad()
-def main() -> None:  # noqa: PLR0915
+def main() -> None:  # noqa: C901, PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--receptor", type=Path, required=True)
     parser.add_argument("--ref-ligand", type=Path, required=True)
@@ -142,6 +193,14 @@ def main() -> None:  # noqa: PLR0915
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-new-tokens", type=int, default=160)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--refine-ckpt",
+        type=str,
+        default=None,
+        help="PoseRefinerModule checkpoint. When set, each decoded pose is "
+        "refined by the E(3)-equivariant pose refiner before bond inference "
+        "(removes clashes/strain from the raw pose). Default off = unchanged.",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -184,8 +243,13 @@ def main() -> None:  # noqa: PLR0915
         msg = f"Could not parse reference ligand {args.ref_ligand}"
         raise SystemExit(msg)
     res = _pocket_codes(
-        args.receptor, mols[0], PocketExtractionConfig(),
-        BackboneSphericalDescriptor(), vqvae.protein_vqvae, norm_stats, device,
+        args.receptor,
+        mols[0],
+        PocketExtractionConfig(),
+        BackboneSphericalDescriptor(),
+        vqvae.protein_vqvae,
+        norm_stats,
+        device,
     )
     if res is None:
         msg = "Pocket extraction failed for the target."
@@ -193,13 +257,41 @@ def main() -> None:  # noqa: PLR0915
     prot_codes, frame, ref_coords, ref_elems = res
     logger.info(
         "Pocket: %d residues -> %d protein codes | reference ligand %d atoms",
-        len(prot_codes), len(prot_codes), len(ref_elems),
+        len(prot_codes),
+        len(prot_codes),
+        len(ref_elems),
     )
 
+    # ---- optional pose refiner ----
+    refiner = None
+    pocket_ctx = None
+    if args.refine_ckpt is not None:
+        from src.model.pose_refiner import PoseRefinerModule  # noqa: PLC0415
+
+        refiner = (
+            PoseRefinerModule.load_from_checkpoint(
+                args.refine_ckpt, map_location=device
+            )
+            .eval()
+            .to(device)
+        )
+        pocket_ctx = _pocket_context(args.receptor, mols[0], frame)
+        if pocket_ctx is None:
+            logger.warning(
+                "Pocket-context extraction failed; pose refinement disabled."
+            )
+            refiner = None
+        else:
+            logger.info(
+                "Pose refiner loaded (%d pocket atoms).", pocket_ctx[0].shape[0]
+            )
+
     prompt = [
-        BOS_ID, P_OPEN_ID,
+        BOS_ID,
+        P_OPEN_ID,
         *(vocab.protein_offset + c for c in prot_codes),
-        P_CLOSE_ID, L_OPEN_ID,
+        P_CLOSE_ID,
+        L_OPEN_ID,
     ]
     prompt_t = torch.tensor([prompt], device=device)
     prompt_len = len(prompt)
@@ -211,31 +303,47 @@ def main() -> None:  # noqa: PLR0915
     sdf_f = sdf_path.open("w")
     jsonl_f = jsonl_path.open("w")
 
-    def emit(idx: int, elements: list[str], coords: np.ndarray,  # noqa: PLR0913
-             bonds: list[tuple[int, int]], *, terminated: bool, n_codes: int) -> None:
+    def emit(  # noqa: PLR0913
+        idx: int,
+        elements: list[str],
+        coords: np.ndarray,
+        bonds: list[tuple[int, int]],
+        *,
+        terminated: bool,
+        n_codes: int,
+    ) -> None:
         comp = Counter(elements)
         formula = "".join(f"{e}{n}" for e, n in sorted(comp.items()))
         has_unknown = any(e not in _REAL_ELEMENTS for e in elements)
         n_frag = _n_fragments(len(elements), bonds)
-        dockable = (
-            not has_unknown
-            and _MIN_ATOMS <= len(elements) <= _MAX_ATOMS
-        )
+        dockable = not has_unknown and _MIN_ATOMS <= len(elements) <= _MAX_ATOMS
         tag = "ref" if idx < 0 else f"gen_{idx}"
         sdf_f.write(_molblock(elements, coords, bonds, tag))
-        jsonl_f.write(json.dumps({
-            "idx": idx,
-            "tag": tag,
-            "elements": elements,
-            "coords": [[round(float(c), 4) for c in xyz] for xyz in coords],
-            "dockable": dockable,
-        }) + "\n")
-        meta_rows.append({
-            "idx": idx, "tag": tag, "n_atoms": len(elements), "formula": formula,
-            "terminated": terminated, "n_fragments": n_frag,
-            "has_unknown_element": has_unknown, "n_codes": n_codes,
-            "dockable": dockable,
-        })
+        jsonl_f.write(
+            json.dumps(
+                {
+                    "idx": idx,
+                    "tag": tag,
+                    "elements": elements,
+                    "coords": [[round(float(c), 4) for c in xyz] for xyz in coords],
+                    "dockable": dockable,
+                }
+            )
+            + "\n"
+        )
+        meta_rows.append(
+            {
+                "idx": idx,
+                "tag": tag,
+                "n_atoms": len(elements),
+                "formula": formula,
+                "terminated": terminated,
+                "n_fragments": n_frag,
+                "has_unknown_element": has_unknown,
+                "n_codes": n_codes,
+                "dockable": dockable,
+            }
+        )
 
     # Reference ligand as positive control (idx = -1).
     ref_bonds = infer_bonds(ref_elems, ref_coords)
@@ -276,14 +384,28 @@ def main() -> None:  # noqa: PLR0915
             produced += 1
             terminated_count += int(terminated)
             if not codes:
-                meta_rows.append({
-                    "idx": idx, "tag": f"gen_{idx}", "n_atoms": 0, "formula": "",
-                    "terminated": terminated, "n_fragments": 0,
-                    "has_unknown_element": False, "n_codes": 0, "dockable": False,
-                })
+                meta_rows.append(
+                    {
+                        "idx": idx,
+                        "tag": f"gen_{idx}",
+                        "n_atoms": 0,
+                        "formula": "",
+                        "terminated": terminated,
+                        "n_fragments": 0,
+                        "has_unknown_element": False,
+                        "n_codes": 0,
+                        "dockable": False,
+                    }
+                )
                 continue
             coords, elems = _decode_ligand(
-                codes, vqvae.ligand_vqvae, norm_stats, frame, device
+                codes,
+                vqvae.ligand_vqvae,
+                norm_stats,
+                frame,
+                device,
+                refiner=refiner,
+                pocket_ctx=pocket_ctx,
             )
             bonds = infer_bonds(elems, coords)
             emit(idx, elems, coords, bonds, terminated=terminated, n_codes=len(codes))
@@ -293,7 +415,11 @@ def main() -> None:  # noqa: PLR0915
         jsonl_f.flush()
         logger.info(
             "batch %d/%d | produced %d | terminated %d | dockable %d",
-            b + 1, n_batches, produced, terminated_count, dockable_count,
+            b + 1,
+            n_batches,
+            produced,
+            terminated_count,
+            dockable_count,
         )
 
     sdf_f.close()
@@ -310,7 +436,12 @@ def main() -> None:  # noqa: PLR0915
     logger.info(
         "\nDone. %d generated (%d terminated, %d dockable) + 1 reference.\n"
         "  %s\n  %s\n  %s",
-        produced, terminated_count, dockable_count, sdf_path, jsonl_path, meta_path,
+        produced,
+        terminated_count,
+        dockable_count,
+        sdf_path,
+        jsonl_path,
+        meta_path,
     )
 
 

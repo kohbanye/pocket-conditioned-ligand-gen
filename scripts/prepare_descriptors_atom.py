@@ -70,7 +70,21 @@ def main() -> None:
         default=None,
         help="Cap SDF files processed per tar (debug/smoke runs).",
     )
+    parser.add_argument(
+        "--shard-ids",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated tar shard indices to process (e.g. '0,1,2'). "
+            "Restricts the run to those tars so a large full-pose build can be "
+            "split across several jobs / calibrated on one tar. Default: all."
+        ),
+    )
     args = parser.parse_args()
+
+    shard_ids = None
+    if args.shard_ids is not None:
+        shard_ids = [int(s) for s in args.shard_ids.split(",") if s.strip() != ""]
 
     cache_dir = args.cache_dir
     if (cache_dir / "shard_metadata.pt").exists():
@@ -92,6 +106,7 @@ def main() -> None:
         good_poses_only=not args.include_decoys,
         min_only=not args.keep_label1_docked,
         max_files_per_tar=args.max_files_per_tar,
+        shard_ids=shard_ids,
     )
     logger.info("Atom cache written: %d complexes across %d shards", total, len(counts))
 

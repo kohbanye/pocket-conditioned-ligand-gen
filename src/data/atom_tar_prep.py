@@ -230,6 +230,7 @@ def prepare_atom_descriptors_from_tars(  # noqa: PLR0913
     good_poses_only: bool = True,
     min_only: bool = True,
     max_files_per_tar: int | None = None,
+    shard_ids: list[int] | None = None,
 ) -> tuple[int, list[int]]:
     """Build the all-atom descriptor shard cache by streaming ligand tars."""
     import multiprocessing  # noqa: PLC0415
@@ -243,6 +244,9 @@ def prepare_atom_descriptors_from_tars(  # noqa: PLR0913
     df = pq.read_table(manifest_path, columns=["shard_idx", "source_type"]).to_pandas()
     df = df[df["source_type"].isin(source_types)]
     shard_indices = sorted(int(s) for s in df["shard_idx"].unique())
+    if shard_ids is not None:
+        wanted = set(shard_ids)
+        shard_indices = [s for s in shard_indices if s in wanted]
     logger.info(
         "Streaming %d ligand tars (source_types=%s, good_poses_only=%s, min_only=%s)",
         len(shard_indices),
