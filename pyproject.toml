@@ -28,6 +28,7 @@ dependencies = [
     "huggingface-hub>=0.25.0",
     "pyarrow>=18.0.0",
     "transformers>=4.51",
+    "e3nn>=0.6.0",
 ]
 
 [tool.setuptools.packages.find]

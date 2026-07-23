@@ -453,3 +453,107 @@ class RescoreTrainingConfig:
     precision: str = "bf16-mixed"
 
     model: ComplexMLMConfig = field(default_factory=ComplexMLMConfig)
+
+
+@dataclass
+class PoseRefinerConfig:
+    """Architecture config for the E(3)-equivariant pose refiner (e3nn).
+
+    A small equivariant graph denoiser that refines *ligand* heavy-atom
+    coordinates conditioned on the *frozen* pocket atoms. Nodes carry invariant
+    (``0e``) chemistry scalars; edges carry spherical harmonics of their
+    direction (degree ``<= l_max``) gated by a radial MLP of the distance. The
+    network emits one ``1o`` vector per ligand atom = a coordinate displacement,
+    so ``refine(R x, R pkt) = R refine(x, pkt)`` for any rotation/reflection.
+
+    The refiner is trained as a flow-matching bridge from the VQ-VAE
+    reconstruction of a native ligand (``x0``, the exact deployment corruption)
+    to the crystal pose (``x1``); see :class:`PoseRefineTrainingConfig`.
+    """
+
+    # Invariant scalar width carried on each node (0e channels).
+    hidden_dim: int = 128
+    # Number of equivariant convolution layers.
+    n_layers: int = 5
+    # Max spherical-harmonic degree for edge features and hidden irreps.
+    l_max: int = 2
+    # Radial basis (Bessel) count + MLP width for the distance embedding.
+    num_radial: int = 16
+    radial_hidden: int = 64
+
+    # Graph construction. Ligand-ligand edges are full O(N^2) when
+    # ``ligand_knn == 0`` (N_heavy <= ~50), else k-NN. Ligand-pocket edges use a
+    # radius cutoff; pocket-pocket edges are never built (pocket geometry is
+    # fixed and only conditions the ligand).
+    ligand_knn: int = 0
+    pocket_cutoff: float = 8.0  # angstrom
+    max_pocket_neighbors: int = 32  # per-ligand-atom cap on pocket edges
+
+    # Inference steps from x0 -> refined pose. 1 = single-shot x1-prediction
+    # (robust; one forward pass directly estimates the clean pose). >1 uses the
+    # multi-step velocity ODE, which compounds per-step error and needs a
+    # well-trained field -- kept only for ablation.
+    n_flow_steps: int = 1
+    # Optional Brownian-bridge noise on the interpolant (stochastic interpolant).
+    bridge_sigma: float = 0.0
+
+    # Physical auxiliary losses (mirror ``solve_ligand_coords`` + ``infer_bonds``).
+    d_floor: float = 1.1  # angstrom, hard no-overlap floor
+    lambda_clash: float = 1.0  # intra-ligand steric
+    lambda_pkt: float = 1.0  # ligand-pocket steric
+    lambda_bond: float = 1.0  # bonded-distance anchor (anti-collapse / topology)
+    lambda_angle: float = 0.0  # bond-angle -> PoseBusters bond-angle validity
+    # Steps over which the steric/bond weights ramp in from 0 (learn the
+    # reconstruction manifold first, then enforce sterics -> no early collapse).
+    lambda_ramp_steps: int = 2000
+
+
+@dataclass
+class PoseRefineTrainingConfig:
+    """Config for training the e3nn pose refiner (flow-matching, x1-prediction).
+
+    Source ``x0`` = VQ-VAE round-trip of a real ligand (+ graded corruption),
+    target ``x1`` = crystal native pose, both in the pocket canonical frame;
+    interpolate ``x_t = (1-t) x0 + t x1`` and regress the clean pose ``x1`` with
+    physical auxiliary losses. Data is produced offline by
+    :mod:`scripts.tokenize_pose_refine` into concatenated memmaps.
+    """
+
+    data_dir: Path = Path("data/pose_refine")
+    micro_batch_size: int = 32  # graphs (complexes) per batch
+    gradient_accumulation: int = 1
+
+    # Online per-atom Gaussian jitter added to x0 at load (train split only).
+    # Injects intramolecular distortion (bad bond lengths/angles/clashes) that
+    # the refiner must repair -- the VQ round-trip alone is nearly clash-free
+    # intramolecularly, so without this the net never learns to fix the internal
+    # geometry that PoseBusters checks. Edges are rebuilt from the jittered pose.
+    online_jitter_sigma: float = 0.0
+
+    # Online RIGID-BODY corruption of x0 (train split only): random translation
+    # (angstrom sigma) and rotation about the ligand centroid (degree sigma).
+    # LM-sampled poses are predominantly MIS-PLACED in the pocket -- the driver
+    # of the bad raw Vina score -- whereas the VQ round-trip + jitter only model
+    # local distortion. Teaching the refiner to slide/tilt the ligand back is
+    # what closes the train/inference gap on placement.
+    online_rigid_trans: float = 0.0
+    online_rigid_rot_deg: float = 0.0
+    # Fraction of training samples that get the rigid corruption. Applying it to
+    # EVERY sample makes the net over-correct (it never sees an already-correct
+    # pose it should leave alone -> val rmsd_gain went NEGATIVE), so keep a
+    # sizable share of clean-placement examples.
+    online_rigid_prob: float = 0.5
+
+    learning_rate: float = 3e-4
+    min_lr_ratio: float = 0.1
+    weight_decay: float = 0.01
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.98
+    grad_clip: float = 1.0
+    warmup_steps: int = 2000
+
+    max_epochs: int = 40
+    num_workers: int = 8
+    precision: str = "32-true"  # e3nn tensor products are unstable in bf16
+
+    model: PoseRefinerConfig = field(default_factory=PoseRefinerConfig)
