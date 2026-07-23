@@ -47,8 +47,8 @@ class ComplexRescoreModule(L.LightningModule):
             logger.info("warm-start: %d missing, %d unexpected", len(miss), len(unexp))
         h = config.model.hidden_size
         self.pooling = config.pooling
-        # meanmax and xattn both concatenate a second pooled vector with the
-        # ligand mean, so the head sees 2H; mean/attn produce a single H vector.
+        # meanmax and xattn concatenate a second pooled vector with the ligand
+        # mean, so the head sees 2H; mean/attn produce a single H vector.
         in_dim = 2 * h if self.pooling in ("meanmax", "xattn") else h
         if self.pooling == "attn":
             # learnable per-ligand-token weighting (softmax-attention pool)
@@ -59,6 +59,35 @@ class ComplexRescoreModule(L.LightningModule):
             # (the encoder's own attention is spent on masked-token prediction,
             # not affinity). Its pooled output is concatenated with the ligand mean.
             self.xattn = nn.MultiheadAttention(h, num_heads=12, batch_first=True)
+        if self.pooling == "pairsum":
+            # GenScore-style pairwise interaction: for every (ligand token,
+            # pocket token) pair, score a learned interaction in each of C
+            # channels and sum over pairs -- the explicit sum-over-contacts
+            # inductive bias the pooled readouts lack. The C-dim interaction
+            # vector is concatenated with the ligand mean.
+            self.pair_heads = config.pair_heads
+            self.pair_q = nn.Linear(h, h)
+            self.pair_k = nn.Linear(h, h)
+            in_dim = h + self.pair_heads
+        # Optional trainable interaction transformer over the token states,
+        # inserted before pooling. The MLM encoder is pretrained for masked-token
+        # prediction, not affinity; these fresh layers give the head capacity to
+        # re-model the pocket-ligand interface from the tokens (no tokenizer
+        # change). Pooling-agnostic: refines hs, then _pool runs as usual.
+        n_int = getattr(config, "head_interaction_layers", 0)
+        if n_int > 0:
+            layer = nn.TransformerEncoderLayer(
+                h,
+                nhead=12,
+                dim_feedforward=4 * h,
+                dropout=config.head_dropout,
+                activation="gelu",
+                batch_first=True,
+                norm_first=True,
+            )
+            self.interaction = nn.TransformerEncoder(layer, num_layers=n_int)
+        else:
+            self.interaction = None
         self.head = nn.Sequential(
             nn.Linear(in_dim, h),
             nn.GELU(),
@@ -106,11 +135,32 @@ class ComplexRescoreModule(L.LightningModule):
             )
             rm = (refined * m).sum(dim=1) / m.sum(dim=1).clamp(min=1.0)
             return torch.cat([mean, rm], dim=-1)
+        if self.pooling == "pairsum":
+            pocket = batch["attention_mask"].bool() & ~lig  # (B,L)
+            b, ln, h = hs.shape
+            nh, hd = self.pair_heads, h // self.pair_heads
+            q = self.pair_q(hs).view(b, ln, nh, hd)
+            k = self.pair_k(hs).view(b, ln, nh, hd)
+            # e[b,c,i,j] = <q_i, k_j> for channel c; sum over ligand-pocket pairs.
+            e = torch.einsum("bihd,bjhd->bhij", q, k) / (hd**0.5)  # (B,C,L,L)
+            pair = (lig.unsqueeze(-1) & pocket.unsqueeze(1)).unsqueeze(1)  # (B,1,L,L)
+            e = e.masked_fill(~pair, 0.0)
+            # Normalize by ligand-atom count, not pair count: dividing by the
+            # total pair count dilutes the few real contacts across a large
+            # pocket's many non-contacting pairs. Per ligand atom = total pocket
+            # interaction each ligand atom sees, pocket size aside.
+            nlig = lig.sum(dim=1, keepdim=True).clamp(min=1.0).to(e.dtype)  # (B,1)
+            inter = e.sum(dim=(2, 3)) / nlig  # (B,C) interaction per ligand atom
+            return torch.cat([mean, inter], dim=-1)
         msg = f"unknown pooling: {self.pooling}"
         raise ValueError(msg)
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
         hs = self.encoder.encode(batch["input_ids"], batch["attention_mask"])  # (B,L,H)
+        if self.interaction is not None:
+            hs = self.interaction(
+                hs, src_key_padding_mask=~batch["attention_mask"].bool()
+            )
         return self.head(self._pool(hs, batch)).squeeze(-1)  # (B,) predicted label
 
     def on_fit_start(self) -> None:
@@ -142,6 +192,23 @@ class ComplexRescoreModule(L.LightningModule):
             npairs += int(better.sum())
         return total / max(1, npairs)
 
+    def _mlm_aux_loss(self, batch: dict[str, Tensor]) -> Tensor:
+        """Masked-LM loss on the same complexes: mask a fraction of the structure
+        (codebook) tokens and predict them through the encoder's MLM head. Used
+        as a regularizer so a ranking loss adapts the encoder to affinity without
+        collapsing the pretrained structure representation."""
+        ids = batch["input_ids"]
+        attn = batch["attention_mask"].bool()
+        cb = self.config.model.atom_codebook_size or 0
+        maskable = attn & (ids < cb)  # only real structure tokens
+        rand = torch.rand(ids.shape, device=ids.device)
+        do = (rand < self.config.mlm_aux_mask_prob) & maskable
+        if not bool(do.any()):
+            return ids.new_zeros((), dtype=torch.float)
+        labels = ids.masked_fill(~do, -100)
+        masked = ids.masked_fill(do, self.config.model.mask_token_id)
+        return self.encoder(masked, batch["attention_mask"], labels=labels).loss
+
     def _step(self, batch: dict[str, Tensor], stage: str) -> Tensor:
         pred = self(batch)
         rmsd = batch["rmsd"]
@@ -154,6 +221,10 @@ class ComplexRescoreModule(L.LightningModule):
             loss = reg + self.config.ranking_loss_weight * rank
             self.log(f"{stage}/rank", rank, prog_bar=True, sync_dist=sync)
             self.log(f"{stage}/reg", reg, sync_dist=sync)
+        if self.config.mlm_aux_weight > 0:
+            mlm = self._mlm_aux_loss(batch)
+            loss = loss + self.config.mlm_aux_weight * mlm
+            self.log(f"{stage}/mlm", mlm, prog_bar=True, sync_dist=sync)
         self.log(f"{stage}/loss", loss, prog_bar=True, sync_dist=sync)
         self.log(
             f"{stage}/mae",

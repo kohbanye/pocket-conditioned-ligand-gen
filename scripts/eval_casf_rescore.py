@@ -201,7 +201,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     )
     parser.add_argument(
         "--pooling",
-        choices=["mean", "meanmax", "attn", "xattn"],
+        choices=["mean", "meanmax", "attn", "xattn", "pairsum"],
         default="mean",
         help="Must match the head ckpt's pooling (meanmax head has a 2H input).",
     )

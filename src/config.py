@@ -440,6 +440,27 @@ class RescoreTrainingConfig:
     # small affinity corpus; the head re-weights fixed features instead.
     freeze_encoder: bool = False
 
+    # Regress ligand efficiency (label / heavy-atom count) instead of the raw
+    # label. For the affinity head this decorrelates the target from molecular
+    # size; eval multiplies the prediction back by size to recover pK.
+    label_divide_by_size: bool = False
+
+    # Number of interaction channels for the "pairsum" pooling (sum of learned
+    # ligand-pocket pair energies). Each channel adds one feature to the head.
+    pair_heads: int = 16
+
+    # Trainable transformer layers inserted over the token states before pooling
+    # (0 = none). Gives the head capacity to re-model the interface from the
+    # tokens without touching the tokenizer.
+    head_interaction_layers: int = 0
+
+    # Masked-LM auxiliary loss during affinity fine-tuning: keeps the encoder's
+    # structure knowledge intact (regularizer) while a ranking loss adapts it to
+    # affinity, so the ranking objective can't collapse/memorize the small corpus
+    # the way it did head-only. 0 = off.
+    mlm_aux_weight: float = 0.0
+    mlm_aux_mask_prob: float = 0.15
+
     learning_rate: float = 1e-4  # low: the encoder is pretrained
     min_lr_ratio: float = 0.1
     weight_decay: float = 0.01

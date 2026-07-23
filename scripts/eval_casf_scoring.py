@@ -73,7 +73,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     p.add_argument("--norm-stats", type=Path, required=True)
     p.add_argument("--rescore-ckpt", type=Path, default=None)
     p.add_argument(
-        "--pooling", choices=["mean", "meanmax", "attn", "xattn"], default="mean"
+        "--pooling",
+        choices=["mean", "meanmax", "attn", "xattn", "pairsum"],
+        default="mean",
     )
     p.add_argument(
         "--affinity-head",
@@ -81,6 +83,19 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="The head regresses pK (higher = stronger), so use its raw output. "
         "Without this the head is treated as an RMSD head (lower = better) and "
         "its sign is flipped.",
+    )
+    p.add_argument(
+        "--efficiency-head",
+        action="store_true",
+        help="Head was trained on ligand efficiency (pK / heavy-atom count); "
+        "multiply its output by the ligand token count to recover pK. Implies "
+        "--affinity-head.",
+    )
+    p.add_argument(
+        "--interaction-layers",
+        type=int,
+        default=0,
+        help="Must match the head ckpt's trainable interaction transformer depth.",
     )
     p.add_argument("--casf-dir", type=Path, default=Path("data/casf2016"))
     p.add_argument("--codebook-size", type=int, default=8192)
@@ -135,6 +150,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             config=RescoreTrainingConfig(
                 model=ComplexMLMConfig(atom_codebook_size=args.codebook_size),
                 pooling=args.pooling,
+                head_interaction_layers=args.interaction_layers,
             ),
             map_location=device,
         )
@@ -167,6 +183,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             head = float("nan")
             if rescorer is not None:
                 ids = torch.tensor([seq], device=device)
+                lig_mask = _ligand_mask(np.asarray(seq))
                 with torch.no_grad():
                     raw = float(
                         rescorer(
@@ -174,14 +191,17 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                                 "input_ids": ids,
                                 "attention_mask": torch.ones_like(ids),
                                 "ligand_mask": torch.tensor(
-                                    _ligand_mask(np.asarray(seq)), device=device
+                                    lig_mask, device=device
                                 ).unsqueeze(0),
                             }
                         ).item()
                     )
+                if args.efficiency_head:
+                    # head predicts pK per heavy atom -> multiply back by size.
+                    raw *= max(int(lig_mask.sum()), 1)
                 # affinity head predicts pK (higher = stronger); the pose head
                 # predicts RMSD (lower = better), so only the latter is flipped.
-                head = raw if args.affinity_head else -raw
+                head = raw if (args.affinity_head or args.efficiency_head) else -raw
             logka, cluster = aff[tid]
             rows.append((tid, logka, cluster, pll, head))
             logger.info("%s: logKa %.2f | PLL %.3f | head %.3f", tid, logka, pll, head)

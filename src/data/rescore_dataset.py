@@ -39,15 +39,23 @@ def _ligand_mask(arr: np.ndarray) -> np.ndarray:
 class RescoreDataset(Dataset):
     """One (pose tokens, ligand mask, RMSD) example per doc."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         bin_path: Path,
         len_path: Path,
         rmsd_path: Path,
         block_size: int,
         group_path: Path | None = None,
+        *,
+        divide_by_size: bool = False,
     ) -> None:
         self.block_size = block_size
+        # Train on ligand efficiency (pK / heavy-atom count) instead of raw pK.
+        # The all-atom tokenizer emits one token per heavy atom, so the ligand
+        # token count IS the size -- no extra sidecar needed. Efficiency strips
+        # the molecular-size trend the head otherwise rides (pK-size corr 0.37),
+        # forcing it onto contact quality; eval multiplies back by size.
+        self.divide_by_size = divide_by_size
         self.tokens = np.memmap(bin_path, dtype=np.uint16, mode="r")
         self.lengths = np.fromfile(len_path, dtype=np.uint16).astype(np.int64)
         self.rmsd = np.fromfile(rmsd_path, dtype=np.float32)
@@ -81,10 +89,14 @@ class RescoreDataset(Dataset):
         s = int(self.offsets[idx])
         e = min(int(self.offsets[idx + 1]), s + self.block_size)
         arr = np.asarray(self.tokens[s:e], dtype=np.int64)
+        lig = _ligand_mask(arr)
+        label = float(self.rmsd[idx])
+        if self.divide_by_size:
+            label /= max(int(lig.sum()), 1)
         return {
             "input_ids": torch.from_numpy(arr),
-            "ligand_mask": torch.from_numpy(_ligand_mask(arr)),
-            "rmsd": torch.tensor(float(self.rmsd[idx]), dtype=torch.float32),
+            "ligand_mask": torch.from_numpy(lig),
+            "rmsd": torch.tensor(label, dtype=torch.float32),
             "length": torch.tensor(arr.shape[0], dtype=torch.int64),
             "group": torch.tensor(int(self.doc_group[idx]), dtype=torch.int64),
         }
@@ -187,6 +199,7 @@ class RescoreDataModule(L.LightningDataModule):
                     self.token_dir / f"{split}.rmsd",
                     self.config.block_size,
                     group_path=self.token_dir / f"{split}.grp",
+                    divide_by_size=self.config.label_divide_by_size,
                 )
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:
