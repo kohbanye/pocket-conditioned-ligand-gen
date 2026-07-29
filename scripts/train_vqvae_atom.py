@@ -29,10 +29,35 @@ from src.model.vqvae_module import AtomVQVAEModule
 logging.basicConfig(level=logging.INFO)
 
 
+def _resume_path(resume_from: Path | None) -> str | None:
+    """Validate ``--resume-from`` and return it as a ``trainer.fit`` ckpt_path.
+
+    Failing loudly matters here: a typo'd path silently starting from scratch
+    would burn the whole job before anyone noticed.
+    """
+    if resume_from is None:
+        return None
+    if not resume_from.exists():
+        msg = f"--resume-from checkpoint missing: {resume_from}"
+        raise SystemExit(msg)
+    return str(resume_from)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-types", type=str, nargs="+", default=["cdonly"])
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help=(
+            "checkpoint to resume training from (typically the run's own "
+            "last.ckpt). Restores optimizer, LR-scheduler and epoch counter, so "
+            "training continues rather than restarting -- passed to "
+            "trainer.fit(ckpt_path=...), not load_from_checkpoint."
+        ),
+    )
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument(
         "--codebook-size",
@@ -71,6 +96,14 @@ def main() -> None:
         action="store_true",
         help="Use all poses (default fold split is over the good-pose cache).",
     )
+    parser.add_argument(
+        "--modality",
+        choices=["both", "protein", "ligand"],
+        default="both",
+        help="Ablation: train on both atom streams (joint, default) or a single "
+        "modality (protein-only / ligand-only) on the SAME complexes. "
+        "Single-modality runs write their own normalization_stats_<modality>.pt.",
+    )
     args = parser.parse_args()
 
     config = AtomVQVAETrainingConfig()
@@ -96,7 +129,9 @@ def main() -> None:
 
     torch.set_float32_matmul_precision("high")
 
-    dm = AtomComplexDescriptorDataModule(config, data_config, hub_config=hub_config)
+    dm = AtomComplexDescriptorDataModule(
+        config, data_config, hub_config=hub_config, modality=args.modality
+    )
     if args.cache_dir is not None:
         dm.cache_dir = args.cache_dir
     if not (dm.cache_dir / "shard_metadata.pt").exists():
@@ -107,6 +142,14 @@ def main() -> None:
         raise FileNotFoundError(msg)
 
     module = AtomVQVAEModule(config)
+    # Pin the checkpoint dir to the run-name so downstream jobs can find it
+    # without knowing the auto-generated W&B run id (needed for the ablation
+    # pipeline chaining). save_last gives a fixed last.ckpt path too.
+    ckpt_dir = (
+        Path("pocket-ligand-vqvae") / args.run_name / "checkpoints"
+        if args.run_name
+        else None
+    )
     trainer = L.Trainer(
         max_epochs=config.max_epochs,
         accelerator="auto",
@@ -115,14 +158,16 @@ def main() -> None:
         logger=WandbLogger(project="pocket-ligand-vqvae", name=args.run_name),
         callbacks=[
             ModelCheckpoint(
+                dirpath=ckpt_dir,
                 monitor="val/atom_coord",
                 mode="min",
                 save_top_k=3,
+                save_last=True,
                 filename="atomvqvae-{epoch:02d}-{val/atom_coord:.4f}",
             ),
         ],
     )
-    trainer.fit(module, dm)
+    trainer.fit(module, dm, ckpt_path=_resume_path(args.resume_from))
     trainer.test(module, dm)
 
 

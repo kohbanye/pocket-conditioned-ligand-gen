@@ -1,0 +1,360 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="870" viewBox="0 0 1700 870"
+     font-family="Inter, 'Helvetica Neue', Helvetica, Arial, sans-serif">
+  <!--
+    All-atom complex tokenizer (Transformer VQ-VAE) — architecture figure.
+    Numbers follow src/tokenizers/vqvae.py, src/tokenizers/descriptor_schema.py,
+    src/tokenizers/codebook.py and AtomVQVAEConfig in src/config.py.
+
+    To drop in your own PyMOL renders, replace the dashed placeholders:
+      <image href="complex.png" x="58" y="156" width="204" height="176"
+             preserveAspectRatio="xMidYMid meet"/>
+      <image href="recon.png"  x="1428" y="728" width="214" height="64"
+             preserveAspectRatio="xMidYMid meet"/>
+  -->
+  <defs>
+    <style>
+      .pnl{fill:#ffffff;stroke:#dde3ea;stroke-width:1.4}
+      .h1{font-size:22px;font-weight:600;fill:#111c26}
+      .h2{font-size:12.5px;fill:#6b7683}
+      .ttl{font-size:14px;font-weight:600;fill:#152029}
+      .sub{font-size:10.5px;fill:#77828e}
+      .bdy{font-size:11px;fill:#2c3742}
+      .sml{font-size:9.8px;fill:#5c6773}
+      .tny{font-size:9px;fill:#8a94a0}
+      .num{font-size:11.5px;font-weight:700;fill:#ffffff}
+      .box{fill:#f7f9fb;stroke:#c9d4de;stroke-width:1.1}
+      .mono{font-family:'SFMono-Regular',Menlo,Consolas,monospace}
+      .ar{fill:none;stroke:#3d4852;stroke-width:1.8;marker-end:url(#ah)}
+      .ars{fill:none;stroke:#8d99a5;stroke-width:1.4;marker-end:url(#ahs)}
+      .arn{fill:none;stroke:#8d99a5;stroke-width:1.4}
+      .arp{fill:none;stroke:#6d5bd0;stroke-width:1.6;stroke-dasharray:6 4;marker-end:url(#ahp)}
+      .ph{fill:#f6f8fa;stroke:#c3ccd6;stroke-width:1.4;stroke-dasharray:5 4}
+      .lbl{font-size:9px;fill:#5c6773}
+    </style>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3d4852"/>
+    </marker>
+    <marker id="ahs" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8d99a5"/>
+    </marker>
+    <marker id="ahp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6d5bd0"/>
+    </marker>
+    <!-- segmented-vector fills -->
+    <pattern id="cont" width="7" height="24" patternUnits="userSpaceOnUse">
+      <rect width="7" height="24" fill="#b7d3f4"/><rect x="6.2" width="0.8" height="24" fill="#ffffff"/>
+    </pattern>
+    <pattern id="cat" width="7" height="24" patternUnits="userSpaceOnUse">
+      <rect width="7" height="24" fill="#d8cbf5"/><rect x="6.2" width="0.8" height="24" fill="#ffffff"/>
+    </pattern>
+    <pattern id="cells" width="9" height="14" patternUnits="userSpaceOnUse">
+      <rect width="9" height="14" fill="#e6ebf1"/><rect x="8" width="1" height="14" fill="#ffffff"/>
+    </pattern>
+    <pattern id="cellsP" width="9" height="14" patternUnits="userSpaceOnUse">
+      <rect width="9" height="14" fill="#cec2f2"/><rect x="8" width="1" height="14" fill="#ffffff"/>
+    </pattern>
+  </defs>
+
+  <rect width="1700" height="870" fill="#ffffff"/>
+
+  <!-- ============================ header ============================ -->
+  <text class="h1" x="40" y="48">Transformer VQ-VAE tokenizer for protein–ligand complexes</text>
+  <text class="h2" x="40" y="74">Every pocket and ligand heavy atom is described in one shared frame, encoded jointly, quantized against a shared codebook, and reconstructed by a multi-head decoder.</text>
+
+  <!-- ============================ 1. input ========================== -->
+  <rect class="pnl" x="40" y="104" width="240" height="326" rx="10"/>
+  <circle cx="62" cy="132" r="11" fill="#64748b"/><text class="num" x="62" y="136" text-anchor="middle">1</text>
+  <text class="ttl" x="82" y="137">Input complex</text>
+  <rect class="ph" x="58" y="156" width="204" height="176" rx="8"/>
+  <text class="bdy" x="160" y="232" text-anchor="middle" fill="#8b95a1" font-size="12">PyMOL structure</text>
+  <text class="mono tny" x="160" y="252" text-anchor="middle">&lt;image href="complex.png"&gt;</text>
+  <rect x="58" y="350" width="11" height="11" rx="2.5" fill="#2a7fa8"/>
+  <text class="sml" x="76" y="360">pocket heavy atoms</text>
+  <rect x="58" y="370" width="11" height="11" rx="2.5" fill="#e08a3c"/>
+  <text class="sml" x="76" y="380">ligand heavy atoms</text>
+  <text class="tny" x="58" y="404">canonical frame: PCA of pocket Cα,</text>
+  <text class="tny" x="58" y="417">origin at the pocket centroid</text>
+
+  <!-- ============================ 2. descriptor ===================== -->
+  <rect class="pnl" x="324" y="104" width="270" height="376" rx="10"/>
+  <circle cx="346" cy="132" r="11" fill="#3b7dd8"/><text class="num" x="346" y="136" text-anchor="middle">2</text>
+  <text class="ttl" x="366" y="137">Per-atom descriptor</text>
+  <text class="sub" x="346" y="157">33-D row for every heavy atom</text>
+
+  <rect x="343" y="172" width="28"  height="24" fill="url(#cont)"/>
+  <rect x="371" y="172" width="63"  height="24" fill="url(#cat)"/>
+  <rect x="434" y="172" width="112" height="24" fill="url(#cont)"/>
+  <rect x="546" y="172" width="28"  height="24" fill="url(#cat)"/>
+  <rect x="343" y="172" width="231" height="24" fill="none" stroke="#b0bcc9" stroke-width="1"/>
+  <path d="M371,172 v24 M434,172 v24 M546,172 v24" stroke="#8fa0b2" stroke-width="1"/>
+  <path d="M343,203 h28"  stroke="#3b7dd8" stroke-width="2.4"/>
+  <path d="M371,203 h63"  stroke="#7a63d6" stroke-width="2.4"/>
+  <path d="M434,203 h112" stroke="#3b7dd8" stroke-width="2.4"/>
+  <path d="M546,203 h28"  stroke="#7a63d6" stroke-width="2.4"/>
+  <text class="tny" x="357" y="215" text-anchor="middle">coord</text>
+  <text class="tny" x="402" y="215" text-anchor="middle">chem + context</text>
+  <text class="tny" x="490" y="215" text-anchor="middle">KNN offsets</text>
+  <text class="tny" x="560" y="215" text-anchor="middle">elem</text>
+
+  <rect x="343" y="234" width="11" height="11" rx="2.5" fill="#b7d3f4" stroke="#7fa9e0"/>
+  <text class="bdy" x="361" y="244" font-weight="600" fill="#2f5f9e">continuous (20)</text>
+  <text class="sml" x="345" y="260">r, θ, sin φ, cos φ — pocket-frame spherical</text>
+  <text class="sml" x="345" y="274">KNN offsets: K = 4 neighbours × 4 dims</text>
+
+  <rect x="343" y="290" width="11" height="11" rx="2.5" fill="#d8cbf5" stroke="#a99ae2"/>
+  <text class="bdy" x="361" y="300" font-weight="600" fill="#5a48b0">categorical (13)</text>
+  <text class="sml" x="345" y="316">source · element · charge · hybrid · aromatic</text>
+  <text class="sml" x="345" y="330">ring · numH · aa · backbone/side-chain</text>
+  <text class="sml" x="345" y="344">+ KNN element × 4</text>
+
+  <path d="M343,358 h231" stroke="#e6ebf0" stroke-width="1.2"/>
+
+  <rect class="box" x="343" y="370" width="110" height="38" rx="6"/>
+  <text class="sml" x="398" y="387" text-anchor="middle" fill="#2c3742">z-score norm</text>
+  <text class="tny" x="398" y="400" text-anchor="middle">continuous slots</text>
+  <rect class="box" x="464" y="370" width="110" height="38" rx="6"/>
+  <text class="sml" x="519" y="387" text-anchor="middle" fill="#2c3742">Embedding d = 8</text>
+  <text class="tny" x="519" y="400" text-anchor="middle">categorical slots</text>
+  <path class="ars" d="M398,408 v10 h60 v8"/>
+  <path class="arn" d="M519,408 v10 h-61"/>
+  <rect x="343" y="426" width="231" height="40" rx="6" fill="#eef4fc" stroke="#9dbde8" stroke-width="1.2"/>
+  <text class="sml" x="458" y="444" text-anchor="middle" fill="#23446e">concat → Linear · GELU · Linear</text>
+  <text class="tny" x="458" y="457" text-anchor="middle">256-d atom embedding</text>
+
+  <!-- ============================ 3. encoder ======================== -->
+  <rect class="pnl" x="638" y="104" width="200" height="296" rx="10"/>
+  <circle cx="660" cy="132" r="11" fill="#2a7fa8"/><text class="num" x="660" y="136" text-anchor="middle">3</text>
+  <text class="ttl" x="680" y="137">Transformer encoder</text>
+  <text class="sub" x="660" y="157">+ sinusoidal positional enc.</text>
+  <rect x="662" y="178" width="160" height="86" rx="7" fill="#edf3f6" stroke="#cfdde4"/>
+  <rect x="656" y="184" width="160" height="86" rx="7" fill="#f2f7f9" stroke="#c8d9e1"/>
+  <rect x="650" y="190" width="160" height="86" rx="7" fill="#f9fcfd" stroke="#bdd2dc"/>
+  <text class="bdy" x="722" y="216" text-anchor="middle">multi-head self-attention</text>
+  <text class="tny" x="722" y="231" text-anchor="middle">8 heads · d = 256</text>
+  <text class="tny" x="722" y="252" text-anchor="middle">FFN 512 · pre-norm · GELU</text>
+  <text x="800" y="207" text-anchor="end" font-size="10.5" font-weight="600" fill="#2a7fa8">× 4</text>
+  <path class="ar" d="M730,278 v22"/>
+  <rect class="box" x="650" y="302" width="160" height="36" rx="6"/>
+  <text class="sml" x="730" y="318" text-anchor="middle" fill="#2c3742">Linear 256 → 16</text>
+  <text class="tny" x="730" y="331" text-anchor="middle">+ LayerNorm</text>
+  <text class="tny" x="730" y="360" text-anchor="middle">one encoder shared by</text>
+  <text class="tny" x="730" y="373" text-anchor="middle">protein and ligand atoms</text>
+
+  <!-- ============================ 4. codebook ======================= -->
+  <rect class="pnl" x="882" y="104" width="240" height="326" rx="10"/>
+  <circle cx="904" cy="132" r="11" fill="#6d5bd0"/><text class="num" x="904" y="136" text-anchor="middle">4</text>
+  <text class="ttl" x="924" y="137">Vector quantization</text>
+  <text class="sub" x="904" y="157">EMA codebook · 8192 codes × 16-d</text>
+
+  <text class="sml" x="946" y="182" text-anchor="end">e<tspan font-size="7.5" dy="2">1</tspan></text>
+  <rect x="954" y="172" width="90" height="14" fill="url(#cells)"/>
+  <text class="sml" x="946" y="204" text-anchor="end">e<tspan font-size="7.5" dy="2">2</tspan></text>
+  <rect x="954" y="194" width="90" height="14" fill="url(#cells)"/>
+  <text class="sml" x="946" y="226" text-anchor="end" fill="#5a48b0" font-weight="600">e<tspan font-size="7.5" dy="2">k</tspan></text>
+  <rect x="954" y="216" width="90" height="14" fill="url(#cellsP)"/>
+  <rect x="948" y="212" width="102" height="22" rx="4" fill="none" stroke="#6d5bd0" stroke-width="1.6"/>
+  <text class="sml" x="946" y="248" text-anchor="end">e<tspan font-size="7.5" dy="2">4</tspan></text>
+  <rect x="954" y="238" width="90" height="14" fill="url(#cells)"/>
+  <text class="sml" x="999" y="270" text-anchor="middle">⋮</text>
+  <text class="sml" x="946" y="286" text-anchor="end">e<tspan font-size="7.5" dy="2">8192</tspan></text>
+  <rect x="954" y="276" width="90" height="14" fill="url(#cells)"/>
+
+  <text class="bdy" x="1002" y="318" text-anchor="middle" font-size="12" xml:space="preserve">k = arg min<tspan font-size="8.5" dy="3">j</tspan><tspan font-size="12" dy="-3">&#160;&#160;‖ z − e</tspan><tspan font-size="8.5" dy="3">j</tspan><tspan font-size="12" dy="-3"> ‖</tspan><tspan font-size="8.5" dy="3">2</tspan></text>
+
+  <text class="sml" x="904" y="346">· straight-through gradient to the encoder</text>
+  <text class="sml" x="904" y="364">· EMA code update + dead-code restart</text>
+  <text class="sml" x="904" y="382">· commitment loss  β = 0.25</text>
+  <text class="sml" x="904" y="400">· one book shared by both atom sources</text>
+
+  <!-- ============================ 5. decoder ======================== -->
+  <rect class="pnl" x="1166" y="104" width="200" height="296" rx="10"/>
+  <circle cx="1188" cy="132" r="11" fill="#2a7fa8"/><text class="num" x="1188" y="136" text-anchor="middle">5</text>
+  <text class="ttl" x="1208" y="137">Transformer decoder</text>
+  <text class="sub" x="1188" y="157">+ sinusoidal positional enc.</text>
+  <rect class="box" x="1178" y="172" width="160" height="30" rx="6"/>
+  <text class="sml" x="1258" y="191" text-anchor="middle" fill="#2c3742">Linear 16 → 256</text>
+  <path class="ar" d="M1258,202 v16"/>
+  <rect x="1190" y="210" width="160" height="86" rx="7" fill="#edf3f6" stroke="#cfdde4"/>
+  <rect x="1184" y="216" width="160" height="86" rx="7" fill="#f2f7f9" stroke="#c8d9e1"/>
+  <rect x="1178" y="222" width="160" height="86" rx="7" fill="#f9fcfd" stroke="#bdd2dc"/>
+  <text class="bdy" x="1250" y="248" text-anchor="middle">multi-head self-attention</text>
+  <text class="tny" x="1250" y="263" text-anchor="middle">8 heads · d = 256</text>
+  <text class="tny" x="1250" y="284" text-anchor="middle">FFN 512 · pre-norm · GELU</text>
+  <text x="1328" y="239" text-anchor="end" font-size="10.5" font-weight="600" fill="#2a7fa8">× 6</text>
+  <path class="ar" d="M1258,310 v18"/>
+  <rect class="box" x="1178" y="330" width="160" height="36" rx="6"/>
+  <text class="sml" x="1258" y="346" text-anchor="middle" fill="#2c3742">Linear · GELU</text>
+  <text class="tny" x="1258" y="359" text-anchor="middle">shared trunk</text>
+  <text class="tny" x="1258" y="385" text-anchor="middle">one decoder for both sources</text>
+
+  <!-- ============================ 6. heads ========================== -->
+  <rect class="pnl" x="1410" y="104" width="250" height="536" rx="10"/>
+  <circle cx="1432" cy="132" r="11" fill="#2e8b6f"/><text class="num" x="1432" y="136" text-anchor="middle">6</text>
+  <text class="ttl" x="1452" y="137">Prediction heads</text>
+  <text class="sub" x="1432" y="157">Linear(256 → ·) on every atom</text>
+
+  <text x="1432" y="181" font-size="9.5" font-weight="600" fill="#3b7dd8" letter-spacing="0.6">REGRESSION</text>
+  <rect x="1428" y="188" width="214" height="52" rx="7" fill="#eef4fc" stroke="#9dbde8" stroke-width="1.2"/>
+  <text class="bdy" x="1440" y="210" font-weight="600" fill="#23446e">coord</text>
+  <rect x="1562" y="197" width="68" height="17" rx="8.5" fill="#3b7dd8"/>
+  <text x="1596" y="209" text-anchor="middle" font-size="9.5" fill="#ffffff">4 dims</text>
+  <text class="sml" x="1440" y="230">r, θ, sin φ, cos φ</text>
+  <text class="tny" x="1432" y="256">→ unit-circle proj → Cartesian, MSE</text>
+  <text class="tny" x="1432" y="269">+ clash hinge on ligand atom pairs</text>
+
+  <text x="1432" y="296" font-size="9.5" font-weight="600" fill="#2e8b6f" letter-spacing="0.6">CLASSIFICATION · SOFTMAX + CE</text>
+
+  <rect x="1428" y="304" width="214" height="30" rx="6" fill="#f4faf7" stroke="#b6d9c9" stroke-width="1.1"/>
+  <text class="bdy" x="1440" y="323">element</text>
+  <rect x="1584" y="311" width="46" height="16" rx="8" fill="#2e8b6f"/><text x="1607" y="323" text-anchor="middle" font-size="9.5" fill="#ffffff">12</text>
+
+  <rect x="1428" y="340" width="214" height="30" rx="6" fill="#f4faf7" stroke="#b6d9c9" stroke-width="1.1"/>
+  <text class="bdy" x="1440" y="359">formal charge</text>
+  <rect x="1584" y="347" width="46" height="16" rx="8" fill="#2e8b6f"/><text x="1607" y="359" text-anchor="middle" font-size="9.5" fill="#ffffff">5</text>
+
+  <rect x="1428" y="376" width="214" height="30" rx="6" fill="#f4faf7" stroke="#b6d9c9" stroke-width="1.1"/>
+  <text class="bdy" x="1440" y="395">hybridization</text>
+  <rect x="1584" y="383" width="46" height="16" rx="8" fill="#2e8b6f"/><text x="1607" y="395" text-anchor="middle" font-size="9.5" fill="#ffffff">5</text>
+
+  <rect x="1428" y="412" width="214" height="30" rx="6" fill="#f4faf7" stroke="#b6d9c9" stroke-width="1.1"/>
+  <text class="bdy" x="1440" y="431">aromatic</text>
+  <rect x="1584" y="419" width="46" height="16" rx="8" fill="#2e8b6f"/><text x="1607" y="431" text-anchor="middle" font-size="9.5" fill="#ffffff">2</text>
+
+  <rect x="1428" y="448" width="214" height="30" rx="6" fill="#f4faf7" stroke="#b6d9c9" stroke-width="1.1"/>
+  <text class="bdy" x="1440" y="467">ring size</text>
+  <rect x="1584" y="455" width="46" height="16" rx="8" fill="#2e8b6f"/><text x="1607" y="467" text-anchor="middle" font-size="9.5" fill="#ffffff">5</text>
+
+  <rect x="1428" y="484" width="214" height="30" rx="6" fill="#f4faf7" stroke="#b6d9c9" stroke-width="1.1"/>
+  <text class="bdy" x="1440" y="503">H count</text>
+  <rect x="1584" y="491" width="46" height="16" rx="8" fill="#2e8b6f"/><text x="1607" y="503" text-anchor="middle" font-size="9.5" fill="#ffffff">5</text>
+
+  <rect x="1428" y="520" width="214" height="30" rx="6" fill="#f4faf7" stroke="#b6d9c9" stroke-width="1.1"/>
+  <text class="bdy" x="1440" y="539">residue type <tspan fill="#2a7fa8">†</tspan></text>
+  <rect x="1584" y="527" width="46" height="16" rx="8" fill="#2e8b6f"/><text x="1607" y="539" text-anchor="middle" font-size="9.5" fill="#ffffff">21</text>
+
+  <rect x="1428" y="556" width="214" height="30" rx="6" fill="#f4faf7" stroke="#b6d9c9" stroke-width="1.1"/>
+  <text class="bdy" x="1440" y="575">backbone / side-chain <tspan fill="#2a7fa8">†</tspan></text>
+  <rect x="1584" y="563" width="46" height="16" rx="8" fill="#2e8b6f"/><text x="1607" y="575" text-anchor="middle" font-size="9.5" fill="#ffffff">3</text>
+
+  <text class="tny" x="1432" y="606">† protein-context heads: the loss is</text>
+  <text class="tny" x="1432" y="619">masked out on ligand atoms</text>
+
+  <!-- ==================== inset A: atom geometry ==================== -->
+  <rect x="40" y="500" width="430" height="160" rx="10" fill="#fbfcfd" stroke="#e3e8ee" stroke-width="1.2"/>
+  <text class="ttl" x="58" y="526" font-size="12.5">Atom geometry in the shared pocket frame</text>
+
+  <circle cx="114" cy="600" r="44" fill="none" stroke="#cbd5df" stroke-width="1.1" stroke-dasharray="4 3"/>
+  <path d="M114,600 v-56" stroke="#aab5c1" stroke-width="1"/>
+  <text class="tny" x="114" y="538" text-anchor="middle">z</text>
+  <path d="M114,576 a24,24 0 0 1 17,7" fill="none" stroke="#8a94a0" stroke-width="1"/>
+  <text class="tny" x="127" y="574" fill="#5c6773">θ</text>
+  <path d="M114,600 L152,571" stroke="#e08a3c" stroke-width="1.6"/>
+  <text class="tny" x="140" y="597" fill="#a85a17">r</text>
+  <g stroke="#c8cfd8" stroke-width="0.9">
+    <path d="M152,571 L172,586"/><path d="M152,571 L163,551"/><path d="M152,571 L131,556"/>
+  </g>
+  <g fill="#c2cbd5">
+    <circle cx="172" cy="586" r="3"/><circle cx="163" cy="551" r="3"/><circle cx="131" cy="556" r="3"/>
+  </g>
+  <circle cx="152" cy="571" r="5" fill="#e08a3c"/>
+  <circle cx="114" cy="600" r="3.5" fill="#3d4852"/>
+  <text class="tny" x="114" y="658" text-anchor="middle">pocket centroid</text>
+
+  <text class="sml" x="196" y="552">· each atom: (r, θ, φ) from the pocket centroid,</text>
+  <text class="sml" x="204" y="565">in a canonical Cα-PCA frame</text>
+  <text class="sml" x="196" y="587">· protein and ligand share that frame, so the pose</text>
+  <text class="sml" x="204" y="600">is encoded per atom — no extra pose tokens</text>
+  <text class="sml" x="196" y="622">· local shape: spherical offsets to the K = 4</text>
+  <text class="sml" x="204" y="635">nearest same-source atoms</text>
+
+  <!-- ==================== inset B: training objective ================ -->
+  <rect x="500" y="500" width="470" height="160" rx="10" fill="#fbfcfd" stroke="#e3e8ee" stroke-width="1.2"/>
+  <text class="ttl" x="518" y="526" font-size="12.5">Training objective</text>
+  <text class="bdy" x="518" y="552" font-size="12" xml:space="preserve">L = L<tspan font-size="8.5" dy="3">coord</tspan><tspan font-size="12" dy="-3">&#160;+&#160;Σ</tspan><tspan font-size="8.5" dy="3">h</tspan><tspan font-size="12" dy="-3">&#160;L</tspan><tspan font-size="8.5" dy="3">CE(h)</tspan><tspan font-size="12" dy="-3">&#160;+&#160;λ&#160;L</tspan><tspan font-size="8.5" dy="3">clash</tspan><tspan font-size="12" dy="-3">&#160;+&#160;β&#160;L</tspan><tspan font-size="8.5" dy="3">commit</tspan></text>
+  <text class="sml" x="518" y="580">· L_coord — Cartesian MSE after denormalizing (r, θ, sin φ, cos φ) → xyz</text>
+  <text class="sml" x="518" y="600">· L_CE — one term per categorical head; aa / bb-sc masked to protein atoms</text>
+  <text class="sml" x="518" y="620">· L_clash — hinge on reconstructed ligand atom pairs closer than 1.2 Å</text>
+  <text class="sml" x="518" y="640">· L_commit — ‖z − sg[e_k]‖²; the codebook itself is updated by EMA, not by gradients</text>
+
+  <!-- ============================ token output ====================== -->
+  <rect class="pnl" x="40" y="680" width="1310" height="150" rx="10"/>
+  <rect x="56" y="698" width="72" height="20" rx="10" fill="#efecfb"/>
+  <text x="92" y="712" text-anchor="middle" font-size="9.5" font-weight="600" fill="#6d5bd0" letter-spacing="0.8">OUTPUT</text>
+  <text class="ttl" x="142" y="713" font-size="13">Discrete token sequence — one codebook index per heavy atom</text>
+
+  <rect x="62"  y="736" width="40" height="28" rx="5" fill="#eef2f6" stroke="#cbd5df"/>
+  <text class="mono" x="82" y="755" text-anchor="middle" font-size="11" fill="#4a5661">&lt;p&gt;</text>
+  <g fill="#e7f1f7" stroke="#9cc3d8">
+    <rect x="110" y="736" width="50" height="28" rx="5"/>
+    <rect x="168" y="736" width="50" height="28" rx="5"/>
+    <rect x="226" y="736" width="50" height="28" rx="5"/>
+    <rect x="284" y="736" width="50" height="28" rx="5"/>
+    <rect x="342" y="736" width="50" height="28" rx="5"/>
+    <rect x="400" y="736" width="50" height="28" rx="5"/>
+    <rect x="458" y="736" width="50" height="28" rx="5"/>
+    <rect x="516" y="736" width="50" height="28" rx="5"/>
+    <rect x="574" y="736" width="50" height="28" rx="5"/>
+  </g>
+  <g class="mono" font-size="11" fill="#1f5b7a" text-anchor="middle">
+    <text x="135" y="755">3182</text><text x="193" y="755">771</text><text x="251" y="755">5904</text>
+    <text x="309" y="755">4410</text><text x="367" y="755">118</text><text x="425" y="755">2077</text>
+    <text x="483" y="755">6633</text><text x="541" y="755">512</text><text x="599" y="755">3941</text>
+  </g>
+  <text class="sml" x="642" y="755" text-anchor="middle">…</text>
+  <rect x="660" y="736" width="46" height="28" rx="5" fill="#eef2f6" stroke="#cbd5df"/>
+  <text class="mono" x="683" y="755" text-anchor="middle" font-size="11" fill="#4a5661">&lt;/p&gt;</text>
+  <rect x="712" y="736" width="40" height="28" rx="5" fill="#eef2f6" stroke="#cbd5df"/>
+  <text class="mono" x="732" y="755" text-anchor="middle" font-size="11" fill="#4a5661">&lt;l&gt;</text>
+  <g fill="#fdf0e4" stroke="#e8bc8e">
+    <rect x="760" y="736" width="50" height="28" rx="5"/>
+    <rect x="818" y="736" width="50" height="28" rx="5"/>
+    <rect x="876" y="736" width="50" height="28" rx="5"/>
+    <rect x="934" y="736" width="50" height="28" rx="5"/>
+    <rect x="992" y="736" width="50" height="28" rx="5"/>
+    <rect x="1050" y="736" width="50" height="28" rx="5"/>
+  </g>
+  <g class="mono" font-size="11" fill="#a85a17" text-anchor="middle">
+    <text x="785" y="755">7728</text><text x="843" y="755">214</text><text x="901" y="755">5063</text>
+    <text x="959" y="755">881</text><text x="1017" y="755">4402</text><text x="1075" y="755">1935</text>
+  </g>
+  <text class="sml" x="1118" y="755" text-anchor="middle">…</text>
+  <rect x="1136" y="736" width="46" height="28" rx="5" fill="#eef2f6" stroke="#cbd5df"/>
+  <text class="mono" x="1159" y="755" text-anchor="middle" font-size="11" fill="#4a5661">&lt;/l&gt;</text>
+
+  <text class="sml" x="62" y="792">8192 shared codes + 7 special tokens. The same sequence is what the autoregressive generator and the complex MLM rescorer consume.</text>
+  <text class="tny" x="62" y="810">Ablation variant: separate protein / ligand books (8192 + 8192 or 4096 + 4096), with a learned source embedding added to e_k before the decoder.</text>
+
+  <!-- ============================ 7. reconstruction ================= -->
+  <rect class="pnl" x="1410" y="680" width="250" height="150" rx="10"/>
+  <circle cx="1432" cy="708" r="11" fill="#64748b"/><text class="num" x="1432" y="712" text-anchor="middle">7</text>
+  <text class="ttl" x="1452" y="713">Reconstruction</text>
+  <rect class="ph" x="1428" y="728" width="214" height="64" rx="8"/>
+  <text class="bdy" x="1535" y="754" text-anchor="middle" fill="#8b95a1" font-size="11">PyMOL render</text>
+  <text class="tny" x="1535" y="770" text-anchor="middle">of the decoded atoms</text>
+  <text class="tny" x="1432" y="812">coordinates + per-atom chemistry</text>
+
+  <!-- ============================ flow arrows ======================= -->
+  <path class="ar" d="M282,302 h36"/>
+  <text class="lbl" x="302" y="290" text-anchor="middle">atoms</text>
+
+  <path class="ar" d="M596,302 h36"/>
+  <text class="lbl" x="614" y="290" text-anchor="middle">L × 256</text>
+
+  <path class="ar" d="M840,302 h36"/>
+  <text class="lbl" x="858" y="284" text-anchor="middle">z</text>
+  <text class="lbl" x="858" y="295" text-anchor="middle">L × 16</text>
+
+  <path class="ar" d="M1124,302 h36"/>
+  <text class="lbl" x="1143" y="284" text-anchor="middle">e<tspan font-size="7" dy="1.5">k</tspan></text>
+  <text class="lbl" x="1143" y="295" text-anchor="middle">L × 16</text>
+
+  <path class="ar" d="M1368,302 h36"/>
+  <text class="lbl" x="1387" y="284" text-anchor="middle">h</text>
+  <text class="lbl" x="1387" y="295" text-anchor="middle">L × 256</text>
+
+  <path class="arp" d="M1002,432 v242"/>
+  <text class="lbl" x="1012" y="548" fill="#6d5bd0">index k</text>
+  <text class="lbl" x="1012" y="561" fill="#6d5bd0">per atom</text>
+
+  <path class="ar" d="M1535,642 v32"/>
+</svg>

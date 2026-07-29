@@ -17,6 +17,7 @@ Run (CPU, streams tars; needs the snapshot tars/manifest + extracted receptors):
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -80,6 +81,20 @@ def main() -> None:
             "split across several jobs / calibrated on one tar. Default: all."
         ),
     )
+    parser.add_argument(
+        "--ligand-frame",
+        type=str,
+        default="pocket",
+        choices=["pocket", "local"],
+        help=(
+            "Reference frame for the LIGAND descriptors. 'pocket' (default) uses "
+            "the shared pocket-anchored frame so placement is encoded per atom. "
+            "'local' uses a frame built from the ligand's own atoms, matching how "
+            "single-modality ligand tokenizers encode a molecule -- the tokens "
+            "become SE(3)-invariant and carry no pose. Write these to a SEPARATE "
+            "--cache-dir; the two are not interchangeable."
+        ),
+    )
     args = parser.parse_args()
 
     shard_ids = None
@@ -107,8 +122,18 @@ def main() -> None:
         min_only=not args.keep_label1_docked,
         max_files_per_tar=args.max_files_per_tar,
         shard_ids=shard_ids,
+        ligand_frame=args.ligand_frame,
     )
-    logger.info("Atom cache written: %d complexes across %d shards", total, len(counts))
+    # Record the frame so a cache can never be silently mixed with the other kind.
+    (cache_dir / "frame_config.json").write_text(
+        json.dumps({"ligand_frame": args.ligand_frame}, indent=2)
+    )
+    logger.info(
+        "Atom cache written: %d complexes across %d shards (ligand_frame=%s)",
+        total,
+        len(counts),
+        args.ligand_frame,
+    )
 
 
 if __name__ == "__main__":

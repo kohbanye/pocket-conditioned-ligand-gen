@@ -99,8 +99,21 @@ def _atom_process_pose(  # noqa: PLR0913
     pocket_config: object,
     prot_desc: ProteinAtomDescriptor,
     lig_desc: LigandAtomDescriptor,
+    ligand_frame: str = "pocket",
 ) -> dict[str, np.ndarray | list[str]] | None:
-    """Process one (receptor, ligand pose) pair into all-atom descriptors."""
+    """Process one (receptor, ligand pose) pair into all-atom descriptors.
+
+    ``ligand_frame`` selects the reference frame for the LIGAND descriptors:
+
+    - ``"pocket"`` (default) — the shared pocket-anchored canonical frame, so
+      the ligand's placement relative to the receptor is encoded per atom.
+    - ``"local"`` — a canonical frame built from the ligand's own heavy atoms,
+      mirroring how single-modality ligand tokenizers (Mol-StrucTok, Geo2Seq)
+      encode a molecule. The resulting tokens are SE(3)-invariant and carry NO
+      information about where the ligand sits in the pocket; that placement has
+      to be transmitted separately. This is the ablation arm that makes the
+      interface metrics meaningful.
+    """
     heavy = [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"]
     if not heavy:
         return None
@@ -117,8 +130,18 @@ def _atom_process_pose(  # noqa: PLR0913
     centroid, rotation = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
     frame = (centroid, rotation)
 
+    if ligand_frame == "local":
+        lig_frame = _compute_canonical_frame(lig_coords.astype(np.float64))
+    elif ligand_frame == "pocket":
+        lig_frame = frame
+    else:
+        msg = f"unknown ligand_frame {ligand_frame!r} (expected 'pocket' or 'local')"
+        raise ValueError(msg)
+
     prot_arr, _prot_meta = prot_desc.compute(pocket, receptor_feats, frame)
-    lig_arr, elements, _lig_meta = lig_desc.compute(mol["atoms"], mol["bonds"], frame)
+    lig_arr, elements, _lig_meta = lig_desc.compute(
+        mol["atoms"], mol["bonds"], lig_frame
+    )
     if len(lig_arr) == 0:
         return None
 
@@ -314,7 +337,7 @@ def _atom_fold_split_from_manifest(
 class AtomShardedDataset(IterableDataset):
     """Streams normalized atom sequences; each entry yields protein + ligand."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         shard_dir: Path,
         shard_plan: list[tuple[int, list[int]]],
@@ -322,6 +345,7 @@ class AtomShardedDataset(IterableDataset):
         std: np.ndarray,
         *,
         shuffle: bool = False,
+        keys: tuple[str, ...] = ("protein", "ligand"),
     ) -> None:
         super().__init__()
         self.shard_dir = shard_dir
@@ -329,8 +353,11 @@ class AtomShardedDataset(IterableDataset):
         self.mean = mean
         self.std = std
         self.shuffle = shuffle
-        # Two sequences (protein + ligand) per cached entry.
-        self.length = 2 * sum(len(indices) for _, indices in shard_plan)
+        # Which atom streams to emit per entry. ("protein","ligand") = joint;
+        # a single-element tuple trains a single-modality (protein/ligand-only)
+        # VQ-VAE on the SAME complexes (the ablation baseline tokenizers).
+        self.keys = keys
+        self.length = len(keys) * sum(len(indices) for _, indices in shard_plan)
 
     def __len__(self) -> int:
         return self.length
@@ -361,7 +388,7 @@ class AtomShardedDataset(IterableDataset):
             )
             for local_idx in local_indices:
                 entry = shard_data[local_idx]
-                for key in ("protein", "ligand"):
+                for key in self.keys:
                     desc = entry[key]
                     if desc.shape[0] == 0:
                         continue
@@ -377,6 +404,7 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
         training_config: AtomVQVAETrainingConfig,
         data_config: CrossDockedConfig,
         hub_config: HubDatasetConfig | None = None,
+        modality: str = "both",
     ) -> None:
         super().__init__()
         self.training_config = training_config
@@ -384,6 +412,19 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
         self.hub_config = hub_config
         self.data_dir = Path(data_config.data_dir)
         self.cache_dir = self.data_dir / "descriptor_cache_allatom"
+
+        # Ablation: restrict the VQ-VAE training stream to one atom modality.
+        # "both" = joint tokenizer; "protein"/"ligand" = single-modality baseline
+        # trained on the SAME complexes' atoms. Single-modality runs get their own
+        # normalization stats file so they never clobber the joint stats.
+        self.modality = modality
+        self._keys: tuple[str, ...] = (
+            ("protein",)
+            if modality == "protein"
+            else ("ligand",)
+            if modality == "ligand"
+            else ("protein", "ligand")
+        )
 
         self.norm_stats: dict[str, Tensor] | None = None
         self._train_plan: list[tuple[int, list[int]]] | None = None
@@ -472,7 +513,12 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
         shard_counts: list[int],
         train_set: set[int],
     ) -> None:
-        stats_path = self.cache_dir / _NORMALIZATION_STATS_FILE
+        stats_name = (
+            _NORMALIZATION_STATS_FILE
+            if self.modality == "both"
+            else _NORMALIZATION_STATS_FILE.replace(".pt", f"_{self.modality}.pt")
+        )
+        stats_path = self.cache_dir / stats_name
         if stats_path.exists():
             self.norm_stats = torch.load(stats_path, weights_only=False)
             logger.info("Loaded cached atom normalization stats from %s", stats_path)
@@ -485,7 +531,7 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
             for local_idx, cplx in enumerate(shard_data):
                 if (global_offset + local_idx) not in train_set:
                     continue
-                for key in ("protein", "ligand"):
+                for key in self._keys:
                     arr = cplx[key]
                     if arr.shape[0] == 0:  # type: ignore[union-attr]
                         continue
@@ -554,6 +600,7 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
             mean=self.norm_stats["atom_mean"].numpy(),
             std=self.norm_stats["atom_std"].numpy(),
             shuffle=shuffle,
+            keys=self._keys,
         )
         nw = self.training_config.num_workers
         return DataLoader(

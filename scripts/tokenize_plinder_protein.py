@@ -301,10 +301,19 @@ class _Encoder:
             self.flush(split)
 
 
-def main() -> None:  # noqa: PLR0915, C901
+def main() -> None:  # noqa: PLR0915, C901, PLR0912
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=Path, required=True, help="Atom VQ-VAE ckpt.")
-    parser.add_argument("--norm-stats", type=Path, required=True)
+    parser.add_argument(
+        "--ckpt",
+        type=Path,
+        default=None,
+        help="Atom VQ-VAE ckpt (joint). Omit when using --separate-*-ckpt.",
+    )
+    parser.add_argument("--separate-protein-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-protein-norm", type=Path, default=None)
+    parser.add_argument("--separate-ligand-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-ligand-norm", type=Path, default=None)
+    parser.add_argument("--norm-stats", type=Path, default=None)
     parser.add_argument(
         "--systems-dir", type=Path, default=Path("data/plinder/systems")
     )
@@ -357,22 +366,46 @@ def main() -> None:  # noqa: PLR0915, C901
     if args.split_codebook:
         config.atom.split_codebook = True
         config.atom.ligand_codebook_size = args.ligand_codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.ckpt, config=config, map_location=device
-    )
-    module.eval()
-    module.to(device)
-    norm_stats = torch.load(args.norm_stats, weights_only=False)
-    module.vqvae.set_normalization(norm_stats["atom_mean"], norm_stats["atom_std"])
-    mean = norm_stats["atom_mean"].numpy()
-    std = norm_stats["atom_std"].numpy()
-    if args.split_codebook:
-        vocab: AtomLMVocab | LMVocab = LMVocab(
-            protein_codebook_size=args.codebook_size,
-            ligand_codebook_size=args.ligand_codebook_size,
+    if args.separate_protein_ckpt is not None:
+        # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
+        # unified into one code space. Feed RAW descriptors (identity external
+        # norm) -- SeparateVQVAE normalizes per modality internally. Combined
+        # single-range AtomLMVocab over 2*codebook_size codes.
+        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+            ATOM_DESCRIPTOR_DIM,
+        )
+        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+
+        module = SeparateVQVAE.from_checkpoints(
+            args.separate_protein_ckpt,
+            args.separate_protein_norm,
+            args.separate_ligand_ckpt,
+            args.separate_ligand_norm,
+            device,
+            codebook_size=args.codebook_size,
+        )
+        mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+        std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+        vocab: AtomLMVocab | LMVocab = AtomLMVocab(
+            codebook_size=2 * args.codebook_size
         )
     else:
-        vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        module = AtomVQVAEModule.load_from_checkpoint(
+            args.ckpt, config=config, map_location=device
+        )
+        module.eval()
+        module.to(device)
+        norm_stats = torch.load(args.norm_stats, weights_only=False)
+        module.vqvae.set_normalization(norm_stats["atom_mean"], norm_stats["atom_std"])
+        mean = norm_stats["atom_mean"].numpy()
+        std = norm_stats["atom_std"].numpy()
+        if args.split_codebook:
+            vocab = LMVocab(
+                protein_codebook_size=args.codebook_size,
+                ligand_codebook_size=args.ligand_codebook_size,
+            )
+        else:
+            vocab = AtomLMVocab(codebook_size=args.codebook_size)
 
     casf_pdbs = None
     if args.casf_pdbs is not None and args.casf_pdbs.exists():
@@ -463,8 +496,16 @@ def main() -> None:  # noqa: PLR0915, C901
         meta["protein_offset"] = vocab.protein_offset
         meta["ligand_offset"] = vocab.ligand_offset
     else:
-        meta["atom_codebook_size"] = args.codebook_size
+        # In separate-tokenizers mode the combined code space is 2x (protein
+        # codes then ligand codes), so downstream must see the doubled size.
+        meta["atom_codebook_size"] = (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        )
         meta["atom_offset"] = vocab.offset
+        if args.separate_protein_ckpt is not None:
+            meta["separate_tokenizers"] = True
     for split, writer in writers.items():
         writer.close()
         meta["splits"][split] = {

@@ -122,12 +122,20 @@ def _build_pocket_plans(  # noqa: PLR0913
     max_per_pocket: int,
     seed: int,
     casf_pdbs: set[str] | None = None,
+    num_partitions: int = 1,
+    partition_index: int = 0,
 ) -> tuple[list, list]:
     """Pocket-level train/val plans over fold0-train pockets, capped per pocket.
 
     Holds out ``val_frac`` of the fold0-TRAIN pockets as a held-out-pocket val
     (disjoint from the fold0-test eval pockets), and caps complexes per pocket so
     no pocket dominates the corpus.
+
+    For parallel tokenization, ``num_partitions``/``partition_index`` restrict the
+    work to shards where ``shard_idx % num_partitions == partition_index``. The
+    train/val pocket assignment is derived from the manifest + ``seed`` (identical
+    in every partition), so a pocket spanning shards keeps ONE consistent label
+    across partitions and the partial corpora concatenate without leakage.
     """
     from collections import defaultdict  # noqa: PLC0415
 
@@ -161,6 +169,8 @@ def _build_pocket_plans(  # noqa: PLR0913
 
     by_pocket: dict[str, list[tuple[int, int]]] = defaultdict(list)
     for shard_idx, _count in enumerate(shard_counts):
+        if num_partitions > 1 and shard_idx % num_partitions != partition_index:
+            continue
         shard = torch.load(shard_dir / f"shard_{shard_idx:04d}.pt", weights_only=False)
         for local_idx, cplx in enumerate(shard):
             pocket = pair_to_pocket.get(int(cplx["pair_idx"]))
@@ -189,9 +199,18 @@ def _build_pocket_plans(  # noqa: PLR0913
     return train_plan, val_plan
 
 
-def main() -> None:  # noqa: PLR0915
+def main() -> None:  # noqa: PLR0915, C901, PLR0912
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=Path, required=True, help="Atom VQ-VAE ckpt.")
+    parser.add_argument(
+        "--ckpt",
+        type=Path,
+        default=None,
+        help="Atom VQ-VAE ckpt (joint). Omit when using --separate-*-ckpt.",
+    )
+    parser.add_argument("--separate-protein-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-protein-norm", type=Path, default=None)
+    parser.add_argument("--separate-ligand-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-ligand-norm", type=Path, default=None)
     parser.add_argument(
         "--cache-dir", type=Path, default=Path("data/descriptor_cache_allatom")
     )
@@ -226,6 +245,15 @@ def main() -> None:  # noqa: PLR0915
     parser.add_argument("--pocket-val-frac", type=float, default=0.12)
     parser.add_argument("--max-per-pocket", type=int, default=32)
     parser.add_argument("--split-seed", type=int, default=0)
+    parser.add_argument(
+        "--num-partitions",
+        type=int,
+        default=1,
+        help="Parallel tokenization: process only shards where "
+        "shard_idx %% num_partitions == partition_index. Run one job per index "
+        "(distinct --out-dir) then concatenate. Pocket-split only.",
+    )
+    parser.add_argument("--partition-index", type=int, default=0)
     parser.add_argument("--max-pairs", type=int, default=None, help="Debug subset.")
     parser.add_argument(
         "--casf-pdbs",
@@ -262,26 +290,45 @@ def main() -> None:  # noqa: PLR0915
         dm.norm_stats = torch.load(args.norm_stats, weights_only=False)
         logger.info("Overriding atom normalization stats from %s", args.norm_stats)
     assert dm.norm_stats is not None  # noqa: S101
-    mean = dm.norm_stats["atom_mean"].numpy()
-    std = dm.norm_stats["atom_std"].numpy()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.ckpt, config=config, map_location=device
-    )
-    module.eval()
-    module.to(device)
-    module.vqvae.set_normalization(
-        dm.norm_stats["atom_mean"], dm.norm_stats["atom_std"]
-    )
+    if args.separate_protein_ckpt is not None:
+        # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
+        # unified into one code space. Feed RAW descriptors (identity external
+        # norm) -- SeparateVQVAE normalizes per modality internally. Combined
+        # single-range AtomLMVocab over 2*codebook_size codes.
+        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
-    if args.split_codebook:
-        vocab = LMVocab(
-            protein_codebook_size=args.codebook_size,
-            ligand_codebook_size=args.ligand_codebook_size,
+        module = SeparateVQVAE.from_checkpoints(
+            args.separate_protein_ckpt,
+            args.separate_protein_norm,
+            args.separate_ligand_ckpt,
+            args.separate_ligand_norm,
+            device,
+            codebook_size=args.codebook_size,
         )
+        dim = dm.norm_stats["atom_mean"].numel()
+        mean = np.zeros(dim, dtype=np.float32)
+        std = np.ones(dim, dtype=np.float32)
+        vocab = AtomLMVocab(codebook_size=2 * args.codebook_size)
     else:
-        vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        mean = dm.norm_stats["atom_mean"].numpy()
+        std = dm.norm_stats["atom_std"].numpy()
+        module = AtomVQVAEModule.load_from_checkpoint(
+            args.ckpt, config=config, map_location=device
+        )
+        module.eval()
+        module.to(device)
+        module.vqvae.set_normalization(
+            dm.norm_stats["atom_mean"], dm.norm_stats["atom_std"]
+        )
+        if args.split_codebook:
+            vocab = LMVocab(
+                protein_codebook_size=args.codebook_size,
+                ligand_codebook_size=args.ligand_codebook_size,
+            )
+        else:
+            vocab = AtomLMVocab(codebook_size=args.codebook_size)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     shard_dir = dm._shard_dir  # noqa: SLF001
     assert shard_dir is not None  # noqa: S101
@@ -307,6 +354,8 @@ def main() -> None:  # noqa: PLR0915
             args.max_per_pocket,
             args.split_seed,
             casf_pdbs=casf_pdbs,
+            num_partitions=args.num_partitions,
+            partition_index=args.partition_index,
         )
         plans = {"train": train_plan, "val": val_plan}
         args.splits = ["train", "val"]
@@ -331,8 +380,16 @@ def main() -> None:  # noqa: PLR0915
         meta["protein_offset"] = vocab.protein_offset
         meta["ligand_offset"] = vocab.ligand_offset
     else:
-        meta["atom_codebook_size"] = args.codebook_size
+        # In separate-tokenizers mode the combined code space is 2x (protein
+        # codes then ligand codes), so downstream must see the doubled size.
+        meta["atom_codebook_size"] = (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        )
         meta["atom_offset"] = vocab.offset
+        if args.separate_protein_ckpt is not None:
+            meta["separate_tokenizers"] = True
     for split in args.splits:
         plan = plans[split]
         if not plan:

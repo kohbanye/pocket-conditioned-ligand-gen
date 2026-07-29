@@ -100,11 +100,21 @@ def main() -> None:  # noqa: C901
 
     torch.set_float32_matmul_precision("high")
 
+    # Pin the checkpoint dir to the run-name so downstream stages can warm-start
+    # from a knowable path (not the W&B run id) for hold_jid chaining;
+    # save_last gives a stable last.ckpt.
+    ckpt_dir = (
+        Path("pocket-ligand-lm") / args.run_name / "checkpoints"
+        if args.run_name
+        else None
+    )
     callbacks: list = [
         ModelCheckpoint(
+            dirpath=ckpt_dir,
             monitor="val/loss",
             mode="min",
             save_top_k=3,
+            save_last=True,
             # auto_insert_metric_name=False so the "/" in "val/loss" does not
             # create a nested checkpoint subdirectory.
             filename="lm-e{epoch:02d}-vl{val/loss:.4f}",
