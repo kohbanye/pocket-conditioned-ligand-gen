@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.venv-*/
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# uv
+# keep uv.lock tracked
+
+# Data, weights, generated molecules, evaluation dumps (large / machine-local) --
+# Model weights are symlinked/copied in from elsewhere, never committed.
+/weights/
+# Benchmark targets (prepared receptors / pockets / reference ligands / boxes).
+/data/
+# Per-model generated molecules + docking dumps.
+/outputs/
+# Aggregated result tables are small enough to keep; ignore only bulky dumps.
+/results/**/*.sdf
+/results/**/*.npz
+/results/**/*.pdb
+/results/**/*.pdbqt
+/results/**/*.pdf
+/results/**/*.html
+/results/_*
+
+# Per-model conda/uv envs (CUDA-specific, machine-local)
+/envs/
+
+# TSUBAME job logs
+*.o[0-9]*
+*.e[0-9]*
+*.out
+*.err
+*.log
+
+# Notebook render artifacts
+notebooks/*.html
+notebooks/__marimo__/
+
+# Misc
+.DS_Store

@@ -1,0 +1,62 @@
+[project]
+name = "sbdd-bench"
+version = "0.1.0"
+description = "Benchmark of structure-based drug design (SBDD) 3D ligand generators (DiffSBDD, TargetDiff, DiffGui, pocket-conditioned-ligand-gen) with a shared, model-agnostic evaluation suite."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+# The bench env is the *evaluator*: it never imports a generative model. Each
+# model generates in its own (heavier, mutually incompatible) env and writes a
+# plain `generated.sdf`; this env only reads those SDFs and scores them with
+# RDKit + AutoDock Vina + PoseBusters. That keeps `uv sync` light and lets the
+# evaluation run on a CPU login node while generation runs on a GPU node.
+dependencies = [
+    # Core scientific stack
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.13",
+    "tqdm>=4.67",
+    "pyyaml>=6.0",
+    # Chemistry / structure I/O + 2D metrics
+    "rdkit>=2024.3.1",
+    "biopython>=1.84",
+    "pyarrow>=18.0.0",
+    # Pose quality
+    "posebusters>=0.3.1",
+    # Visualization / notebook
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+    "py3dmol>=2.4",
+    "marimo>=0.23",
+]
+
+[dependency-groups]
+# Protein-ligand interaction fingerprints / key-residue recovery. Heavier
+# (pulls MDAnalysis); optional so the core evaluator stays light.
+#   uv sync --group interactions
+interactions = [
+    "prolif>=2.0",
+    "mdanalysis>=2.7",
+]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["sbddbench*"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+# Keep the bench lint-light; it wraps research code with heterogeneous styles.
+target-version = "py310"
+extend-exclude = ["third_party"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*.py" = ["B018", "B007", "E402", "F401"]

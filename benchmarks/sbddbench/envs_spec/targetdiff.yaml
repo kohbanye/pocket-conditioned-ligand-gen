@@ -1,0 +1,30 @@
+# Minimal TargetDiff generation env.
+# The upstream environment.yaml is an exact-build CUDA-11.6 export that no longer
+# solves (blas/mkl/jpeg conflicts). This rebuilds only what sampling needs on the
+# same cu118 stack that DiffSBDD solved cleanly: torch 2.0.1 + PyG. setuptools is
+# pinned <81 so pkg_resources stays importable.
+name: targetdiff
+channels:
+  - pyg
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch=2.0.1=*cuda11.8*
+  - cudatoolkit=11.8
+  - pytorch-scatter
+  - pytorch-cluster
+  - pytorch-sparse
+  - pyg
+  - rdkit=2022.03.2
+  - openbabel
+  - "numpy<1.24"
+  - scipy
+  - pyyaml
+  - tqdm
+  - tensorboard
+  - easydict
+  - python-lmdb
+  - "mkl<2024"
+  - "setuptools<81"

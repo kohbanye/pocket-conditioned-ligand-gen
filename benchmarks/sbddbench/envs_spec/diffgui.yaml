@@ -1,0 +1,32 @@
+# Minimal DiffGui generation env.
+# The upstream env.yml is a py3.7 exact-build export (schrodinger/apbs/pymol/
+# meeko/vina) that does not solve and is not needed for generation: sample.py is
+# patched in this repo so the per-sample Vina docking (meeko/vina/AutoDockTools)
+# is optional. This rebuilds only what de-novo pocket sampling needs, on the same
+# cu118 stack as DiffSBDD/TargetDiff.
+name: diffgui
+channels:
+  - pyg
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pytorch=2.0.1=*cuda11.8*
+  - cudatoolkit=11.8
+  - pytorch-scatter
+  - pytorch-cluster
+  - pytorch-sparse
+  - pyg
+  - rdkit=2022.03.2
+  - openbabel
+  - "numpy<1.24"
+  - scipy
+  - pyyaml
+  - tqdm
+  - tensorboard
+  - easydict
+  - networkx
+  - python-lmdb
+  - "mkl<2024"
+  - "setuptools<81"
