@@ -10,3 +10,9 @@
 [submodule "third_party/token-mol"]
 	path = third_party/token-mol
 	url = https://github.com/jkwang93/token-mol
+[submodule "third_party/bio2token"]
+	path = third_party/bio2token
+	url = https://github.com/flagshippioneering/bio2token.git
+[submodule "third_party/ConfSeq"]
+	path = third_party/ConfSeq
+	url = https://github.com/jiachengxiong/ConfSeq.git

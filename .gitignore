@@ -34,3 +34,8 @@ notebooks/__marimo__/
 
 # FoldToken dedicated uv venv (CUDA-specific, machine-local)
 /.venv-foldtoken/
+
+# SGE/TSUBAME job stdout/stderr (name.e<jobid> / name.o<jobid>[.<taskid>])
+*.e[0-9]*
+*.o[0-9]*
+logs_*.txt

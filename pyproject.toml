@@ -19,6 +19,7 @@ dependencies = [
     "biotite>=1.0.0",
     "biopython>=1.84",
     "rdkit>=2024.3.1",
+    "posebusters>=0.3",        # chemical-validity checks on reconstructed ligands
     "pyarrow>=18.0.0",         # read the own model's parquet shards
     "huggingface-hub>=0.25",
     # Visualization / notebook

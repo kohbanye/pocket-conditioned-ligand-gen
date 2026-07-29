@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import tarfile
 from pathlib import Path
@@ -34,11 +35,14 @@ def extract_targets(casp_dir: Path, out_dir: Path) -> None:
     print(f"[casp] extracted {len(tgzs)} target archives -> {out_dir}")
 
 
-def ligand_pdb_to_sdf(pdb_path: Path, sdf_path: Path) -> bool:
-    """Convert a ligand PDB (with CONECT) to a V2000 SDF via RDKit. Best effort.
+def _rdkit_pdb_to_sdf(pdb_path: Path, sdf_path: Path) -> bool:
+    """Fallback conversion via RDKit, used only when OpenBabel is unavailable.
 
-    Coordinates and elements are preserved exactly; bond orders are RDKit's
-    perception (reconstruction RMSD only depends on element + position).
+    WARNING: RDKit's PDB reader does not perceive bond orders -- every bond comes
+    back SINGLE, aromatic rings included. Coordinates and elements are exact, so
+    RMSD / TM-score / lDDT are unaffected, but every chemistry-aware metric
+    (PoseBusters validity, bond-length and bond-angle error) is meaningless on
+    the result, because the crystal reference itself fails them.
     """
     from rdkit import Chem
 
@@ -57,7 +61,32 @@ def ligand_pdb_to_sdf(pdb_path: Path, sdf_path: Path) -> bool:
     return True
 
 
-def build_index(extracted_dir: Path) -> list[dict]:
+def ligand_pdb_to_sdf(pdb_path: Path, sdf_path: Path) -> bool:
+    """Convert a ligand PDB (with CONECT) to a V2000 SDF, bond orders included.
+
+    OpenBabel perceives bond orders from geometry; RDKit's PDB reader does not.
+    On a 15-ligand CASP16 sample the crystal references pass PoseBusters 15/15
+    after OpenBabel and only 6/15 through RDKit alone -- the failures being
+    aromatic rings flagged as non-flat *non-aromatic* rings, precisely because
+    their bonds had all been read as single. The converter, not the tokenizer,
+    was what those checks were measuring.
+
+    OpenBabel preserves atom count, element order, and coordinates exactly
+    (verified: max coordinate difference 0.0), so changing converters cannot move
+    any RMSD-based number; it only fixes the bond block.
+    """
+    proc = subprocess.run(  # noqa: S603
+        [paths.OBABEL, "-ipdb", str(pdb_path), "-osdf", "-O", str(sdf_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0 and sdf_path.exists() and sdf_path.stat().st_size > 0:
+        return True
+    return _rdkit_pdb_to_sdf(pdb_path, sdf_path)
+
+
+def build_index(extracted_dir: Path, rebuild: bool = False) -> list[dict]:
     records: list[dict] = []
     n_fail = 0
     for prot in sorted(extracted_dir.rglob("protein_aligned.pdb")):
@@ -65,7 +94,7 @@ def build_index(extracted_dir: Path) -> list[dict]:
         target = target_dir.name
         for lig_pdb in sorted(target_dir.glob("ligand_*.pdb")):
             sdf = lig_pdb.with_suffix(".sdf")
-            if not sdf.exists() and not ligand_pdb_to_sdf(lig_pdb, sdf):
+            if (rebuild or not sdf.exists()) and not ligand_pdb_to_sdf(lig_pdb, sdf):
                 n_fail += 1
                 continue
             records.append(
@@ -86,12 +115,19 @@ def main() -> None:
     p.add_argument("--casp-dir", type=Path, default=paths.DATA_DIR / "casp16")
     p.add_argument("--out-index", type=Path, default=paths.DATA_DIR / "casp16" / "index.json")
     p.add_argument("--skip-extract", action="store_true")
+    p.add_argument(
+        "--rebuild-ligand-sdf",
+        action="store_true",
+        help="re-convert every ligand PDB even if its SDF exists (needed after "
+        "changing the converter -- SDFs written by an older version are kept "
+        "otherwise, silently preserving wrong bond orders)",
+    )
     args = p.parse_args()
 
     extracted = args.casp_dir / "extracted"
     if not args.skip_extract:
         extract_targets(args.casp_dir, extracted)
-    records = build_index(extracted)
+    records = build_index(extracted, rebuild=args.rebuild_ligand_sdf)
     args.out_index.write_text(json.dumps(records, indent=2))
     print(f"[casp] wrote index -> {args.out_index}")
 

@@ -91,6 +91,12 @@ HF_HUB_OFFLINE=1 uv run python scripts/run_reconstruction.py \
 uv run python scripts/run_reconstruction.py \
     --models esm3 foldtoken --dataset casp16 --protein-scope full
 
+# all-atom トークナイザの ablation arm（学習済みのものだけ自動で選ばれる）
+uv run python scripts/run_reconstruction.py \
+    --models own_allatom --dataset casp16 --protein-scope full
+uv run python scripts/run_reconstruction.py \
+    --models own_allatom --allatom-arms joint separate binning --dataset casp16
+
 # 比較ノートブック
 uv run marimo edit notebooks/comparison.py
 ```
@@ -103,6 +109,54 @@ ESM3 / FoldToken は**常に全長タンパク質を再構成**する（各モ�
 > ⚠️ ポケット PDB を直接 ESM3/FoldToken に入力するのは避ける。ポケットは配列的に不連続な
 > 残基の寄せ集めで全長前提のモデルには強い分布外となり、再構成が壊れる（実測 kabsch RMSD
 > ~10 Å）。「全長で再構成 → ポケット残基で評価」が正しい比較。
+
+## all-atom トークナイザの ablation arm
+
+`own_vqvae`（残基単位）の後継である **all-atom トークナイザ**は、ポケット原子とリガンド
+原子を 1 つの 33-D descriptor で表すので、単一 codebook で両方を覆える。`own_allatom`
+アダプタは 1 インスタンス = 1 **arm** で、論文が主張する 2 つの設計軸を張る
+（定義は `plbench/adapters/own_allatom.py` の `ARMS`）。
+
+| arm | codebook | ligand frame | pose bits | 位置づけ |
+|---|---|---|---|---|
+| `joint` | 1 冊 8192 | 共有ポケット | 0 | 本命 |
+| `separate` | 2 冊 8192+8192 | 共有ポケット | 0 | レート一致（codebook ベクトルは 2 倍） |
+| `separate4096` | 2 冊 4096+4096 | 共有ポケット | 0 | 容量・語彙一致（12 bits/atom） |
+| `binning` | 格子 10³×12 元素 | 共有ポケット | 0 | **学習なし**の下限参照 |
+| `localframe_{oracle,3tok,2tok,1.5tok,1tok}` | 2 冊 8192+8192 | **リガンド自身** | ∞/39/26/20/13 | 単一モダリティ型リガンドトークナイザの構成 |
+
+**分割は共有 codebook に対して「codebook ベクトル数」と「bits/atom」を同時に一致させられない**
+ため、`separate` を容量一致・レート一致の 2 本立てで挟む。
+
+`localframe_*` はリガンドを自身の canonical frame で符号化する。トークン列が
+**SE(3) 不変**になり配置情報を持たないので、受容体へ戻すには剛体変換を別送する必要があり、
+その予算を `pose_bits` が課金する（`oracle` は無限精度＝到達不可能な上限）。予算を 1 点に
+決め打ちせずスイープするのは、**共有フレーム型（`pose_bits=0`）に並ぶのに何トークン要るか**
+という break-even を報告するため。
+
+学習途中の checkpoint が黙って表に載らないよう、arm は epoch >= `--allatom-min-epoch`
+（既定 90）の checkpoint がある場合のみ登録される。
+
+### 追加した指標
+
+`plbench/metrics.py` に、モダリティ別の RMSD だけでは見えない**界面**の指標を追加した。
+protein と ligand を**再構成されたフレームのまま**まとめて評価する `complex` modality で計算する。
+
+- `lddt_pli` — CASP15 準拠。protein 原子 × ligand 原子ペアのみ、R0 = 6 Å。superposition
+  不要なので「相対配置が保たれたか」を直接測る。
+- `contact_f1` / `contact_precision` / `contact_recall` — 4 Å 接触集合の一致度。
+- `clash_lig_atom_frac` / `min_dist_ratio` — vdW 半径和の 0.75 倍を下回る衝突（PoseBusters 準拠）。
+- `iface_lig_rmsd` — 参照で受容体に接触しているリガンド原子に限った RMSD。
+- `bond_mae` / `bond_max` / `angle_mae` / `angle_max` — リガンド内部幾何の平均と**最悪値**。
+  平均は良いのに分子あたり 1 本だけ壊すケースが化学的妥当性を落とすので、最悪値が要る。
+
+### レート列
+
+`bits_per_atom` / `pose_bits` / `total_bits` を全行に付ける。codebook を大きくすれば
+再構成誤差はいくらでも下がるので、**レートを併記しない RMSD は比較として成立しない**。
+`total_bits` は「評価した原子数」ではなく**実際に発行したトークン数**で課金する
+（背骨 30 残基を評価していてもポケット 216 原子分のトークンを払っている、など、
+再構成スコープが評価スコープより広いモデルを不当に有利にしないため）。
 
 ## ベンチマーク設計メモ
 

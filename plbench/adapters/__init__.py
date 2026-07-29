@@ -8,7 +8,12 @@ _REGISTRY = {
     "esm3": ("plbench.adapters.esm3", "ESM3Adapter"),
     "foldtoken": ("plbench.adapters.foldtoken", "FoldTokenAdapter"),
     "own_vqvae": ("plbench.adapters.own_vqvae", "OwnVQVAEAdapter"),
+    # All-atom tokenizer arms. Instantiate with arm="joint" / "separate" / ...;
+    # see plbench.adapters.own_allatom.ARMS.
+    "own_allatom": ("plbench.adapters.own_allatom", "OwnAllAtomAdapter"),
     "token_mol": ("plbench.adapters.token_mol", "TokenMolAdapter"),
+    "confseq": ("plbench.adapters.confseq", "ConfSeqAdapter"),
+    "bio2token": ("plbench.adapters.bio2token", "Bio2TokenAdapter"),
 }
 
 
