@@ -12,7 +12,6 @@
 # batch job gets its own GPU, which removes the contention entirely.
 #
 # Models:
-#   own_vqvae    residue-level tokenizer (the older design, kept for continuity)
 #   own_allatom  every all-atom arm whose weights are trained past epoch 90 --
 #                arms still training are skipped automatically, so re-submitting
 #                this same script later picks up the new ones with no edits
@@ -69,7 +68,7 @@ echo "[job] host=$(hostname) start=$(date -Is) out=$OUT"
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
 
 $PY scripts/run_reconstruction.py \
-    --models own_vqvae own_allatom esm3 foldtoken token_mol \
+    --models own_allatom esm3 foldtoken token_mol \
     --dataset casp16 \
     --protein-scope pocket \
     --pb-valid \

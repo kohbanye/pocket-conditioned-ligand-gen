@@ -153,11 +153,7 @@ class SeparateVQVAE:
         return shifted.masked_fill(~mask, -1)
 
     @torch.no_grad()
-    def decode_to_outputs(
-        self,
-        indices: Tensor,
-        source_idx: int | None = None,  # noqa: ARG002
-    ) -> dict[str, Tensor]:
+    def decode_to_outputs(self, indices: Tensor) -> dict[str, Tensor]:
         """Decode COMBINED-space ligand codes to the ligand VQ's recon outputs.
 
         ``indices`` are ``(N,)`` combined-space ids from the LM's ligand block,
@@ -165,11 +161,10 @@ class SeparateVQVAE:
         mapped back to the ligand VQ's own 0-based range
         (``id - protein_codebook_size``) and decoded by the ligand-only VQ.
 
-        ``source_idx`` is accepted only for signature compatibility with
-        :meth:`TransformerVQVAE.decode_to_outputs`; it is unused because the
-        ligand VQ is a single-codebook model. Returns the same per-head output
-        dict as :meth:`TransformerVQVAE.decode_to_outputs` (the caller converts
-        categorical logits via argmax and spherical coords to Cartesian).
+        Returns the same per-head output dict as
+        :meth:`TransformerVQVAE.decode_to_outputs`, so a caller can hold either
+        tokenizer behind one name (the caller converts categorical logits via
+        argmax and spherical coords to Cartesian).
         """
         ligand_indices = indices - self.protein_codebook_size
         return self.ligand.decode_to_outputs(ligand_indices)

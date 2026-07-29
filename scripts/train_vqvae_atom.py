@@ -65,15 +65,6 @@ def main() -> None:
         default=None,
         help="Protein codebook size (also the sole codebook when not --split).",
     )
-    parser.add_argument(
-        "--split-codebook",
-        action="store_true",
-        help="Split the discrete bottleneck by source: protein atoms -> "
-        "--codebook-size codes, ligand atoms -> --ligand-codebook-size codes "
-        "(one shared descriptor/encoder/decoder). Fixes ligand connectivity "
-        "being diluted by the ~10x more numerous protein atoms.",
-    )
-    parser.add_argument("--ligand-codebook-size", type=int, default=None)
     parser.add_argument("--mol-batch-size", type=int, default=None)
     parser.add_argument(
         "--max-residues",
@@ -110,10 +101,6 @@ def main() -> None:
     data_config = CrossDockedConfig()
     if args.codebook_size is not None:
         config.atom.codebook_size = args.codebook_size
-    if args.split_codebook:
-        config.atom.split_codebook = True
-    if args.ligand_codebook_size is not None:
-        config.atom.ligand_codebook_size = args.ligand_codebook_size
     if args.mol_batch_size is not None:
         config.mol_batch_size = args.mol_batch_size
     if args.num_workers is not None:

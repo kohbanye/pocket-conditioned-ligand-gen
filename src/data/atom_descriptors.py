@@ -1,18 +1,16 @@
-"""DataModule for the unified all-atom VQ-VAE (one codebook over all atoms).
+"""DataModule for the ProLIT all-atom VQ-VAE (one codebook over all atoms).
 
-Differences from :class:`~src.data.descriptors.ComplexDescriptorDataModule`:
+Builds the descriptor rows themselves:
 
-- the protein pocket is expanded to **every heavy atom** of the pocket residues
-  (not backbone N/CA/C only); protein and ligand atoms share the 33-D
-  :data:`ATOM_LAYOUT` descriptor,
+- the protein pocket is expanded to **every heavy atom** of the pocket residues;
+  protein and ligand atoms share the 33-D :data:`ATOM_LAYOUT` descriptor,
 - an optional ``label == 1`` (good-pose) filter is applied at manifest load,
 - a **single** training stream: each complex contributes its protein-atom
   sequence AND its ligand-atom sequence as separate items, normalized by one
   pooled mean/std vector, so one VQ-VAE / one codebook tokenizes both.
 
-The shard cache lives in ``data/descriptor_cache_allatom`` (the legacy
-residue-level cache is left untouched). Sharding / Welford / manifest / fold
-helpers are reused from :mod:`src.data.descriptors`.
+The shard cache lives in ``data/descriptor_cache_allatom``. Sharding / Welford /
+manifest / fold helpers come from :mod:`src.data.descriptors`.
 """
 
 from __future__ import annotations

@@ -10,13 +10,9 @@ are in 1:1 correspondence with the crystal pose, giving a clean supervised
 of the VQ round-trip) widen the source support toward the more-corrupted LM
 regime.
 
-``--decoder`` selects which VQ-VAE defines the corruption, so the refiner matches
-whatever decoder is actually deployed:
-- ``legacy``: the 2-codebook ligand VQ-VAE (``VQVAEModule.ligand_vqvae``,
-  ``LigandDescriptor``, ``descriptor_cache_v4`` norm) -- the model sbdd-bench
-  currently benchmarks.
-- ``atom``: the unified all-atom VQ-VAE (``AtomVQVAEModule``,
-  ``LigandAtomDescriptor``) -- for the future all-atom generation path.
+The corruption is defined by the deployed all-atom VQ-VAE (``AtomVQVAEModule`` +
+``LigandAtomDescriptor``), so the refiner learns to repair exactly the error the
+generation path emits.
 
 The pocket half (coordinates + per-atom chemistry) is decoder-independent and
 always comes from the all-atom receptor parse (``ProteinAtomDescriptor``).
@@ -28,7 +24,6 @@ Run (single GPU; use the venv python directly -- ``uv run`` rebuilds the editabl
 package, which is very slow here)::
 
     PYTHONPATH=$PWD .venv/bin/python scripts/tokenize_pose_refine.py \
-        --decoder legacy \
         --ckpt "pocket-ligand-vqvae/3dvcbp0h/checkpoints/vqvae-epoch=99-val/\
 ligand_coord=0.1501.ckpt" \
         --cache-dir data/descriptor_cache_v4 \
@@ -66,12 +61,10 @@ from src.tokenizers.atom import (
 )
 from src.tokenizers.descriptor_schema import (
     ATOM_LAYOUT,
-    LIGAND_LAYOUT,
-    SOURCE_LIGAND_IDX,
     fields_by_name,
 )
 from src.tokenizers.geometry import spherical_to_cartesian_np
-from src.tokenizers.ligand import LigandDescriptor, parse_ligand_pdb_text
+from src.tokenizers.ligand import parse_ligand_pdb_text
 from src.tokenizers.protein import (
     _compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
@@ -98,7 +91,6 @@ class _LigandCodec:
     cmean: np.ndarray
     cstd: np.ndarray
     device: torch.device
-    src_idx: int | None = None
     codebook_size: int = 0
 
     def descriptor(self, atoms: list, bonds: list, frame: tuple) -> np.ndarray:
@@ -129,7 +121,7 @@ class _LigandCodec:
                 codes[torch.as_tensor(pos, device=codes.device)] = torch.as_tensor(
                     repl, dtype=codes.dtype, device=codes.device
                 )
-        out = self.vq.decode_to_outputs(codes, self.src_idx)
+        out = self.vq.decode_to_outputs(codes)
         coord = out["coord"].cpu().numpy() * self.cstd + self.cmean
         x0 = spherical_to_cartesian_np(coord).astype(np.float32)
         chem = {h: out[h].argmax(dim=-1).cpu().numpy() for h in LIG_CHEM_HEADS}
@@ -137,6 +129,8 @@ class _LigandCodec:
 
 
 class _AtomCodec(_LigandCodec):
+    """The deployed all-atom decoder."""
+
     def __init__(
         self, ckpt: Path, norm_stats: Path, codebook_size: int, device: torch.device
     ) -> None:
@@ -158,33 +152,6 @@ class _AtomCodec(_LigandCodec):
         f = fields_by_name(ATOM_LAYOUT)["coord"]
         self.cmean, self.cstd = self.mean[f.start : f.end], self.std[f.start : f.end]
         self.desc_fn = LigandAtomDescriptor()
-        split = getattr(self.vq, "split_codebook", False)
-        self.src_idx = SOURCE_LIGAND_IDX if split else None
-        self.codebook_size = (
-            self.vq.codebook_ligand if split else self.vq.codebook
-        ).num_codes
-
-
-class _LegacyCodec(_LigandCodec):
-    def __init__(self, ckpt: Path, cache_dir: Path, device: torch.device) -> None:
-        from src.model.vqvae_module import VQVAEModule  # noqa: PLC0415
-
-        module = (
-            VQVAEModule.load_from_checkpoint(str(ckpt), map_location=device)
-            .eval()
-            .to(device)
-        )
-        norm = torch.load(cache_dir / "normalization_stats.pt", weights_only=False)
-        self.vq = module.ligand_vqvae
-        self.device = device
-        self.mean, self.std = (
-            norm["ligand_mean"].cpu().numpy(),
-            norm["ligand_std"].cpu().numpy(),
-        )
-        f = fields_by_name(LIGAND_LAYOUT)["coord"]
-        self.cmean, self.cstd = self.mean[f.start : f.end], self.std[f.start : f.end]
-        self.desc_fn = LigandDescriptor()
-        self.src_idx = None  # single codebook
         self.codebook_size = self.vq.codebook.num_codes
 
 
@@ -266,28 +233,14 @@ class _PoseRefineWriter:
 
 def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser()
-    parser.add_argument("--decoder", choices=["legacy", "atom"], default="legacy")
-    parser.add_argument(
-        "--ckpt",
-        type=Path,
-        required=True,
-        help="ligand VQ-VAE (legacy) or atom VQ-VAE ckpt.",
-    )
-    parser.add_argument(
-        "--cache-dir",
-        type=Path,
-        default=Path("data/descriptor_cache_v4"),
-        help="legacy norm-stats dir.",
-    )
+    parser.add_argument("--ckpt", type=Path, required=True, help="atom VQ-VAE ckpt.")
     parser.add_argument(
         "--norm-stats",
         type=Path,
-        default=None,
-        help="atom decoder: normalization_stats.pt path.",
+        required=True,
+        help="normalization_stats.pt that accompanies --ckpt.",
     )
-    parser.add_argument(
-        "--codebook-size", type=int, default=8192, help="atom decoder codebook size."
-    )
+    parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument("--biolip-dir", type=Path, default=Path("data/biolip"))
     parser.add_argument(
         "--cd-manifest", type=Path, default=Path("data/hub_cache/repo/manifest.parquet")
@@ -331,14 +284,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     from src.config import PocketExtractionConfig  # noqa: PLC0415
 
-    if args.decoder == "atom":
-        if args.norm_stats is None:
-            parser.error("--norm-stats is required for --decoder atom")
-        codec: _LigandCodec = _AtomCodec(
-            args.ckpt, args.norm_stats, args.codebook_size, device
-        )
-    else:
-        codec = _LegacyCodec(args.ckpt, args.cache_dir, device)
+    codec = _AtomCodec(args.ckpt, args.norm_stats, args.codebook_size, device)
 
     prot_desc_fn = ProteinAtomDescriptor()
     pocket_cfg = PocketExtractionConfig(max_residues=args.max_residues)
@@ -362,8 +308,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     rng.shuffle(uniq)
     uniq = uniq[: args.n_complexes]
     logger.info(
-        "refiner source (%s decoder): %d native complexes (x%d records)",
-        args.decoder,
+        "refiner source (all-atom decoder): %d native complexes (x%d records)",
         len(uniq),
         args.n_corrupt,
     )
@@ -479,7 +424,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     meta = {
         "source": "biolip2_vq_bridge",
-        "decoder": args.decoder,
+        "decoder": "atom",
         "n_corrupt": args.n_corrupt,
         "sigma_max": args.sigma_max,
         "feature_fields": [name for name, _ in FEATURE_FIELDS],
@@ -494,7 +439,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         logger.info("%s: %d complexes, %d records", split, w.n_complexes, w.n_records)
         w.close()
     (args.out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-    logger.info("wrote pose-refine set (%s) to %s", args.decoder, args.out_dir)
+    logger.info("wrote pose-refine set to %s", args.out_dir)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@
 #
 # Then run the benchmark with FoldToken (the bench auto-detects .venv-foldtoken):
 #   HF_HUB_OFFLINE=1 uv run python scripts/run_reconstruction.py \
-#       --models own_vqvae esm3 foldtoken --dataset casp16 --limit 50
+#       --models own_allatom esm3 foldtoken --dataset casp16 --limit 50
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"

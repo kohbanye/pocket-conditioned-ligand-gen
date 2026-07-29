@@ -11,24 +11,21 @@ receptor PDB and a reference ligand SDF defining the pocket — this:
 3. Decodes each sample with the ligand VQ-VAE, places atoms in the real pocket
    frame (global coords matching the receptor), and infers bonds.
 
-Three tokenizer paths are supported (all share the sampling / output code, so
-the emitted ``generated.sdf`` is identical in layout for every arm — this is
-what the sbdd-bench ``own`` adapter consumes):
+Two tokenizer arms are supported (both share the sampling / output code, so the
+emitted ``generated.sdf`` is identical in layout for either — this is what the
+sbdd-bench ``own`` adapter consumes):
 
-* legacy 2-codebook (default): protein VQ + ligand VQ inside one
-  :class:`VQVAEModule` (``--vqvae-ckpt``).
-* ``--all-atom``: the unified single-codebook all-atom VQ (``--vqvae-ckpt`` is
-  an :class:`AtomVQVAEModule`); ``--split-codebook`` for the split protein/ligand
-  book variant.
+* the joint tokenizer (default): one all-atom VQ over a shared codebook
+  (``--vqvae-ckpt`` is an :class:`AtomVQVAEModule`).
 * ``--separate-protein-ckpt`` (+ the other ``--separate-*`` flags): the ablation
-  separate-tokenizers arm — pocket encoded by a protein-only VQ, ligand decoded
-  by a ligand-only VQ over one combined ``2*--codebook-size`` space
-  (:class:`SeparateVQVAE`); the LM is the matching separate LM.
+  arm — pocket encoded by a protein-only VQ, ligand decoded by a ligand-only VQ
+  over one combined ``2*--codebook-size`` space (:class:`SeparateVQVAE`); the LM
+  is the matching separate LM.
 
-The three encode/decode branches mirror ``scripts/generate_ligands_3d.py``
-exactly (that script is the validated reference for the all-atom + separate
-paths); only the driver here differs (single external target -> ``generated.sdf``
-instead of an internal test-pool sweep -> per-pocket PDBs).
+Both encode/decode branches mirror ``scripts/generate_ligands_3d.py`` exactly
+(that script is the validated reference); only the driver here differs (single
+external target -> ``generated.sdf`` instead of an internal test-pool sweep ->
+per-pocket PDBs).
 
 Outputs (under ``--out-dir``):
     generated.sdf      every decoded ligand as a heavy-atom V2000 mol block
@@ -43,15 +40,13 @@ known inhibitor can be docked as a positive control alongside the generations.
 Run on a GPU node with the venv python directly (``uv run`` rebuilds the
 editable package, which is very slow here)::
 
-    # legacy 2-codebook
+    # joint tokenizer (single 8192 codebook)
     PYTHONPATH=$PWD .venv/bin/python scripts/generate_ligands_for_target.py \
         --receptor data/targets/2ity/2ity_receptor.pdb \
         --ref-ligand data/targets/2ity/2ity_ref_ligand.sdf \
-        --lm-ckpt pocket-ligand-lm/g79let5b/checkpoints/lm-e09-vl1.4088.ckpt \
+        --vqvae-ckpt <atom-vqvae.ckpt> --codebook-size 8192 \
+        --lm-ckpt pocket-ligand-lm/p6lpk7br/checkpoints/lm-e02-vl1.0029.ckpt \
         --num-samples 100 --batch-size 100 --out-dir outputs/egfr_2ity
-
-    # all-atom joint (single 8192 codebook)
-    ... --all-atom --vqvae-ckpt <atom-vqvae.ckpt> --codebook-size 8192 ...
 
     # separate 4096+4096 tokenizers (combined 8192 space)
     ... --separate-protein-ckpt <p.ckpt> --separate-protein-norm <p.pt> \
@@ -76,35 +71,22 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.generate_ligands_3d import (  # noqa: E402
-    _decode_ligand,
     _decode_ligand_atom,
-    _pocket_codes,
     _pocket_codes_atom,
     load_atom_lm,
     load_atom_norm_stats,
     load_atom_vqvae,
 )
-from scripts.write_reconstruction_pdbs import infer_bonds  # noqa: E402
+from src.chem.pdb_io import infer_bonds  # noqa: E402
 from src.config import (  # noqa: E402
-    CrossDockedConfig,
-    LMTrainingConfig,
     PocketExtractionConfig,
-    VQVAETrainingConfig,
 )
-from src.data.descriptors import ComplexDescriptorDataModule  # noqa: E402
-from src.model.lm_module import LigandLMModule  # noqa: E402
-from src.model.vqvae_module import VQVAEModule  # noqa: E402
 from src.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
-from src.tokenizers.descriptor_schema import SOURCE_LIGAND_IDX  # noqa: E402
 from src.tokenizers.ligand import parse_sdf  # noqa: E402
 from src.tokenizers.lm_vocab import (  # noqa: E402
     L_CLOSE_ID,
     PAD_ID,
     AtomLMVocab,
-    LMVocab,
-)
-from src.tokenizers.protein import (  # noqa: E402
-    BackboneSphericalDescriptor,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -212,8 +194,8 @@ def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
     decode_codes)`` where ``encode_pocket(rec_path, mol)`` yields
     ``(protein_codes, frame, ref_coords, ref_elems)`` and
     ``decode_codes(codes, frame, refiner, pocket_ctx)`` yields
-    ``(coords, elements)``. The three branches mirror
-    ``generate_ligands_3d.py``'s ``main`` exactly.
+    ``(coords, elements)``. Both branches mirror ``generate_ligands_3d.py``'s
+    ``main`` exactly.
     """
     vqvae_ckpt = (
         args.vqvae_ckpt
@@ -267,42 +249,16 @@ def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
                 ligand_norm,
                 frame,
                 device,
-                source_idx=None,
                 refiner=refiner,
                 pocket_ctx=pocket_ctx,
             )
 
-    elif args.all_atom or args.split_codebook:
-        split = args.split_codebook
-        atom_vqvae = load_atom_vqvae(
-            vqvae_ckpt,
-            args.codebook_size,
-            device,
-            split=split,
-            ligand_codebook_size=args.ligand_codebook_size,
-        )
-        model = load_atom_lm(
-            args.lm_ckpt,
-            args.codebook_size,
-            device,
-            split=split,
-            ligand_codebook_size=args.ligand_codebook_size,
-        )
+    else:
+        atom_vqvae = load_atom_vqvae(vqvae_ckpt, args.codebook_size, device)
+        model = load_atom_lm(args.lm_ckpt, args.codebook_size, device)
         norm_stats = load_atom_norm_stats(args.norm_stats, device)
-        if split:
-            vocab = LMVocab(
-                protein_codebook_size=args.codebook_size,
-                ligand_codebook_size=args.ligand_codebook_size,
-            )
-            code_lo, code_hi = (
-                vocab.ligand_offset,
-                vocab.ligand_offset + vocab.ligand_codebook_size,
-            )
-            dec_source = SOURCE_LIGAND_IDX
-        else:
-            vocab = AtomLMVocab(codebook_size=args.codebook_size)
-            code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
-            dec_source = None
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
         code_base = code_lo
         prot_atom_desc = ProteinAtomDescriptor()
 
@@ -322,57 +278,6 @@ def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
             return _decode_ligand_atom(
                 codes,
                 atom_vqvae,
-                norm_stats,
-                frame,
-                device,
-                source_idx=dec_source,
-                refiner=refiner,
-                pocket_ctx=pocket_ctx,
-            )
-
-    else:
-        vqvae = (
-            VQVAEModule.load_from_checkpoint(str(vqvae_ckpt), map_location=device)
-            .eval()
-            .to(device)
-        )
-        model = (
-            LigandLMModule.load_from_checkpoint(
-                args.lm_ckpt, config=LMTrainingConfig(), map_location=device
-            )
-            .eval()
-            .to(device)
-            .model
-        )
-        dm = ComplexDescriptorDataModule(
-            VQVAETrainingConfig(), CrossDockedConfig(data_dir=PROJECT_ROOT / "data")
-        )
-        dm.cache_dir = args.cache_dir
-        dm.setup()
-        norm_stats = {k: v.to(device) for k, v in dm.norm_stats.items()}
-        vocab = LMVocab()
-        code_lo, code_hi = (
-            vocab.ligand_offset,
-            vocab.ligand_offset + vocab.ligand_codebook_size,
-        )
-        code_base = code_lo
-        protein_desc_calc = BackboneSphericalDescriptor()
-
-        def encode_pocket(rec_path, mol):  # noqa: ANN001, ANN202
-            return _pocket_codes(
-                rec_path,
-                mol,
-                pocket_config,
-                protein_desc_calc,
-                vqvae.protein_vqvae,
-                norm_stats,
-                device,
-            )
-
-        def decode_codes(codes, frame, refiner=None, pocket_ctx=None):  # noqa: ANN001, ANN202
-            return _decode_ligand(
-                codes,
-                vqvae.ligand_vqvae,
                 norm_stats,
                 frame,
                 device,
@@ -439,20 +344,7 @@ def main() -> None:  # noqa: C901, PLR0915
         "(removes clashes/strain from the raw pose). Default off = unchanged.",
     )
     # --- tokenizer-path flags (mirror scripts/generate_ligands_3d.py) ---
-    parser.add_argument(
-        "--all-atom",
-        action="store_true",
-        help="Use the unified single-codebook all-atom tokenizer (AtomLMVocab + "
-        "AtomVQVAEModule) instead of the legacy protein+ligand 2-codebook path.",
-    )
-    parser.add_argument(
-        "--split-codebook",
-        action="store_true",
-        help="All-atom VQ with SPLIT codebooks (protein + ligand books, one "
-        "shared descriptor/encoder/decoder) -> 2-range LMVocab. Implies all-atom.",
-    )
     parser.add_argument("--codebook-size", type=int, default=8192)
-    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
     parser.add_argument(
         "--separate-protein-ckpt",
         type=Path,

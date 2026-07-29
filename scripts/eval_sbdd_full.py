@@ -52,9 +52,7 @@ from scripts.dock_vina import (  # noqa: E402
 )
 from scripts.eval_posebusters import _reconstruct  # noqa: E402
 from scripts.generate_ligands_3d import (  # noqa: E402
-    _decode_ligand,
     _decode_ligand_atom,
-    _pocket_codes,
     _pocket_codes_atom,
     _read_mol_from_tar,
     load_atom_lm,
@@ -62,27 +60,14 @@ from scripts.generate_ligands_3d import (  # noqa: E402
     load_atom_vqvae,
 )
 from src.config import (  # noqa: E402
-    CrossDockedConfig,
-    LMTrainingConfig,
     PocketExtractionConfig,
-    VQVAETrainingConfig,
 )
-from src.data.descriptors import ComplexDescriptorDataModule  # noqa: E402
-from src.model.lm_module import LigandLMModule  # noqa: E402
-from src.model.vqvae_module import VQVAEModule  # noqa: E402
 from src.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
-from src.tokenizers.descriptor_schema import SOURCE_LIGAND_IDX  # noqa: E402
 from src.tokenizers.lm_vocab import (  # noqa: E402
-    BOS_ID,
     L_CLOSE_ID,
-    L_OPEN_ID,
-    P_CLOSE_ID,
-    P_OPEN_ID,
     PAD_ID,
     AtomLMVocab,
-    LMVocab,
 )
-from src.tokenizers.protein import BackboneSphericalDescriptor  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -204,19 +189,13 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=160)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--all-atom",
-        action="store_true",
-        help="Use the unified all-atom tokenizer (AtomLMVocab + AtomVQVAEModule); "
-        "every --lm-ckpts entry is then an all-atom LM sharing one atom VQ-VAE.",
+        "--codebook-size",
+        type=int,
+        default=8192,
+        help="Size of the code range the LM was trained on. The "
+        "separate-tokenizer ablation passes the COMBINED size of its two "
+        "sub-codebooks.",
     )
-    parser.add_argument(
-        "--split-codebook",
-        action="store_true",
-        help="All-atom VQ with SPLIT codebooks (protein + ligand) -> 2-range "
-        "LMVocab. Implies all-atom.",
-    )
-    parser.add_argument("--codebook-size", type=int, default=8192)
-    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
     parser.add_argument(
         "--norm-stats",
         type=Path,
@@ -240,57 +219,27 @@ def main() -> None:
     receptor_cache: dict[str, tuple] = {}
 
     vqvae_ckpt = args.vqvae_ckpt if Path(args.vqvae_ckpt).is_absolute() else PROJECT_ROOT / args.vqvae_ckpt
-    if args.all_atom or args.split_codebook:
-        split = args.split_codebook
-        atom_vqvae = load_atom_vqvae(vqvae_ckpt, args.codebook_size, device, split=split, ligand_codebook_size=args.ligand_codebook_size)
-        norm = load_atom_norm_stats(args.norm_stats, device)
-        prot_atom_desc = ProteinAtomDescriptor()
-        if split:
-            vocab = LMVocab(protein_codebook_size=args.codebook_size, ligand_codebook_size=args.ligand_codebook_size)
-            code_lo, code_hi = vocab.ligand_offset, vocab.ligand_offset + vocab.ligand_codebook_size
-            dec_source = SOURCE_LIGAND_IDX
-        else:
-            vocab = AtomLMVocab(codebook_size=args.codebook_size)
-            code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
-            dec_source = None
-        models = {}
-        for spec in args.lm_ckpts:
-            name, path = spec.split(":", 1)
-            models[name] = load_atom_lm(path, args.codebook_size, device, split=split, ligand_codebook_size=args.ligand_codebook_size)
+    atom_vqvae = load_atom_vqvae(vqvae_ckpt, args.codebook_size, device)
+    norm = load_atom_norm_stats(args.norm_stats, device)
+    prot_atom_desc = ProteinAtomDescriptor()
+    vocab = AtomLMVocab(codebook_size=args.codebook_size)
+    code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
+    models = {}
+    for spec in args.lm_ckpts:
+        name, path = spec.split(":", 1)
+        models[name] = load_atom_lm(path, args.codebook_size, device)
 
-        def encode_pocket(rec_pdb: Path, mol: dict):  # noqa: ANN202
-            return _pocket_codes_atom(
-                rec_pdb, mol, pc, prot_atom_desc, atom_vqvae, norm, device,
-                receptor_cache=receptor_cache,
-            )
+    def encode_pocket(rec_pdb: Path, mol: dict):  # noqa: ANN202
+        return _pocket_codes_atom(
+            rec_pdb, mol, pc, prot_atom_desc, atom_vqvae, norm, device,
+            receptor_cache=receptor_cache,
+        )
 
-        def decode_codes(codes, frame):  # noqa: ANN001, ANN202
-            return _decode_ligand_atom(codes, atom_vqvae, norm, frame, device, source_idx=dec_source)
+    def decode_codes(codes, frame):  # noqa: ANN001, ANN202
+        return _decode_ligand_atom(codes, atom_vqvae, norm, frame, device)
 
-        def build_prompt(prot_codes: list[int]) -> list[int]:
-            return vocab.build_sequence(prot_codes, [])[:-2]  # drop </l><eos>
-    else:
-        vqvae = VQVAEModule.load_from_checkpoint(str(vqvae_ckpt), map_location=device).eval().to(device)
-        vocab = LMVocab()
-        code_lo, code_hi = vocab.ligand_offset, vocab.ligand_offset + vocab.ligand_codebook_size
-        pdc = BackboneSphericalDescriptor()
-        models = {}
-        for spec in args.lm_ckpts:
-            name, path = spec.split(":", 1)
-            models[name] = LigandLMModule.load_from_checkpoint(path, config=LMTrainingConfig(), map_location=device).eval().to(device).model
-        dm = ComplexDescriptorDataModule(VQVAETrainingConfig(), CrossDockedConfig(data_dir=PROJECT_ROOT / "data"))
-        dm.cache_dir = args.cache_dir
-        dm.setup()
-        norm = {k: v.to(device) for k, v in dm.norm_stats.items()}
-
-        def encode_pocket(rec_pdb: Path, mol: dict):  # noqa: ANN202
-            return _pocket_codes(rec_pdb, mol, pc, pdc, vqvae.protein_vqvae, norm, device)
-
-        def decode_codes(codes, frame):  # noqa: ANN001, ANN202
-            return _decode_ligand(codes, vqvae.ligand_vqvae, norm, frame, device)
-
-        def build_prompt(prot_codes: list[int]) -> list[int]:
-            return [BOS_ID, P_OPEN_ID, *(vocab.protein_offset + c for c in prot_codes), P_CLOSE_ID, L_OPEN_ID]
+    def build_prompt(prot_codes: list[int]) -> list[int]:
+        return vocab.build_sequence(prot_codes, [])[:-2]  # drop </l><eos>
 
     hub = PROJECT_ROOT / "data" / "hub_cache"
     mdf = pq.read_table(hub / "repo" / "manifest.parquet").to_pandas()

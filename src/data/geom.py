@@ -4,9 +4,8 @@ Reads the GEOM ``rdkit_folder`` distribution (Axelrod & Gomez-Bombarelli,
 *Scientific Data* 2022; https://github.com/learningmatter-mit/geom) and yields
 per-conformer atom/bond dicts in the exact shape produced by
 :func:`src.tokenizers.ligand.parse_sdf` (``{"atoms": [(elem, x, y, z), ...],
-"bonds": [(a1, a2, bond_type), ...]}``), so the existing
-:class:`~src.tokenizers.ligand.LigandDescriptor` pipeline can consume them
-unchanged.
+"bonds": [(a1, a2, bond_type), ...]}``), so the descriptor pipeline can consume
+them unchanged.
 
 Directory layout after extracting ``rdkit_folder.tar.gz``::
 
@@ -138,8 +137,8 @@ def _rd_mol_to_atoms_bonds(rd_mol: object) -> dict | None:
     """Convert one RDKit conformer Mol to a parse_sdf-style atoms/bonds dict.
 
     Hydrogens are kept here (GEOM mols carry explicit H); the downstream
-    :class:`LigandDescriptor` drops them and remaps bonds, exactly as it does
-    for CrossDocked SDF input.
+    descriptor drops them and remaps bonds, exactly as it does for CrossDocked
+    SDF input.
     """
     try:
         conf = rd_mol.GetConformer()  # type: ignore[attr-defined]

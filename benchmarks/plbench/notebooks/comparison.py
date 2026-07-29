@@ -44,9 +44,11 @@ def _(mo, paths):
 def _(file_dropdown, mo, pd):
     mo.stop(not file_dropdown.value, mo.md("**No results yet.** Run `scripts/run_reconstruction.py` first."))
     # Display names used in every legend / axis / table.
-    DISPLAY = {"own_vqvae": "Ours", "esm3": "ESM3", "foldtoken": "FoldToken4",
-               "token_mol": "Token-Mol"}
-    ORDER = ["Ours", "ESM3", "FoldToken4", "Token-Mol"]
+    DISPLAY = {"own_allatom.joint": "ProLIT", "own_allatom.separate": "ProLIT (separate)",
+               "esm3": "ESM3", "foldtoken": "FoldToken4",
+               "token_mol": "Token-Mol", "bio2token": "Bio2Token", "confseq": "ConfSeq"}
+    ORDER = ["ProLIT", "ProLIT (separate)", "ESM3", "FoldToken4", "Token-Mol",
+             "Bio2Token", "ConfSeq"]
     df = pd.read_parquet(file_dropdown.value)
     df["model_disp"] = df["model"].map(DISPLAY).fillna(df["model"])
     mo.md(f"Loaded **{len(df)}** rows, models: {sorted(df['model'].unique())}")

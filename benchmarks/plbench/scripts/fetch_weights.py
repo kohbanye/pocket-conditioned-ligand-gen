@@ -3,8 +3,9 @@
 - FoldToken4: download model_zoom.zip from Zenodo into weights/foldtoken/.
 - ESM3: trigger the HuggingFace download of the structure tokenizer weights
   (requires `huggingface-cli login` and license acceptance for the gated repo).
-- Own VQ-VAE: symlink the trained checkpoint + descriptor cache from the
-  separate working copy into weights/ and data/ (source stays where it is).
+
+ProLIT needs nothing here: its adapter reads each arm's checkpoint straight out
+of the run directories under ``paths.OWN_VQ_RUNS_DIR``.
 """
 
 from __future__ import annotations
@@ -21,14 +22,6 @@ sys.path.insert(0, str(REPO_ROOT))
 from plbench import paths  # noqa: E402
 
 FOLDTOKEN_ZENODO = "https://zenodo.org/records/13901445/files/model_zoom.zip?download=1"
-# Default source checkpoint in the separate working copy (override with --own-src).
-# 3dvcbp0h matches the current model code (descriptor_dim 65/30) and was trained
-# on descriptor_cache_v4, whose normalization stats must be linked alongside.
-OWN_CKPT_SRC = (
-    paths.OWN_MODEL_WORKDIR
-    / "pocket-ligand-vqvae/3dvcbp0h/checkpoints/vqvae-epoch=99-val/ligand_coord=0.1501.ckpt"
-)
-OWN_CACHE_SRC = paths.OWN_MODEL_WORKDIR / "data/descriptor_cache_v4"
 
 
 def fetch_foldtoken() -> None:
@@ -79,34 +72,12 @@ def fetch_esm3() -> None:
         print(f"[esm3] FAILED: {exc}")
 
 
-def link_own(own_src: Path, cache_src: Path) -> None:
-    ckpt_dst = paths.OWN_VQVAE_CKPT
-    ckpt_dst.parent.mkdir(parents=True, exist_ok=True)
-    if not own_src.exists():
-        print(f"[own] source checkpoint not found: {own_src}")
-    else:
-        _symlink(own_src, ckpt_dst)
-        print(f"[own] {ckpt_dst} -> {own_src}")
-    if cache_src.exists():
-        _symlink(cache_src, paths.OWN_DESCRIPTOR_CACHE)
-        print(f"[own] {paths.OWN_DESCRIPTOR_CACHE} -> {cache_src}")
-    else:
-        print(f"[own] descriptor cache not found: {cache_src}")
-
-
-def _symlink(src: Path, dst: Path) -> None:
-    if dst.is_symlink() or dst.exists():
-        dst.unlink()
-    dst.symlink_to(src.resolve())
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--foldtoken", action="store_true")
     p.add_argument("--esm3", action="store_true")
-    p.add_argument("--own", action="store_true")
-    p.add_argument("--own-src", type=Path, default=OWN_CKPT_SRC)
-    p.add_argument("--own-cache-src", type=Path, default=OWN_CACHE_SRC)
     p.add_argument("--all", action="store_true")
     args = p.parse_args()
 
@@ -115,9 +86,7 @@ def main() -> None:
         fetch_foldtoken()
     if args.all or args.esm3:
         fetch_esm3()
-    if args.all or args.own:
-        link_own(args.own_src, args.own_cache_src)
-    if not any([args.all, args.foldtoken, args.esm3, args.own]):
+    if not any([args.all, args.foldtoken, args.esm3]):
         p.print_help()
 
 

@@ -35,7 +35,7 @@ from src.data.token_io import SplitWriter
 from src.model.vqvae_module import AtomVQVAEModule
 from src.tokenizers.atom import rotate_atom_descriptor
 from src.tokenizers.geometry import random_rotation_matrix
-from src.tokenizers.lm_vocab import AtomLMVocab, LMVocab
+from src.tokenizers.lm_vocab import AtomLMVocab
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -218,14 +218,6 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
     parser.add_argument("--source-types", type=str, nargs="+", default=["cdonly"])
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument(
-        "--split-codebook",
-        action="store_true",
-        help="Split-codebook VQ (protein + ligand books). Emits a 2-range "
-        "LMVocab (protein range + ligand range) instead of the single-range "
-        "AtomLMVocab. Must match the VQ checkpoint.",
-    )
-    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
-    parser.add_argument(
         "--norm-stats",
         type=Path,
         default=None,
@@ -269,9 +261,6 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
 
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
-    if args.split_codebook:
-        config.atom.split_codebook = True
-        config.atom.ligand_codebook_size = args.ligand_codebook_size
 
     data_config = CrossDockedConfig()
     if args.max_pairs is not None:
@@ -322,13 +311,7 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
         module.vqvae.set_normalization(
             dm.norm_stats["atom_mean"], dm.norm_stats["atom_std"]
         )
-        if args.split_codebook:
-            vocab = LMVocab(
-                protein_codebook_size=args.codebook_size,
-                ligand_codebook_size=args.ligand_codebook_size,
-            )
-        else:
-            vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     shard_dir = dm._shard_dir  # noqa: SLF001
     assert shard_dir is not None  # noqa: S101
@@ -373,23 +356,16 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
         "all_atom": True,
         "splits": {},
     }
-    if args.split_codebook:
-        meta["split_codebook"] = True
-        meta["protein_codebook_size"] = args.codebook_size
-        meta["ligand_codebook_size"] = args.ligand_codebook_size
-        meta["protein_offset"] = vocab.protein_offset
-        meta["ligand_offset"] = vocab.ligand_offset
-    else:
-        # In separate-tokenizers mode the combined code space is 2x (protein
-        # codes then ligand codes), so downstream must see the doubled size.
-        meta["atom_codebook_size"] = (
-            2 * args.codebook_size
-            if args.separate_protein_ckpt is not None
-            else args.codebook_size
-        )
-        meta["atom_offset"] = vocab.offset
-        if args.separate_protein_ckpt is not None:
-            meta["separate_tokenizers"] = True
+    # In separate-tokenizers mode the combined code space is 2x (protein codes
+    # then ligand codes), so downstream must see the doubled size.
+    meta["atom_codebook_size"] = (
+        2 * args.codebook_size
+        if args.separate_protein_ckpt is not None
+        else args.codebook_size
+    )
+    meta["atom_offset"] = vocab.offset
+    if args.separate_protein_ckpt is not None:
+        meta["separate_tokenizers"] = True
     for split in args.splits:
         plan = plans[split]
         if not plan:

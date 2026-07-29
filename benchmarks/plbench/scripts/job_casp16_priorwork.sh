@@ -11,7 +11,6 @@
 # walltime. These four touch none of the all-atom outputs, so this can run
 # alongside it without contending for a single file.
 #
-#   own_vqvae   our residue-level tokenizer (pocket backbone + ligand)
 #   esm3        protein structure VQ-VAE   (GPU)
 #   foldtoken   protein structure VQ-VAE   (GPU, own .venv-foldtoken)
 #   token_mol   ligand torsion tokenizer
@@ -20,7 +19,7 @@
 # else, while ESM3 and FoldToken are protein-only and have no ligand row for it
 # to score anyway. Every geometry metric (RMSD, TM-score, lDDT, lDDT-PLI,
 # contact F1, clash, bond geometry) and the rate columns are cheap and included.
-# PoseBusters for own_vqvae / token_mol can be filled in later against the same
+# PoseBusters for token_mol can be filled in later against the same
 # sample set.
 #
 # Submit with:
@@ -42,7 +41,7 @@ OUT=${OUT:-results/casp16_priorwork.parquet}
 # whitespace (so "MODELS=a b" becomes a stray script argument) AND treats commas
 # as the separator between variable assignments (so "MODELS=a,b" silently drops
 # b and defines it as an empty variable -- which quietly ran only one model).
-MODELS=$(echo "${MODELS_LIST:-own_vqvae+esm3+foldtoken+token_mol}" | tr '+' ' ')
+MODELS=$(echo "${MODELS_LIST:-own_allatom+esm3+foldtoken+token_mol}" | tr '+' ' ')
 
 echo "[job] host=$(hostname) start=$(date -Is) out=$OUT"
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader

@@ -1,9 +1,9 @@
-"""In-house **all-atom** pocket-ligand tokenizer reconstruction (subprocess).
+"""ProLIT all-atom pocket-ligand tokenizer reconstruction (subprocess).
 
-Successor to :mod:`plbench.adapters.own_vqvae`, which drives the older
-residue-level tokenizer. The all-atom family encodes pocket atoms and ligand
-atoms with one shared 33-D descriptor, so a single codebook can cover both, and
-the ablation question is what that sharing costs and buys.
+Replaces the residue-level adapter this bench started with. ProLIT encodes
+pocket atoms and ligand atoms with one shared 33-D descriptor, so a single
+codebook can cover both, and the ablation question is what that sharing costs
+and buys.
 
 One adapter instance = one **arm**. The arms in :data:`ARMS` span the two design
 axes the paper argues about:
@@ -273,6 +273,17 @@ class OwnAllAtomAdapter(ReconstructionModel):
 
     def _index_dumps(self) -> None:
         self._dumps = {p.stem: p for p in sorted(self.out_dir.glob("*.npz"))}
+
+    def dumps(self) -> dict[str, Path]:
+        """sample_id -> per-complex NPZ dump, indexing them on first access.
+
+        Exposed because the runner reads ``protein_chain`` / ``protein_resid``
+        out of these to define the pocket residue subset that the full-protein
+        tokenizers are scored on.
+        """
+        if not self._dumps:
+            self._index_dumps()
+        return dict(self._dumps)
 
     # -- reconstruction interface ----------------------------------------
     def reconstruct(self, sample: Sample) -> ReconResult:

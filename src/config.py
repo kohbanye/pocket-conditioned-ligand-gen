@@ -1,11 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from src.tokenizers.descriptor_schema import (
-    ATOM_DESCRIPTOR_DIM,
-    LIGAND_DESCRIPTOR_DIM,
-    PROTEIN_DESCRIPTOR_DIM,
-)
+from src.tokenizers.descriptor_schema import ATOM_DESCRIPTOR_DIM
 
 
 @dataclass
@@ -49,41 +45,6 @@ class PocketExtractionConfig:
     max_residues: int = 128
 
 
-# ---------------------------------------------------------------------------
-# Multi-head VQ-VAE recon weights
-# ---------------------------------------------------------------------------
-#
-# Continuous coord MSE is in Å² and dominates early training; categorical CEs
-# are unitless and ~log(vocab) at init. The defaults below were chosen so all
-# heads contribute on a similar order of magnitude after a few epochs (CE for
-# 12-class element ≈ log(12) ≈ 2.5, MSE ≈ a few Å² → roughly comparable).
-# Tune via the training-script CLI flag.
-
-
-def _default_ligand_recon_weights() -> dict[str, float]:
-    return {
-        "coord": 1.0,
-        "element": 0.5,
-        "charge": 0.1,
-        "hybrid": 0.1,
-        "aromatic": 0.1,
-        "ring": 0.1,
-        "numH": 0.1,
-        # Clash penalty: hinge on reconstructed ligand atom pairs closer than
-        # ~1.2 Å (the diagnosed failure: per-atom coord decode is pairwise-blind
-        # -> ~77% of reconstructions have a sub-1.2 Å clash vs ~10% for GT).
-        # Weighted up because the per-pair mean is diluted by non-clashing pairs.
-        "clash": 5.0,
-    }
-
-
-def _default_protein_recon_weights() -> dict[str, float]:
-    return {
-        "coord": 1.0,
-        "aa": 0.5,
-    }
-
-
 def _default_atom_recon_weights() -> dict[str, float]:
     """Recon weights for the unified all-atom VQ-VAE (protein + ligand).
 
@@ -103,50 +64,6 @@ def _default_atom_recon_weights() -> dict[str, float]:
         "bb_sc": 0.1,
         "clash": 5.0,
     }
-
-
-@dataclass
-class ProteinVQVAEConfig:
-    """Config for protein backbone structure VQ-VAE."""
-
-    descriptor_dim: int = PROTEIN_DESCRIPTOR_DIM
-    hidden_dim: int = 256
-    latent_dim: int = 16
-    codebook_size: int = 4096
-    commitment_cost: float = 0.25
-    ema_decay: float = 0.99
-    num_transformer_layers: int = 4
-    num_attention_heads: int = 8
-    transformer_feedforward_dim: int = 512
-    transformer_dropout: float = 0.1
-    max_seq_len: int = 256
-    domain: str = "protein"
-    categorical_embed_dim: int = 8
-    recon_weights: dict[str, float] = field(
-        default_factory=_default_protein_recon_weights,
-    )
-
-
-@dataclass
-class LigandVQVAEConfig:
-    """Config for ligand structure VQ-VAE (spherical + features)."""
-
-    descriptor_dim: int = LIGAND_DESCRIPTOR_DIM
-    hidden_dim: int = 256
-    latent_dim: int = 8
-    codebook_size: int = 2048
-    commitment_cost: float = 0.25
-    ema_decay: float = 0.99
-    num_transformer_layers: int = 4
-    num_attention_heads: int = 8
-    transformer_feedforward_dim: int = 512
-    transformer_dropout: float = 0.1
-    max_seq_len: int = 256
-    domain: str = "ligand"
-    categorical_embed_dim: int = 8
-    recon_weights: dict[str, float] = field(
-        default_factory=_default_ligand_recon_weights,
-    )
 
 
 @dataclass
@@ -175,27 +92,6 @@ class AtomVQVAEConfig:
     recon_weights: dict[str, float] = field(
         default_factory=_default_atom_recon_weights,
     )
-    # Split the discrete bottleneck by source: protein atoms quantize against
-    # ``codebook_size`` codes, ligand atoms against ``ligand_codebook_size``.
-    # The unified 33-D descriptor + one shared encoder/decoder are kept; only
-    # the codebook is per-source, so ligand geometry is not diluted by the ~10x
-    # more numerous protein atoms (which collapsed ligand connectivity to 47%).
-    split_codebook: bool = False
-    ligand_codebook_size: int = 4096
-
-
-@dataclass
-class VQVAETrainingConfig:
-    """Config for joint VQ-VAE training."""
-
-    learning_rate: float = 3e-4
-    mol_batch_size: int = 4096
-    max_epochs: int = 100
-    num_workers: int = 16
-    precision: str = "bf16-mixed"
-    protein: ProteinVQVAEConfig = field(default_factory=ProteinVQVAEConfig)
-    ligand: LigandVQVAEConfig = field(default_factory=LigandVQVAEConfig)
-    pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)
 
 
 @dataclass
@@ -235,14 +131,12 @@ _NUM_SPECIAL_TOKENS = 7
 class LigandLMConfig:
     """Architecture config for the dense Qwen3-style autoregressive LM (~0.3B)."""
 
-    # Codebook sizes determine the flat vocabulary. Defaults match the "2x"
-    # VQ-VAE checkpoint (protein=8192, ligand=4096).
-    protein_codebook_size: int = 8192
-    ligand_codebook_size: int = 4096
-    # When set, use the unified all-atom vocabulary: one shared codebook range
-    # for protein + ligand (``vocab_size = specials + atom_codebook_size``).
-    # Overrides the separate protein/ligand ranges above.
-    atom_codebook_size: int | None = None
+    # Size of the single all-atom code range the flat vocabulary is built on
+    # (``vocab_size = specials + atom_codebook_size``). 8192 is the joint
+    # tokenizer; the separate-tokenizer ablation passes the COMBINED size of its
+    # two sub-codebooks (16384 for 8192+8192, 8192 for 4096+4096), because both
+    # arms stitch their books into one contiguous range before the LM sees them.
+    atom_codebook_size: int = 8192
 
     # Dims chosen to land at ~0.3B parameters with the ~12.3k vocabulary
     # (measured: 302M). Token/param ≈ 3 against the ~1B-token corpus.
@@ -265,11 +159,7 @@ class LigandLMConfig:
 
     @property
     def vocab_size(self) -> int:
-        if self.atom_codebook_size is not None:
-            return _NUM_SPECIAL_TOKENS + self.atom_codebook_size
-        return (
-            _NUM_SPECIAL_TOKENS + self.protein_codebook_size + self.ligand_codebook_size
-        )
+        return _NUM_SPECIAL_TOKENS + self.atom_codebook_size
 
 
 @dataclass
@@ -314,11 +204,8 @@ class ComplexMLMConfig:
     embedding table; the ``<mask>`` id is only ever an input, never a target.
     """
 
-    # Base vocabulary (mirror LigandLMConfig): single shared all-atom codebook
-    # when ``atom_codebook_size`` is set, else the legacy protein+ligand ranges.
-    protein_codebook_size: int = 8192
-    ligand_codebook_size: int = 4096
-    atom_codebook_size: int | None = None
+    # Base vocabulary, mirroring LigandLMConfig: one all-atom code range.
+    atom_codebook_size: int = 8192
 
     # ~100M-param ESM3-style encoder: 13 x (hidden 768, 12 heads, SwiGLU 8/3).
     # head_dim = 64. Faithful to Biohub/esm UnifiedTransformerBlock: rotary attn,
@@ -345,11 +232,7 @@ class ComplexMLMConfig:
     @property
     def base_vocab_size(self) -> int:
         """Number of real token ids (specials + codebook), before ``<mask>``."""
-        if self.atom_codebook_size is not None:
-            return _NUM_SPECIAL_TOKENS + self.atom_codebook_size
-        return (
-            _NUM_SPECIAL_TOKENS + self.protein_codebook_size + self.ligand_codebook_size
-        )
+        return _NUM_SPECIAL_TOKENS + self.atom_codebook_size
 
     @property
     def mask_token_id(self) -> int:

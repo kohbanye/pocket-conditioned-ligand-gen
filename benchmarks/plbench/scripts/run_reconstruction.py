@@ -2,13 +2,13 @@
 
 Examples
 --------
-# CASP16 held-out complexes. The own model reconstructs pocket+ligand; ESM3 and
+# CASP16 held-out complexes. ProLIT reconstructs pocket+ligand; ESM3 and
 # FoldToken reconstruct the same pocket backbones (protein_scope=pocket).
 uv run python scripts/run_reconstruction.py \
-    --models own_vqvae esm3 foldtoken \
+    --models own_allatom esm3 foldtoken \
     --dataset casp16 --limit 50 --out results/casp16.parquet
 
-# ESM3/FoldToken on the full CASP proteins (their native scope), own model skipped.
+# ESM3/FoldToken on the full CASP proteins (their native scope), ProLIT skipped.
 uv run python scripts/run_reconstruction.py \
     --models esm3 foldtoken --dataset casp16 --protein-scope full
 """
@@ -19,6 +19,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -26,19 +27,24 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from plbench import datasets, paths, runner  # noqa: E402
 from plbench.adapters.own_allatom import ARMS, OwnAllAtomAdapter  # noqa: E402
-from plbench.adapters.own_vqvae import OwnVQVAEAdapter  # noqa: E402
-from plbench.structio import read_backbone  # noqa: E402
 
 
-def pocket_keys_from_own(own: OwnVQVAEAdapter) -> dict[str, set]:
-    """Map sample_id -> {(chain, resid)} of the pocket residues the own model
-    used, read from each ``*_orig_pocket.pdb`` (original author numbering)."""
+def pocket_keys_from_allatom(adapter: OwnAllAtomAdapter) -> dict[str, set]:
+    """Map sample_id -> {(chain, resid)} of the pocket residues ProLIT used.
+
+    ``protein_scope=pocket`` scores the full-protein tokenizers (ESM3,
+    FoldToken4, Bio2Token) on the same residues ProLIT sees, so the comparison
+    is over one shared region rather than ProLIT's pocket against their whole
+    chain. The residue identity comes from the per-atom ``protein_chain`` /
+    ``protein_resid`` arrays each arm dumps, in original author numbering.
+    """
     keys: dict[str, set] = {}
-    for tag, rec in own._records.items():  # noqa: SLF001
-        bb = read_backbone(rec.orig_pocket_pdb)
+    for tag, dump in adapter.dumps().items():
+        with np.load(dump, allow_pickle=False) as npz:
+            chains = npz["protein_chain"]
+            resids = npz["protein_resid"]
         keys[tag] = {
-            (str(c), int(r))
-            for c, r in zip(bb.chain_ids, bb.res_ids, strict=False)
+            (str(c), int(r)) for c, r in zip(chains, resids, strict=True)
         }
     return keys
 
@@ -47,7 +53,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--models", nargs="+",
-        default=["own_vqvae", "esm3", "foldtoken", "token_mol"],
+        default=["own_allatom", "esm3", "foldtoken", "token_mol"],
     )
     p.add_argument("--dataset", default="casp16")
     p.add_argument("--pdb-dir", type=Path, default=None)
@@ -59,11 +65,10 @@ def main() -> None:
         default="pocket",
         help="how ESM3/FoldToken are scored. Both reconstruct the full CASP "
         "protein (their native task); 'pocket' (default) then restricts the "
-        "metrics to the own model's pocket residues for a same-residue, "
+        "metrics to ProLIT's pocket residues for a same-residue, "
         "non-OOD comparison; 'full' scores the whole protein.",
     )
     p.add_argument("--foldtoken-level", type=int, default=12)
-    p.add_argument("--own-ckpt", type=Path, default=None)
     p.add_argument(
         "--allatom-arms",
         nargs="*",
@@ -108,27 +113,13 @@ def main() -> None:
     print(f"[plbench] dataset={args.dataset} samples={len(samples)} models={args.models}")
 
     frames: list[pd.DataFrame] = []
-    other_models = [m for m in args.models if m != "own_vqvae"]
+    other_models = list(args.models)
     pocket_keys: dict[str, set] | None = None
-
-    # Own model first: it defines the pocket residue subset used to restrict the
-    # other models' (full-protein) reconstruction metrics.
-    if "own_vqvae" in args.models:
-        own = OwnVQVAEAdapter(ckpt=args.own_ckpt)
-        own.materialize(samples)
-        frames.append(
-            runner.run(
-                ["own_vqvae"], samples, prebuilt={"own_vqvae": own},
-                pb_valid=args.pb_valid, pb_limit=args.pb_limit,
-            )
-        )
-        if args.protein_scope == "pocket":
-            pocket_keys = pocket_keys_from_own(own)
-    elif args.protein_scope == "pocket":
-        print("[plbench] protein-scope=pocket needs own_vqvae; scoring full protein.")
 
     # All-atom tokenizer arms. Each is its own adapter instance reporting under
     # "own_allatom.<arm>", so they land in the same long table as everything else.
+    # These run first: the first arm also defines the pocket residue subset used
+    # to restrict the full-protein tokenizers' metrics (protein_scope=pocket).
     arms = args.allatom_arms
     if arms is None and "own_allatom" in args.models:
         arms = OwnAllAtomAdapter.ready_arms(args.allatom_min_epoch)
@@ -162,7 +153,17 @@ def main() -> None:
         arm_df.to_parquet(part)
         print(f"[plbench] arm {arm}: {len(arm_df)} rows -> {part}")
         frames.append(arm_df)
+        # Every arm tokenizes the same pocket, so the first one that ran is
+        # enough to define the shared residue subset.
+        if args.protein_scope == "pocket" and pocket_keys is None:
+            pocket_keys = pocket_keys_from_allatom(adapter)
     other_models = [m for m in other_models if m != "own_allatom"]
+
+    if args.protein_scope == "pocket" and pocket_keys is None and other_models:
+        print(
+            "[plbench] protein-scope=pocket needs an own_allatom arm to define "
+            "the pocket residues; scoring the full protein instead."
+        )
 
     # ESM3 / FoldToken always reconstruct the full CASP protein (native task);
     # pocket_keys restricts the *scoring* to the pocket residues.

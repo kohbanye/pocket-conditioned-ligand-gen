@@ -8,8 +8,7 @@
 #   1. tokenize the pose-refine set using the unified all-atom VQ-VAE (xzkjxu9q)
 #      round-trip as x0 -> data/pose_refine_atom
 #   2. train the e3nn pose refiner (single-shot x1-prediction) -> refine_atom_v1
-# Mirrors job_pose_refine_pipeline_v1.sh but with --decoder atom so the refiner
-# matches the all-atom generation decoder. WANDB offline.
+# The refiner matches the all-atom generation decoder. WANDB offline.
 
 cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
 export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
@@ -18,7 +17,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 set -e
 
 .venv/bin/python scripts/tokenize_pose_refine.py \
-    --decoder atom \
     --ckpt "pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt" \
     --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
     --codebook-size 8192 \

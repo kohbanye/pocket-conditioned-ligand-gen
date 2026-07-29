@@ -12,8 +12,8 @@ import argparse
 import logging
 from pathlib import Path
 
-from src.config import CrossDockedConfig, HubDatasetConfig, VQVAETrainingConfig
-from src.data.descriptors import ComplexDescriptorDataModule
+from src.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
+from src.data.atom_descriptors import AtomComplexDescriptorDataModule
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,17 +36,17 @@ def main() -> None:
         "--cache-dir",
         type=Path,
         default=None,
-        help="Override descriptor cache directory.",
+        help="Override descriptor cache directory (default: data/descriptor_cache_allatom).",
     )
     args = parser.parse_args()
 
-    config = VQVAETrainingConfig()
+    config = AtomVQVAETrainingConfig()
     data_config = CrossDockedConfig()
     if args.data_dir is not None:
         data_config.data_dir = args.data_dir
 
     hub_config = HubDatasetConfig() if args.from_hub else None
-    dm = ComplexDescriptorDataModule(config, data_config, hub_config=hub_config)
+    dm = AtomComplexDescriptorDataModule(config, data_config, hub_config=hub_config)
     if args.cache_dir is not None:
         dm.cache_dir = args.cache_dir
 

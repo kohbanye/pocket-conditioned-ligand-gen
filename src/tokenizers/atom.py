@@ -117,12 +117,12 @@ def rotate_atom_descriptor(
 ) -> np.ndarray:
     """Re-express an all-atom descriptor under an extra frame rotation ``R``.
 
-    Generalises :func:`src.tokenizers.ligand.rotate_ligand_descriptor` to the
-    unified layout: only the absolute ``coord`` block and each ``knn_offsets``
-    block are orientation-dependent; every categorical slot (source / element /
-    chemistry / aa / bb_sc / knn elements) is rotation-invariant and copied
-    through. The same ``R`` must be applied to the protein AND ligand
-    descriptors of a complex so the two stay in one frame.
+    Rotates the spherical slots of a stored descriptor instead of re-running
+    feature extraction: only the absolute ``coord`` block and each
+    ``knn_offsets`` block are orientation-dependent; every categorical slot
+    (source / element / chemistry / aa / bb_sc / knn elements) is
+    rotation-invariant and copied through. The same ``R`` must be applied to the
+    protein AND ligand descriptors of a complex so the two stay in one frame.
     """
     if descriptor.shape[0] == 0:
         return descriptor.copy()

@@ -47,7 +47,7 @@ from src.tokenizers.atom import (
 )
 from src.tokenizers.geometry import random_rotation_matrix
 from src.tokenizers.ligand import parse_sdf_text
-from src.tokenizers.lm_vocab import AtomLMVocab, LMVocab
+from src.tokenizers.lm_vocab import AtomLMVocab
 from src.tokenizers.protein import (
     _compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
@@ -340,12 +340,6 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
         help="Emit <p>pocket</p><l>ligand</l> (default: protein-only <l></l>).",
     )
     parser.add_argument("--codebook-size", type=int, default=8192)
-    parser.add_argument(
-        "--split-codebook",
-        action="store_true",
-        help="Split-codebook VQ (protein + ligand books) -> 2-range LMVocab.",
-    )
-    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
     parser.add_argument("--max-residues", type=int, default=50)
     parser.add_argument("--num-rotations", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=16)
@@ -363,9 +357,6 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
 
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
-    if args.split_codebook:
-        config.atom.split_codebook = True
-        config.atom.ligand_codebook_size = args.ligand_codebook_size
     if args.separate_protein_ckpt is not None:
         # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
         # unified into one code space. Feed RAW descriptors (identity external
@@ -386,7 +377,7 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
         )
         mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
         std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
-        vocab: AtomLMVocab | LMVocab = AtomLMVocab(
+        vocab: AtomLMVocab = AtomLMVocab(
             codebook_size=2 * args.codebook_size
         )
     else:
@@ -399,13 +390,7 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
         module.vqvae.set_normalization(norm_stats["atom_mean"], norm_stats["atom_std"])
         mean = norm_stats["atom_mean"].numpy()
         std = norm_stats["atom_std"].numpy()
-        if args.split_codebook:
-            vocab = LMVocab(
-                protein_codebook_size=args.codebook_size,
-                ligand_codebook_size=args.ligand_codebook_size,
-            )
-        else:
-            vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
 
     casf_pdbs = None
     if args.casf_pdbs is not None and args.casf_pdbs.exists():
@@ -489,23 +474,14 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
         },
         "splits": {},
     }
-    if args.split_codebook:
-        meta["split_codebook"] = True
-        meta["protein_codebook_size"] = args.codebook_size
-        meta["ligand_codebook_size"] = args.ligand_codebook_size
-        meta["protein_offset"] = vocab.protein_offset
-        meta["ligand_offset"] = vocab.ligand_offset
-    else:
-        # In separate-tokenizers mode the combined code space is 2x (protein
-        # codes then ligand codes), so downstream must see the doubled size.
-        meta["atom_codebook_size"] = (
-            2 * args.codebook_size
-            if args.separate_protein_ckpt is not None
-            else args.codebook_size
-        )
-        meta["atom_offset"] = vocab.offset
-        if args.separate_protein_ckpt is not None:
-            meta["separate_tokenizers"] = True
+    meta["atom_codebook_size"] = (
+        2 * args.codebook_size
+        if args.separate_protein_ckpt is not None
+        else args.codebook_size
+    )
+    meta["atom_offset"] = vocab.offset
+    if args.separate_protein_ckpt is not None:
+        meta["separate_tokenizers"] = True
     for split, writer in writers.items():
         writer.close()
         meta["splits"][split] = {

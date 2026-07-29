@@ -51,28 +51,21 @@ FOLDTOKEN_PYTHON = os.environ.get(
     str(_FOLDTOKEN_VENV_PY) if _FOLDTOKEN_VENV_PY.exists() else "python",
 )
 
-# --- Own pocket-ligand VQ-VAE ------------------------------------------------
-# Source comes from the submodule, but the trained weights + descriptor cache
-# live in a separate working copy and are symlinked into weights/ and data/.
-OWN_VQVAE_CKPT = WEIGHTS_DIR / "own_vqvae" / "vqvae.ckpt"
-OWN_DESCRIPTOR_CACHE = DATA_DIR / "own_descriptor_cache"
-# The own model has its own uv venv with the exact deps + cache wiring.
+# --- ProLIT ------------------------------------------------------------------
+# ProLIT lives in this monorepo, but it has its own uv venv: this bench cannot
+# share one with it (ESM3 pins a fork of transformers that would downgrade the
+# transformers ProLIT's language models need).
 OWN_MODEL_WORKDIR = Path(
-    os.environ.get(
-        "PLBENCH_OWN_MODEL_WORKDIR",
-        "/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen",
-    )
+    os.environ.get("PLBENCH_OWN_MODEL_WORKDIR", MONOREPO_ROOT)
 )
 OWN_MODEL_PYTHON = os.environ.get(
     "PLBENCH_OWN_MODEL_PYTHON", str(OWN_MODEL_WORKDIR / ".venv" / "bin" / "python")
 )
 
-# --- Own all-atom tokenizer --------------------------------------------------
-# The all-atom family replaced the residue-level VQ-VAE above: pocket atoms and
-# ligand atoms share one 33-D descriptor so a single codebook can cover both.
-# Checkpoints and descriptor caches are read straight out of the source repo's
-# working copy -- there is one per ablation arm and they are far too large to
-# symlink individually.
+# Pocket atoms and ligand atoms share one 33-D descriptor so a single codebook
+# can cover both. Checkpoints and descriptor caches are read straight out of the
+# model's run directories -- there is one per ablation arm and they are far too
+# large to symlink individually.
 OWN_VQ_RUNS_DIR = Path(
     os.environ.get("PLBENCH_OWN_VQ_RUNS_DIR", OWN_MODEL_WORKDIR / "pocket-ligand-vqvae")
 )

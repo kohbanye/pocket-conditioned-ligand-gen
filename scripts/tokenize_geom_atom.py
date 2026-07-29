@@ -38,7 +38,7 @@ from src.data.token_io import SplitWriter
 from src.model.vqvae_module import AtomVQVAEModule
 from src.tokenizers.atom import LigandAtomDescriptor, rotate_atom_descriptor
 from src.tokenizers.geometry import random_rotation_matrix
-from src.tokenizers.lm_vocab import AtomLMVocab, LMVocab
+from src.tokenizers.lm_vocab import AtomLMVocab
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -140,13 +140,6 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     parser.add_argument("--num-rotations", type=int, default=8)
     parser.add_argument("--heavy-atom-max", type=int, default=120)
     parser.add_argument("--codebook-size", type=int, default=8192)
-    parser.add_argument(
-        "--split-codebook",
-        action="store_true",
-        help="Split-codebook VQ (protein + ligand books) -> 2-range LMVocab. "
-        "GEOM is ligand-only, so tokens land in the ligand range.",
-    )
-    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
     parser.add_argument("--val-frac", type=float, default=0.005)
     parser.add_argument("--test-frac", type=float, default=0.005)
     parser.add_argument("--seed", type=int, default=0)
@@ -174,9 +167,6 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
 
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
-    if args.split_codebook:
-        config.atom.split_codebook = True
-        config.atom.ligand_codebook_size = args.ligand_codebook_size
     if args.separate_protein_ckpt is not None:
         # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
         # unified into one code space. Feed RAW descriptors (identity external
@@ -198,7 +188,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         )
         mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
         std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
-        vocab: AtomLMVocab | LMVocab = AtomLMVocab(
+        vocab: AtomLMVocab = AtomLMVocab(
             codebook_size=2 * args.codebook_size
         )
     else:
@@ -212,13 +202,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         mean = norm_stats["atom_mean"].numpy()
         std = norm_stats["atom_std"].numpy()
 
-        if args.split_codebook:
-            vocab = LMVocab(
-                protein_codebook_size=args.codebook_size,
-                ligand_codebook_size=args.ligand_codebook_size,
-            )
-        else:
-            vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
     wanted = set(args.splits)
 
     from tqdm import tqdm  # noqa: PLC0415
@@ -304,22 +288,14 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         },
         "splits": {},
     }
-    if args.split_codebook:
-        meta["split_codebook"] = True
-        meta["protein_codebook_size"] = args.codebook_size
-        meta["ligand_codebook_size"] = args.ligand_codebook_size
-        meta["protein_offset"] = vocab.protein_offset
-        meta["ligand_offset"] = vocab.ligand_offset
-    else:
-        # Separate-tokenizers mode doubles the code space (protein then ligand).
-        meta["atom_codebook_size"] = (
-            2 * args.codebook_size
-            if args.separate_protein_ckpt is not None
-            else args.codebook_size
-        )
-        meta["atom_offset"] = vocab.offset
-        if args.separate_protein_ckpt is not None:
-            meta["separate_tokenizers"] = True
+    meta["atom_codebook_size"] = (
+        2 * args.codebook_size
+        if args.separate_protein_ckpt is not None
+        else args.codebook_size
+    )
+    meta["atom_offset"] = vocab.offset
+    if args.separate_protein_ckpt is not None:
+        meta["separate_tokenizers"] = True
     for split, writer in writers.items():
         writer.close()
         meta["splits"][split] = {

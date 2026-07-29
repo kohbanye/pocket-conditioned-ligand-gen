@@ -23,16 +23,12 @@ from torch import Tensor, nn
 
 from src.tokenizers.codebook import EMACodebook
 from src.tokenizers.descriptor_schema import (
+    ATOM_DESCRIPTOR_DIM,
     ATOM_LAYOUT,
     ATOM_PROTEIN_ONLY_HEADS,
     ATOM_RECON_HEADS,
-    LIGAND_LAYOUT,
-    LIGAND_RECON_HEADS,
-    PROTEIN_LAYOUT,
-    PROTEIN_RECON_HEADS,
     SOURCE_LIGAND_IDX,
     SOURCE_PROTEIN_IDX,
-    SOURCE_VOCAB,
     FieldSpec,
     fields_by_name,
 )
@@ -45,9 +41,9 @@ from src.tokenizers.geometry import (
 
 @dataclass
 class TransformerVQVAEConfig:
-    """Base config for Transformer VQ-VAE (used by both protein and ligand)."""
+    """Config for the all-atom Transformer VQ-VAE."""
 
-    descriptor_dim: int = 30  # overridden by domain configs
+    descriptor_dim: int = ATOM_DESCRIPTOR_DIM
     hidden_dim: int = 256
     latent_dim: int = 8
     codebook_size: int = 1024
@@ -58,8 +54,8 @@ class TransformerVQVAEConfig:
     transformer_feedforward_dim: int = 512
     transformer_dropout: float = 0.1
     max_seq_len: int = 256
-    # "ligand" or "protein" — picks the descriptor layout / recon heads.
-    domain: str = "ligand"
+    # Retained so older checkpoints round-trip; only "atom" is supported.
+    domain: str = "atom"
     # Per-categorical embedding dim. Categorical slots map to learned vectors
     # of this size before being concatenated with continuous slots.
     categorical_embed_dim: int = 8
@@ -71,22 +67,12 @@ class TransformerVQVAE(nn.Module):
     def __init__(self, config: TransformerVQVAEConfig) -> None:
         super().__init__()
         self.config = config
-        if config.domain not in ("ligand", "protein", "atom"):
-            msg = f"Unknown domain: {config.domain!r}"
+        if config.domain != "atom":
+            msg = f"Unknown domain: {config.domain!r} (only 'atom' is supported)"
             raise ValueError(msg)
 
-        _layouts: dict[str, list[FieldSpec]] = {
-            "ligand": LIGAND_LAYOUT,
-            "protein": PROTEIN_LAYOUT,
-            "atom": ATOM_LAYOUT,
-        }
-        _heads: dict[str, list[tuple[str, str, int]]] = {
-            "ligand": LIGAND_RECON_HEADS,
-            "protein": PROTEIN_RECON_HEADS,
-            "atom": ATOM_RECON_HEADS,
-        }
-        self.layout: list[FieldSpec] = _layouts[config.domain]
-        self.recon_heads: list[tuple[str, str, int]] = _heads[config.domain]
+        self.layout: list[FieldSpec] = ATOM_LAYOUT
+        self.recon_heads: list[tuple[str, str, int]] = ATOM_RECON_HEADS
 
         # ---- Embeddings for categorical input slots --------------------
         d_cat = config.categorical_embed_dim
@@ -169,27 +155,17 @@ class TransformerVQVAE(nn.Module):
         self.register_buffer("_desc_std", torch.ones(config.descriptor_dim))
 
         # ---- Codebook --------------------------------------------------
-        # ``self.codebook`` is the sole codebook in the default (single-book)
-        # setup; under ``split_codebook`` it is the PROTEIN codebook and
-        # ``self.codebook_ligand`` is a separate ligand-only codebook, routed by
-        # the ``source`` slot. A learned source embedding is added to the
-        # quantized vector so the shared decoder can tell which book it came
-        # from (the two books live in the same latent space).
+        # One book over both modalities: protein and ligand atoms are quantized
+        # against the same codes, which is what makes these interface tokens a
+        # single shared vocabulary. The separate-tokenizer ablation instead
+        # trains two of these end to end and stitches them together in
+        # :class:`~src.tokenizers.separate_vqvae.SeparateVQVAE`.
         self.codebook = EMACodebook(
             num_codes=config.codebook_size,
             code_dim=config.latent_dim,
             ema_decay=config.ema_decay,
             commitment_cost=config.commitment_cost,
         )
-        self.split_codebook: bool = getattr(config, "split_codebook", False)
-        if self.split_codebook:
-            self.codebook_ligand = EMACodebook(
-                num_codes=config.ligand_codebook_size,
-                code_dim=config.latent_dim,
-                ema_decay=config.ema_decay,
-                commitment_cost=config.commitment_cost,
-            )
-            self.source_embed = nn.Embedding(len(SOURCE_VOCAB), config.latent_dim)
 
     # ------------------------------------------------------------------
     # Helper: shared embedding tables for "element"/"aa" across slots
@@ -214,39 +190,6 @@ class TransformerVQVAE(nn.Module):
         target_device = self._desc_mean.device
         self._desc_mean = mean.to(dtype=target_dtype, device=target_device)
         self._desc_std = std.to(dtype=target_dtype, device=target_device)
-
-    def _quantize_split(
-        self,
-        z: Tensor,
-        source: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
-        """Quantize ``(M, latent)`` rows against per-source codebooks.
-
-        Protein rows use ``self.codebook``, ligand rows ``self.codebook_ligand``.
-        Returned ``indices`` live in each book's own 0-based range (the caller /
-        LM vocab keeps protein and ligand on disjoint token ranges). The
-        commitment loss is the fraction-weighted sum so it matches the mean over
-        all rows of the single-book path.
-        """
-        quantized = torch.zeros_like(z)
-        indices = torch.zeros(z.shape[0], dtype=torch.long, device=z.device)
-        commit = z.new_zeros(())
-        diag: dict[str, Tensor] = {}
-        total = max(z.shape[0], 1)
-        for src_idx, book, tag in (
-            (SOURCE_PROTEIN_IDX, self.codebook, "protein"),
-            (SOURCE_LIGAND_IDX, self.codebook_ligand, "ligand"),
-        ):
-            m = source == src_idx
-            if not bool(m.any()):
-                continue
-            q, idx, c, d = book(z[m])
-            quantized[m] = q.to(quantized.dtype)
-            indices[m] = idx
-            commit = commit + c * (int(m.sum()) / total)
-            for k, v in d.items():
-                diag[f"{tag}_{k}"] = v
-        return quantized, indices, commit, diag
 
     def forward(
         self,
@@ -275,13 +218,9 @@ class TransformerVQVAE(nn.Module):
 
         # 2. Quantize per-position over real elements only.
         z_real = z[mask].float()
-        if self.split_codebook:
-            f = fields_by_name(self.layout)
-            source_real = x[..., f["source"].start].long()[mask]
-            quant_out = self._quantize_split(z_real, source_real)
-        else:
-            quant_out = self.codebook(z_real)
-        quantized_real, indices_real, commitment_loss, codebook_diag = quant_out
+        quantized_real, indices_real, commitment_loss, codebook_diag = self.codebook(
+            z_real
+        )
         z_diversity = z_real.detach().std(dim=0).mean()
 
         quantized = torch.zeros_like(z)
@@ -295,12 +234,7 @@ class TransformerVQVAE(nn.Module):
         )
         indices[mask] = indices_real
 
-        # 3. Decoder. Under split_codebook, add a per-position source embedding
-        #    so the shared decoder can tell protein- vs ligand-book vectors apart
-        #    (padded positions are dropped by the key-padding mask below).
-        if self.split_codebook:
-            src_full = x[..., fields_by_name(self.layout)["source"].start].long()
-            quantized = quantized + self.source_embed(src_full)
+        # 3. Decoder.
         dec_in = self.latent_unproj(quantized) + self.pos_encoding[:seq_len]
         dec_out = self.transformer_decoder(dec_in, src_key_padding_mask=~mask)
         trunk = self.decoder_trunk(dec_out)
@@ -331,20 +265,12 @@ class TransformerVQVAE(nn.Module):
         }
 
     def encode(self, x: Tensor) -> Tensor:
-        """Encode a single sequence ``(N, descriptor_dim)`` to codebook indices.
-
-        Under ``split_codebook`` the per-row ``source`` slot routes each atom to
-        its own book; indices are returned in each book's own 0-based range.
-        """
+        """Encode a single sequence ``(N, descriptor_dim)`` to codebook indices."""
         x_seq = x.unsqueeze(0)
         h_in = self._embed_descriptor(x_seq)
         h = self.input_proj(self.input_norm(h_in)) + self.pos_encoding[: x.shape[0]]
         h = self.transformer_encoder(h)
         z = self.latent_norm(self.latent_proj(h)).squeeze(0)
-        if self.split_codebook:
-            source = x[..., fields_by_name(self.layout)["source"].start].long()
-            _, indices, _, _ = self._quantize_split(z, source)
-            return indices
         _, indices, _, _ = self.codebook(z)
         return indices
 
@@ -369,45 +295,18 @@ class TransformerVQVAE(nn.Module):
         h = self.transformer_encoder(h, src_key_padding_mask=~mask)
         z = self.latent_norm(self.latent_proj(h))  # (B, L, latent_dim)
         z_flat = z.reshape(b * seq_len, -1).float()
-        if self.split_codebook:
-            source_flat = x[..., fields_by_name(self.layout)["source"].start].long()
-            source_flat = source_flat.reshape(b * seq_len)
-            _, indices_flat, _, _ = self._quantize_split(z_flat, source_flat)
-        else:
-            _, indices_flat, _, _ = self.codebook(z_flat)
+        _, indices_flat, _, _ = self.codebook(z_flat)
         indices = indices_flat.view(b, seq_len)
         return indices.masked_fill(~mask, -1)
 
-    def decode_to_outputs(
-        self,
-        indices: Tensor,
-        source_idx: int | None = None,
-    ) -> dict[str, Tensor]:
+    def decode_to_outputs(self, indices: Tensor) -> dict[str, Tensor]:
         """Decode ``(N,)`` codebook indices into raw recon-head outputs.
 
         Returns a dict with one entry per head. The caller is responsible
         for converting categorical logits to indices (argmax) and continuous
         spherical outputs to Cartesian as needed.
-
-        Under ``split_codebook``, ``source_idx`` selects which book to look the
-        indices up in (all ``N`` positions share one source: a pocket OR a
-        ligand) and adds the matching source embedding, mirroring
-        :meth:`forward`.
         """
-        if self.split_codebook:
-            if source_idx is None:
-                msg = "decode_to_outputs requires source_idx when split_codebook"
-                raise ValueError(msg)
-            book = (
-                self.codebook
-                if source_idx == SOURCE_PROTEIN_IDX
-                else self.codebook_ligand
-            )
-            quantized = book.lookup(indices)  # (N, latent_dim)
-            src = torch.full_like(indices, source_idx)
-            quantized = quantized + self.source_embed(src)
-        else:
-            quantized = self.codebook.lookup(indices)  # (N, latent_dim)
+        quantized = self.codebook.lookup(indices)  # (N, latent_dim)
         q_seq = quantized.unsqueeze(0)
         dec_in = self.latent_unproj(q_seq) + self.pos_encoding[: indices.shape[0]]
         dec_out = self.transformer_decoder(dec_in)
@@ -518,12 +417,9 @@ class TransformerVQVAE(nn.Module):
         # so reconstructions frequently overlap (~77% sub-1.2 Å clashes vs ~10%
         # for GT); this directly penalises that. ``xyz_p`` is the decoded
         # Cartesian (denormalised) computed above; 1 atom per coord head.
-        if self.config.domain == "ligand":
-            clash_mask = mask
-        elif self.config.domain == "atom" and source is not None:
-            clash_mask = mask & (source == SOURCE_LIGAND_IDX)
-        else:
-            clash_mask = None
+        clash_mask = (
+            mask & (source == SOURCE_LIGAND_IDX) if source is not None else None
+        )
         if clash_mask is not None:
             d_floor = 1.2
             xyz = xyz_p.squeeze(2)  # (B, L, 3)

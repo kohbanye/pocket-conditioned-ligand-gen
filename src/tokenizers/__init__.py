@@ -1,39 +1,29 @@
-"""Tokenization modules for protein-ligand complexes."""
+"""Tokenization of protein-ligand complexes into ProLIT interface tokens.
 
-from src.tokenizers.codebook import EMACodebook
+Deliberately re-exports only the descriptor schema. Importing the encoders or
+the VQ-VAE here would pull torch in at package-import time and, because
+:mod:`src.tokenizers.separate_vqvae` reads its config from :mod:`src.config`
+while ``src.config`` imports this schema, would close an import cycle. Import
+the heavy pieces from their own modules:
+
+    from src.tokenizers.atom import LigandAtomDescriptor, ProteinAtomDescriptor
+    from src.tokenizers.vqvae import TransformerVQVAE
+    from src.tokenizers.separate_vqvae import SeparateVQVAE
+    from src.tokenizers.lm_vocab import AtomLMVocab
+"""
+
 from src.tokenizers.descriptor_schema import (
-    LIGAND_DESCRIPTOR_DIM,
-    LIGAND_LAYOUT,
-    PROTEIN_DESCRIPTOR_DIM,
-    PROTEIN_LAYOUT,
+    ATOM_DESCRIPTOR_DIM,
+    ATOM_LAYOUT,
+    SOURCE_LIGAND_IDX,
+    SOURCE_PROTEIN_IDX,
+    fields_by_name,
 )
-from src.tokenizers.ligand import (
-    LigandDescriptor,
-    LigandTokenizer,
-    LigandVQVAE,
-)
-from src.tokenizers.protein import (
-    BackboneSphericalDescriptor,
-    PrecomputedResidues,
-    ProteinSequenceTokenizer,
-    precompute_pocket_candidates,
-)
-from src.tokenizers.sequence import TokenSequenceAssembler
-from src.tokenizers.vqvae import TransformerVQVAE
 
 __all__ = [
-    "LIGAND_DESCRIPTOR_DIM",
-    "LIGAND_LAYOUT",
-    "PROTEIN_DESCRIPTOR_DIM",
-    "PROTEIN_LAYOUT",
-    "BackboneSphericalDescriptor",
-    "EMACodebook",
-    "LigandDescriptor",
-    "LigandTokenizer",
-    "LigandVQVAE",
-    "PrecomputedResidues",
-    "ProteinSequenceTokenizer",
-    "TokenSequenceAssembler",
-    "TransformerVQVAE",
-    "precompute_pocket_candidates",
+    "ATOM_DESCRIPTOR_DIM",
+    "ATOM_LAYOUT",
+    "SOURCE_LIGAND_IDX",
+    "SOURCE_PROTEIN_IDX",
+    "fields_by_name",
 ]

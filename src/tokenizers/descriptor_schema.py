@@ -1,17 +1,16 @@
-"""Descriptor schema for the spherical multi-head VQ-VAE.
+"""Descriptor schema for the ProLIT all-atom tokenizer.
 
-Defines the vocabularies and field layouts shared by:
-- ``LigandDescriptor`` / ``BackboneSphericalDescriptor`` (encode side)
-- ``TransformerVQVAE`` (encoder embeddings + decoder heads)
-- ``ComplexDescriptorDataModule`` (Welford normalization, only on continuous slots)
+Defines the vocabularies and field layout shared by:
+- :mod:`src.tokenizers.atom` (encode side: the 33-D per-atom row)
+- :class:`~src.tokenizers.vqvae.TransformerVQVAE` (encoder embeddings + decoder heads)
+- :mod:`src.data.descriptors` (Welford normalization, only on continuous slots)
 
 A descriptor row is a single concatenated float32 vector. Continuous slots
 hold real values (spherical coords); categorical slots hold integer indices
 cast to float (the network casts back to long before embedding lookup).
 
-The layout is documented as ``(start, length)`` tuples in two helpers per
-descriptor: ``LIG_LAYOUT`` / ``PROT_LAYOUT``. Tests assert these stay in
-sync with the descriptors and the VQ-VAE.
+The layout is documented as ``(start, length)`` tuples in :data:`ATOM_LAYOUT`.
+Tests assert it stays in sync with the descriptors and the VQ-VAE.
 """
 
 from __future__ import annotations
@@ -134,41 +133,6 @@ def _build_layout(specs: list[tuple[str, str, int, int]]) -> list[FieldSpec]:
     return layout
 
 
-# Ligand atom descriptor: 30-D total
-#   - 4 continuous spherical (r, theta, sin phi, cos phi) from pocket centroid
-#   - 6 categorical singletons (element, charge, hybrid, aromatic, ring, numH)
-#   - 16 continuous KNN spherical offsets (K=4 atoms x 4D each)
-#   - 4 categorical KNN element indices (one per neighbour)
-LIGAND_LAYOUT: list[FieldSpec] = _build_layout(
-    [
-        ("coord", "continuous", 4, 0),
-        ("element", "categorical", 1, len(LIGAND_ELEMENT_VOCAB)),
-        ("charge", "categorical", 1, len(LIGAND_CHARGE_VOCAB)),
-        ("hybrid", "categorical", 1, len(LIGAND_HYBRID_VOCAB)),
-        ("aromatic", "categorical", 1, 2),
-        ("ring", "categorical", 1, len(LIGAND_RING_VOCAB)),
-        ("numH", "categorical", 1, len(LIGAND_NUMH_VOCAB)),
-        ("knn_offsets", "continuous", 4 * K_NEIGHBORS, 0),
-        ("knn_elements", "categorical", K_NEIGHBORS, len(LIGAND_ELEMENT_VOCAB)),
-    ]
-)
-LIGAND_DESCRIPTOR_DIM: int = LIGAND_LAYOUT[-1].end  # 30
-
-# Protein residue descriptor: 65-D total
-#   - 12 continuous: 3 atoms (N, CA, C) x 4 spherical from pocket centroid
-#   - 1 categorical: amino acid identity
-#   - 48 continuous KNN residue spherical offsets (K=4 residues x 12D each)
-#   - 4 categorical KNN residue AA indices
-PROTEIN_LAYOUT: list[FieldSpec] = _build_layout(
-    [
-        ("coord", "continuous", 12, 0),
-        ("aa", "categorical", 1, len(PROTEIN_AA_VOCAB)),
-        ("knn_offsets", "continuous", 12 * K_NEIGHBORS, 0),
-        ("knn_aa", "categorical", K_NEIGHBORS, len(PROTEIN_AA_VOCAB)),
-    ]
-)
-PROTEIN_DESCRIPTOR_DIM: int = PROTEIN_LAYOUT[-1].end  # 65
-
 # Unified all-atom descriptor: 33-D total. One row per heavy atom, used for
 # BOTH protein pocket atoms and ligand atoms (one VQ-VAE, one codebook).
 #   - 4 continuous spherical (r, θ, sin φ, cos φ) from the pocket centroid
@@ -216,24 +180,6 @@ def continuous_mask(layout: list[FieldSpec]) -> list[bool]:
         mask.extend([spec.kind == "continuous"] * spec.length)
     return mask
 
-
-# Heads the decoder must produce, in fixed order (used by VQ-VAE multi-head
-# decoder + reconstruction loss). Continuous heads are predicted as raw
-# regression outputs; categorical heads as logits over their vocab.
-LIGAND_RECON_HEADS: list[tuple[str, str, int]] = [
-    ("coord", "continuous", 4),  # spherical: r, theta, sin phi, cos phi
-    ("element", "categorical", len(LIGAND_ELEMENT_VOCAB)),
-    ("charge", "categorical", len(LIGAND_CHARGE_VOCAB)),
-    ("hybrid", "categorical", len(LIGAND_HYBRID_VOCAB)),
-    ("aromatic", "categorical", 2),
-    ("ring", "categorical", len(LIGAND_RING_VOCAB)),
-    ("numH", "categorical", len(LIGAND_NUMH_VOCAB)),
-]
-
-PROTEIN_RECON_HEADS: list[tuple[str, str, int]] = [
-    ("coord", "continuous", 12),  # 3 atoms x 4 spherical dims
-    ("aa", "categorical", len(PROTEIN_AA_VOCAB)),
-]
 
 # Unified all-atom decoder heads. ``source`` is intentionally absent (input
 # only). ``coord`` + the six chemistry heads are trained on every atom; the

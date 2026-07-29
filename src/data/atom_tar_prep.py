@@ -27,7 +27,6 @@ from src.data.atom_descriptors import (
     _save_atom_shard_metadata,
 )
 from src.data.descriptors import _DEFAULT_SHARD_SIZE
-from src.data.tar_prep import _pair_idx_from_member
 from src.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
@@ -40,6 +39,18 @@ if TYPE_CHECKING:
     from src.config import PocketExtractionConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _pair_idx_from_member(name: str) -> int | None:
+    """``.../<pair_idx>.sdf.gz`` -> ``pair_idx``, or None for anything else."""
+    base = name.rsplit("/", 1)[-1]
+    suffix = ".sdf.gz"
+    if not base.endswith(suffix):
+        return None
+    try:
+        return int(base[: -len(suffix)])
+    except ValueError:
+        return None
 
 
 def _load_shard_pair_map(  # noqa: PLR0913

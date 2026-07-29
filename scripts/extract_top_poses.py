@@ -35,10 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.write_reconstruction_pdbs import (  # noqa: E402
-    infer_bonds,
-    write_full_protein_pdb,
-)
+from src.chem.pdb_io import infer_bonds, write_full_protein_pdb  # noqa: E402
 from src.tokenizers.ligand import parse_sdf  # noqa: E402
 
 DEFAULT_VINA = "/home/5/uq02055/.local/bin/vina"
