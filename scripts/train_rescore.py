@@ -53,6 +53,19 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         default=None,
         help="Add pairwise within-complex ranking loss (groups by RMSD==0 native).",
     )
+    parser.add_argument(
+        "--listwise-weight",
+        type=float,
+        default=None,
+        help="Weight of the within-complex ListNet loss (groups like --ranking).",
+    )
+    parser.add_argument("--listwise-tau", type=float, default=None)
+    parser.add_argument(
+        "--atom-aux-weight",
+        type=float,
+        default=None,
+        help="Weight of the per-ligand-atom displacement auxiliary loss.",
+    )
     parser.add_argument("--complexes-per-batch", type=int, default=None)
     parser.add_argument(
         "--max-per-group",
@@ -96,6 +109,32 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Clamp on the regression target. 8.0 suits RMSD decoys; raise to ~13 "
         "for pK affinity labels so real binders are not clipped.",
     )
+    parser.add_argument(
+        "--max-label",
+        type=float,
+        default=None,
+        help="Train only on poses with label <= this (near-native specialist).",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Checkpoint to resume from (restores weights, optimizer and epoch), "
+        "so a run interrupted mid-training continues instead of restarting.",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=None,
+        help="Max tokens per doc. Must exceed the corpus max_len or long "
+        "complexes (big ligands) get their ligand tail truncated away.",
+    )
+    parser.add_argument(
+        "--max-docs",
+        type=int,
+        default=None,
+        help="Train on at most this many docs (corpus-size ablation).",
+    )
     parser.add_argument("--fast-dev-run", action="store_true")
     args = parser.parse_args()
 
@@ -114,6 +153,13 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.num_workers = args.num_workers
     if args.ranking_loss_weight is not None:
         config.ranking_loss_weight = args.ranking_loss_weight
+    if args.atom_aux_weight is not None:
+        config.atom_aux_weight = args.atom_aux_weight
+    if args.listwise_weight is not None:
+        config.listwise_loss_weight = args.listwise_weight
+    if args.listwise_tau is not None:
+        config.listwise_label_tau = args.listwise_tau
+        config.listwise_pred_tau = args.listwise_tau
     if args.complexes_per_batch is not None:
         config.complexes_per_batch = args.complexes_per_batch
     if args.max_per_group is not None:
@@ -128,6 +174,12 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.mlm_aux_weight = args.mlm_aux_weight
     if args.pooling is not None:
         config.pooling = args.pooling
+    if args.block_size is not None:
+        config.block_size = args.block_size
+    if args.max_docs is not None:
+        config.max_docs = args.max_docs
+    if args.max_label is not None:
+        config.max_label = args.max_label
     if args.label_cap is not None:
         config.rmsd_cap = args.label_cap
 
@@ -180,7 +232,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         callbacks=callbacks,
         fast_dev_run=args.fast_dev_run,
     )
-    trainer.fit(module, dm)
+    trainer.fit(module, dm, ckpt_path=args.resume_from)
 
 
 if __name__ == "__main__":

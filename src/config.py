@@ -424,6 +424,26 @@ class RescoreTrainingConfig:
     # pred(higher-RMSD) within each complex, added to the regression loss.
     ranking_loss_weight: float = 0.0
     ranking_margin: float = 0.5
+
+    # ListNet-style listwise loss over the poses of one complex: softmax(-pred)
+    # is matched to softmax(-rmsd / tau). Unlike the pairwise margin loss it
+    # spends its gradient on the near-native end (which pose wins) instead of
+    # weighting every pose pair equally, and the model stays a per-pose scorer.
+    # Cap the number of TRAIN docs (0 = all). Prefix of the corpus, so it takes
+    # whole complexes; used to compare corpora at matched size.
+    max_docs: int = 0
+
+    # Drop training poses whose label exceeds this (0 = keep all). Trains a
+    # near-native specialist for the top-1 tie-break.
+    max_label: float = 0.0
+
+    # Weight of the per-ligand-atom displacement auxiliary loss (needs a corpus
+    # with .disp/.dlen sidecars from tokenize_decoys).
+    atom_aux_weight: float = 0.0
+
+    listwise_loss_weight: float = 0.0
+    listwise_label_tau: float = 0.4
+    listwise_pred_tau: float = 0.4
     complexes_per_batch: int = 8
     # Cap on docs drawn per group in one batch. Needed for the affinity corpus,
     # where a group is a protein and sizes range from 1 to ~700 ligands.

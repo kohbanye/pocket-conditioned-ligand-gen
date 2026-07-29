@@ -25,12 +25,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import zlib
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from scripts.eval_casf_rescore import _PoseEncoder
+from scripts.eval_casf_rescore import _PoseEncoder, _random_rotation
 from scripts.tokenize_biolip import (
     _bucket_code,
     _cd_test_pdbs,
@@ -142,22 +143,116 @@ def _conf_perturb(  # noqa: C901
     return _perturb(new, rng, scale * 0.4)[0]  # small rigid on top
 
 
+def _kabsch(p: np.ndarray, q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Rigid transform (rot, trans) that best superposes ``p`` onto ``q``."""
+    pc, qc = p.mean(0), q.mean(0)
+    u, _, vt = np.linalg.svd((p - pc).T @ (q - qc))
+    d = float(np.sign(np.linalg.det(vt.T @ u.T)))
+    rot = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
+    return rot, qc - rot @ pc
+
+
+def _conformer_decoys(  # noqa: PLR0913
+    atoms: list, bonds: list, hidx: np.ndarray, base: np.ndarray, n: int, seed: int
+) -> list[np.ndarray]:
+    """Freshly embedded conformers, rigidly superposed onto the native pose.
+
+    The decoys a docking program produces near the native site have *correct
+    placement but an independently generated internal conformer*; perturbing the
+    crystal conformer (rigidly or by torsion) never yields that. A head trained
+    only on perturbed-crystal decoys can therefore learn "the exact crystal
+    conformer is the native one" and bury a genuinely good redocked pose -- the
+    observed failure mode (good poses ranked >10 on 14 CASF targets). These
+    decoys put realistic 0.5-2.5 A near-natives in the training distribution.
+    """
+    from rdkit import Chem  # noqa: PLC0415
+    from rdkit.Chem import AllChem  # noqa: PLC0415
+
+    bt = {
+        1: Chem.BondType.SINGLE,
+        2: Chem.BondType.DOUBLE,
+        3: Chem.BondType.TRIPLE,
+        4: Chem.BondType.AROMATIC,
+    }
+    rw = Chem.RWMol()
+    for a in atoms:
+        try:
+            rw.AddAtom(Chem.Atom(a[0]))
+        except Exception:  # noqa: BLE001
+            rw.AddAtom(Chem.Atom("C"))
+    na = len(atoms)
+    for i, j, t in bonds:
+        if 0 <= i < na and 0 <= j < na and i != j:
+            try:
+                rw.AddBond(i, j, bt.get(t, Chem.BondType.SINGLE))
+            except Exception:  # noqa: BLE001, S112
+                continue
+    mol = rw.GetMol()
+    try:
+        Chem.SanitizeMol(mol)
+    except Exception:  # noqa: BLE001
+        return []  # caller falls back to the perturbation decoys
+    params = AllChem.ETKDGv3()
+    params.randomSeed = seed
+    params.pruneRmsThresh = 0.3
+    params.maxIterations = 200
+    try:
+        cids = AllChem.EmbedMultipleConfs(mol, numConfs=3 * n, params=params)
+    except Exception:  # noqa: BLE001
+        return []
+    poses = []
+    for cid in cids:
+        conf = mol.GetConformer(cid)
+        new = np.array(
+            [list(conf.GetAtomPosition(i)) for i in range(na)], dtype=np.float64
+        )
+        rot, trans = _kabsch(new[hidx], base[hidx])
+        new = new @ rot.T + trans
+        poses.append(
+            (float(np.sqrt(((new[hidx] - base[hidx]) ** 2).sum(1).mean())), new)
+        )
+    if not poses:
+        return []
+    # A docking run *searches* conformers, so its pose set is graded: the best
+    # sampled conformer sits near the native and the rest fan out. A random
+    # embedding is not -- it lands 2-4 A away. Sample the pool evenly along its
+    # own RMSD order so the closest conformer is always kept and the class spans
+    # near-native to clearly-wrong, like a real pose set.
+    poses.sort(key=lambda t: t[0])
+    idx = np.unique(np.linspace(0, len(poses) - 1, num=n).round().astype(int))
+    return [poses[i][1] for i in idx]
+
+
 class _RmsdWriter:
-    """Streams tokens (.bin/.len) + one float32 RMSD per doc (.rmsd)."""
+    """Streams tokens (.bin/.len), one float32 RMSD per doc (.rmsd), and the
+    per-ligand-atom displacement (.disp float32, ``.dlen`` uint16 counts).
+
+    The per-atom stream is dense supervision: one RMSD scalar tells the head only
+    that a pose is wrong, while a displacement per ligand token tells it *which
+    atoms* are misplaced -- ~30 labels per pose instead of 1, and exactly the
+    quantity the pose score aggregates.
+    """
 
     def __init__(self, out_dir: Path, split: str) -> None:
         self._bin = (out_dir / f"{split}.bin").open("wb")
         self._len = (out_dir / f"{split}.len").open("wb")
         self._rmsd = (out_dir / f"{split}.rmsd").open("wb")
+        self._disp = (out_dir / f"{split}.disp").open("wb")
+        self._dlen = (out_dir / f"{split}.dlen").open("wb")
         self.num_docs = 0
         self.num_tokens = 0
         self.max_len = 0
 
-    def write(self, seq: list[int], rmsd: float) -> None:
+    def write(
+        self, seq: list[int], rmsd: float, disp: np.ndarray | None = None
+    ) -> None:
         arr = np.asarray(seq, dtype=np.uint16)
         self._bin.write(arr.tobytes())
         self._len.write(np.asarray([len(seq)], dtype=np.uint16).tobytes())
         self._rmsd.write(np.asarray([rmsd], dtype=np.float32).tobytes())
+        d = np.asarray([] if disp is None else disp, dtype=np.float32)
+        self._disp.write(d.tobytes())
+        self._dlen.write(np.asarray([d.shape[0]], dtype=np.uint16).tobytes())
         self.num_docs += 1
         self.num_tokens += len(seq)
         self.max_len = max(self.max_len, len(seq))
@@ -168,17 +263,25 @@ class _RmsdWriter:
             self._len.flush()
             self._rmsd.flush()
             self._bin.flush()
+            self._disp.flush()
+            self._dlen.flush()
 
     def close(self) -> None:
         self._bin.close()
         self._len.close()
         self._rmsd.close()
+        self._disp.close()
+        self._dlen.close()
 
 
 def main() -> None:  # noqa: C901, PLR0915, PLR0912
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt", type=Path, required=True)
-    parser.add_argument("--norm-stats", type=Path, required=True)
+    parser.add_argument("--ckpt", type=Path, default=None)
+    parser.add_argument("--separate-protein-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-protein-norm", type=Path, default=None)
+    parser.add_argument("--separate-ligand-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-ligand-norm", type=Path, default=None)
+    parser.add_argument("--norm-stats", type=Path, default=None)
     parser.add_argument("--biolip-dir", type=Path, default=Path("data/biolip"))
     parser.add_argument(
         "--cd-manifest", type=Path, default=Path("data/hub_cache/repo/manifest.parquet")
@@ -195,6 +298,35 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     parser.add_argument("--max-heavy", type=int, default=50)
     parser.add_argument("--val-frac", type=float, default=0.03)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--n-conformer-decoys",
+        type=int,
+        default=0,
+        help="Of --n-decoys, how many come from freshly embedded conformers "
+        "superposed on the native pose (docking-like near-natives). The rest "
+        "alternate rigid / torsion perturbation as before.",
+    )
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Split the receptor buckets across this many array tasks.",
+    )
+    parser.add_argument("--shard-id", type=int, default=0)
+    parser.add_argument(
+        "--num-rot",
+        type=int,
+        default=1,
+        help="Emit each complex under this many random frame rotations "
+        "(1 = canonical frame only). Data augmentation against VQ code noise.",
+    )
+    parser.add_argument(
+        "--skip-canonical",
+        action="store_true",
+        help="Make every emitted rotation random (no canonical-frame copy), so a "
+        "second pass over the same complexes yields rotated duplicates to "
+        "concatenate onto an existing canonical corpus.",
+    )
     args = parser.parse_args()
 
     from rdkit import RDLogger  # noqa: PLC0415
@@ -205,17 +337,44 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
 
     cfg = AtomVQVAETrainingConfig()
     cfg.atom.codebook_size = args.codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.ckpt, config=cfg, map_location=device
-    )
-    module.eval().to(device)
-    norm = torch.load(args.norm_stats, weights_only=False)
-    module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
+    if args.separate_protein_ckpt is not None:
+        # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
+        # unified into one code space. Feed RAW descriptors (identity external
+        # norm) via _PoseEncoder -- SeparateVQVAE normalizes per modality
+        # internally. Combined single-range AtomLMVocab over 2*codebook_size
+        # codes. _PoseEncoder encodes pocket + ligand in separate (single-
+        # modality) encode_batch calls, which SeparateVQVAE requires.
+        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+            ATOM_DESCRIPTOR_DIM,
+        )
+        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+
+        module = SeparateVQVAE.from_checkpoints(
+            args.separate_protein_ckpt,
+            args.separate_protein_norm,
+            args.separate_ligand_ckpt,
+            args.separate_ligand_norm,
+            device,
+            codebook_size=args.codebook_size,
+        )
+        mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+        std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+        vocab = AtomLMVocab(codebook_size=2 * args.codebook_size)
+    else:
+        module = AtomVQVAEModule.load_from_checkpoint(
+            args.ckpt, config=cfg, map_location=device
+        )
+        module.eval().to(device)
+        norm = torch.load(args.norm_stats, weights_only=False)
+        module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
+        mean = norm["atom_mean"].numpy()
+        std = norm["atom_std"].numpy()
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
     enc = _PoseEncoder(
         module,
-        norm["atom_mean"].numpy(),
-        norm["atom_std"].numpy(),
-        AtomLMVocab(codebook_size=args.codebook_size),
+        mean,
+        std,
+        vocab,
         device,
         PocketExtractionConfig(max_residues=args.max_residues),
     )
@@ -257,8 +416,14 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
 
     from tqdm import tqdm  # noqa: PLC0415
 
+    # Shard by bucket so an array job can build a large corpus in parallel; the
+    # complex list and val split are computed identically in every task (same
+    # seed), so the shards concatenate into one consistent corpus.
+    codes = sorted(by_bucket)[args.shard_id :: args.num_shards]
+    logger.info("shard %d/%d: %d buckets", args.shard_id, args.num_shards, len(codes))
+
     n_ok = 0
-    for code in tqdm(sorted(by_bucket), desc="buckets"):
+    for code in tqdm(codes, desc="buckets"):
         site_list = by_bucket[code]
         needed_rec = {f"{p}{rc}.pdb" for p, rc, _c, _l, _s in site_list}
         needed_lig = {f"{p}_{cc}_{lc}_{s}.pdb" for p, _rc, cc, lc, s in site_list}
@@ -299,17 +464,40 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                 base = np.array([(a[1], a[2], a[3]) for a in mol["atoms"]], np.float64)
                 hidx = np.array(heavy_idx)
                 mols, rmsds = [mol], [0.0]
-                for k in range(args.n_decoys):
-                    scale = (k + 1) / args.n_decoys
-                    if k % 2 == 0:
-                        new = _perturb(base, rng, scale)[0]
-                    else:
-                        new = _conf_perturb(mol["atoms"], mol["bonds"], rng, scale)
-                        if new is None:
-                            new = _perturb(base, rng, scale)[0]
-                    rmsds.append(
-                        float(np.sqrt(((new[hidx] - base[hidx]) ** 2).sum(1).mean()))
+                disps = [np.zeros(len(hidx), dtype=np.float32)]
+                # Freshly embedded conformers superposed on the native: the
+                # docking-like near-native class that perturbation cannot make.
+                confs = (
+                    _conformer_decoys(
+                        mol["atoms"],
+                        mol["bonds"],
+                        hidx,
+                        base,
+                        args.n_conformer_decoys,
+                        # crc32, not hash(): PYTHONHASHSEED randomizes str hashes
+                        # per process, so shards would not be reproducible.
+                        seed=zlib.crc32(f"{pdb}_{ccd}".encode()) % (2**31),
                     )
+                    if args.n_conformer_decoys > 0
+                    else []
+                )
+                n_pert = args.n_decoys - len(confs)
+                for k in range(args.n_decoys):
+                    if k >= n_pert:
+                        # Kept as embedded (already RMSD-graded): this class is
+                        # purely "right place, independently generated conformer".
+                        new = confs[k - n_pert]
+                    else:
+                        scale = (k + 1) / max(1, n_pert)
+                        if k % 2 == 0:
+                            new = _perturb(base, rng, scale)[0]
+                        else:
+                            new = _conf_perturb(mol["atoms"], mol["bonds"], rng, scale)
+                            if new is None:
+                                new = _perturb(base, rng, scale)[0]
+                    d = np.linalg.norm(new[hidx] - base[hidx], axis=1)
+                    disps.append(d.astype(np.float32))
+                    rmsds.append(float(np.sqrt((d**2).mean())))
                     mols.append({
                         "atoms": [
                             (a[0], float(new[i][0]), float(new[i][1]), float(new[i][2]))
@@ -317,25 +505,48 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                         ],
                         "bonds": mol["bonds"],
                     })
-                seqs = enc.ligand_seqs_batch(p_codes, mols, frame)
-                if seqs[0] is None:
-                    continue  # native must encode
-                for seq, rmsd in zip(seqs, rmsds, strict=True):
-                    if seq is not None:
-                        writers[split].write(seq, rmsd)
-                n_ok += 1
+                # Descriptors once; each extra rotation only re-quantizes them.
+                # A rotated frame is a different tokenization of the SAME complex
+                # (the VQ-VAE was pretrained with this augmentation), so it
+                # teaches the head to score the pose, not the code pattern.
+                descs = enc.ligand_descs(mols, frame)
+                for r in range(args.num_rot):
+                    canon = r == 0 and not args.skip_canonical
+                    rot = None if canon else _random_rotation(rng)
+                    pc = p_codes if rot is None else enc.pocket_codes_rotated(rot)
+                    seqs = enc.seqs_from_descs(pc, descs, rotation=rot)
+                    if seqs[0] is None:
+                        break  # native must encode
+                    for seq, rmsd, dsp, dsc in zip(
+                        seqs, rmsds, disps, descs, strict=True
+                    ):
+                        if seq is None:
+                            continue
+                        # Per-atom labels are only usable when they line up with
+                        # the emitted ligand tokens (one row per heavy atom).
+                        ok = dsc.shape[0] == dsp.shape[0]
+                        writers[split].write(seq, rmsd, dsp if ok else None)
+                else:
+                    n_ok += 1
             except Exception:
                 logger.exception("failed %s_%s", pdb, ccd)
                 continue
 
     meta = {
-        "vocab_size": AtomLMVocab(codebook_size=args.codebook_size).vocab_size,
-        "atom_codebook_size": args.codebook_size,
+        "vocab_size": vocab.vocab_size,
+        # Separate-tokenizers mode doubles the code space (protein then ligand).
+        "atom_codebook_size": (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        ),
         "source": "biolip2_rigid_decoys",
         "n_decoys": args.n_decoys,
         "complexes_used": n_ok,
         "splits": {},
     }
+    if args.separate_protein_ckpt is not None:
+        meta["separate_tokenizers"] = True
     for split, w in writers.items():
         w.close()
         meta["splits"][split] = {

@@ -419,7 +419,7 @@ def load_atom_lm(
     )
 
 
-def main() -> None:  # noqa: PLR0915, C901
+def main() -> None:  # noqa: PLR0912, PLR0915, C901
     parser = argparse.ArgumentParser()
     parser.add_argument("--lm-ckpt", type=str, required=True)
     parser.add_argument(
@@ -457,6 +457,18 @@ def main() -> None:  # noqa: PLR0915, C901
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument("--ligand-codebook-size", type=int, default=4096)
     parser.add_argument(
+        "--separate-protein-ckpt",
+        type=Path,
+        default=None,
+        help="ABLATION separate-tokenizers mode: protein-only VQ ckpt. When set "
+        "(with the other --separate-* flags), decode uses a SeparateVQVAE over a "
+        "combined 2*codebook-size code space and the LM must be the separate LM "
+        "(AtomLMVocab sized 2*codebook-size). Implies the all-atom encode path.",
+    )
+    parser.add_argument("--separate-protein-norm", type=Path, default=None)
+    parser.add_argument("--separate-ligand-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-ligand-norm", type=Path, default=None)
+    parser.add_argument(
         "--norm-stats",
         type=Path,
         default=PROJECT_ROOT
@@ -478,7 +490,55 @@ def main() -> None:  # noqa: PLR0915, C901
         else PROJECT_ROOT / args.vqvae_ckpt
     )
     receptor_cache: dict[str, tuple] = {}
-    if args.all_atom or args.split_codebook:
+    if args.separate_protein_ckpt is not None:
+        # ABLATION separate-tokenizers mode: pocket encoded by a protein-only VQ,
+        # ligand decoded by a ligand-only VQ, unified into one combined code space
+        # (protein codes [0, Pc), ligand codes [Pc, 2*Pc)) by SeparateVQVAE. The
+        # LM is the separate LM trained over an AtomLMVocab of 2*codebook-size.
+        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+
+        separate_vqvae = SeparateVQVAE.from_checkpoints(
+            args.separate_protein_ckpt,
+            args.separate_protein_norm,
+            args.separate_ligand_ckpt,
+            args.separate_ligand_norm,
+            device,
+            codebook_size=args.codebook_size,
+        )
+        combined_codebook_size = 2 * args.codebook_size
+        model = load_atom_lm(
+            args.lm_ckpt, combined_codebook_size, device, split=False
+        )
+        # Encode uses the protein VQ with the protein modality's stats; decode uses
+        # the ligand VQ with the ligand modality's stats (exposed by SeparateVQVAE).
+        protein_norm = load_atom_norm_stats(args.separate_protein_norm, device)
+        ligand_norm = separate_vqvae.ligand_norm_stats
+        vocab = AtomLMVocab(codebook_size=combined_codebook_size)
+        # Ligand block tokens occupy [offset + Pc, offset + 2*Pc). Filter to that
+        # window but subtract only ``offset`` so the extracted codes stay in
+        # COMBINED space -- exactly what SeparateVQVAE.decode_to_outputs expects.
+        code_lo = vocab.offset + args.codebook_size
+        code_hi = vocab.offset + vocab.codebook_size
+        code_base = vocab.offset
+        prot_atom_desc = ProteinAtomDescriptor()
+
+        def encode_pocket(rec_path: Path, mol: dict):  # noqa: ANN202
+            return _pocket_codes_atom(
+                rec_path,
+                mol,
+                pocket_config,
+                prot_atom_desc,
+                separate_vqvae.protein,
+                protein_norm,
+                device,
+                receptor_cache=receptor_cache,
+            )
+
+        def decode_codes(codes, frame):  # noqa: ANN001, ANN202
+            return _decode_ligand_atom(
+                codes, separate_vqvae, ligand_norm, frame, device, source_idx=None
+            )
+    elif args.all_atom or args.split_codebook:
         split = args.split_codebook
         atom_vqvae = load_atom_vqvae(
             vqvae_ckpt,
@@ -509,6 +569,7 @@ def main() -> None:  # noqa: PLR0915, C901
             vocab = AtomLMVocab(codebook_size=args.codebook_size)
             code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
             dec_source = None
+        code_base = code_lo
         prot_atom_desc = ProteinAtomDescriptor()
 
         def encode_pocket(rec_path: Path, mol: dict):  # noqa: ANN202
@@ -553,6 +614,7 @@ def main() -> None:  # noqa: PLR0915, C901
             vocab.ligand_offset,
             vocab.ligand_offset + vocab.ligand_codebook_size,
         )
+        code_base = code_lo
         protein_desc_calc = BackboneSphericalDescriptor()
 
         def encode_pocket(rec_path: Path, mol: dict):  # noqa: ANN202
@@ -643,7 +705,7 @@ def main() -> None:  # noqa: PLR0915, C901
             lig_tok = (
                 out_tokens[: out_tokens.index(L_CLOSE_ID)] if terminated else out_tokens
             )
-            codes = [t - code_lo for t in lig_tok if code_lo <= t < code_hi]
+            codes = [t - code_base for t in lig_tok if code_lo <= t < code_hi]
             total += 1
             if not codes:
                 logger.info("  s%d: EMPTY/invalid", k)

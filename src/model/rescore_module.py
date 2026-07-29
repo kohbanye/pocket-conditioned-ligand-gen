@@ -88,6 +88,14 @@ class ComplexRescoreModule(L.LightningModule):
             self.interaction = nn.TransformerEncoder(layer, num_layers=n_int)
         else:
             self.interaction = None
+        # Dense auxiliary supervision: predict how far each ligand atom sits from
+        # its native position. One RMSD scalar says only "this pose is wrong";
+        # ~30 per-atom labels say WHICH atoms are wrong, which is the same
+        # quantity the pose score aggregates and gives the interface a per-atom
+        # error signal instead of a single pooled one.
+        self.atom_head = (
+            nn.Linear(h, 1) if config.atom_aux_weight > 0 else None
+        )
         self.head = nn.Sequential(
             nn.Linear(in_dim, h),
             nn.GELU(),
@@ -155,13 +163,26 @@ class ComplexRescoreModule(L.LightningModule):
         msg = f"unknown pooling: {self.pooling}"
         raise ValueError(msg)
 
-    def forward(self, batch: dict[str, Tensor]) -> Tensor:
+    def _encode_states(self, batch: dict[str, Tensor]) -> Tensor:
         hs = self.encoder.encode(batch["input_ids"], batch["attention_mask"])  # (B,L,H)
         if self.interaction is not None:
             hs = self.interaction(
                 hs, src_key_padding_mask=~batch["attention_mask"].bool()
             )
+        return hs
+
+    def forward(self, batch: dict[str, Tensor]) -> Tensor:
+        hs = self._encode_states(batch)
         return self.head(self._pool(hs, batch)).squeeze(-1)  # (B,) predicted label
+
+    def forward_with_atoms(
+        self, batch: dict[str, Tensor]
+    ) -> tuple[Tensor, Tensor | None]:
+        """Pose prediction plus the per-atom displacement prediction (or None)."""
+        hs = self._encode_states(batch)
+        pred = self.head(self._pool(hs, batch)).squeeze(-1)
+        atom = None if self.atom_head is None else self.atom_head(hs).squeeze(-1)
+        return pred, atom
 
     def on_fit_start(self) -> None:
         if not self._logged:
@@ -192,6 +213,31 @@ class ComplexRescoreModule(L.LightningModule):
             npairs += int(better.sum())
         return total / max(1, npairs)
 
+    def _listwise_loss(self, pred: Tensor, rmsd: Tensor, groups: Tensor) -> Tensor:
+        """ListNet cross-entropy within each complex: match the softmax over the
+        predicted scores to a softmax over ``-rmsd``.
+
+        Docking power asks "which pose in this set is the native one", which a
+        per-pose regression only optimizes indirectly -- and a pairwise margin
+        loss optimizes too literally (every pair counts the same, including the
+        6 A vs 8 A pairs nobody cares about). A soft label temperature of a few
+        tenths of an angstrom puts the whole loss on the near-native end while
+        the model stays a per-pose scorer at inference.
+        """
+        tau_l = self.config.listwise_label_tau
+        total = pred.new_zeros(())
+        n = 0
+        for g in groups.unique():
+            m = groups == g
+            p, r = pred[m], rmsd[m]
+            if p.numel() < 2:  # noqa: PLR2004
+                continue
+            target = torch.softmax(-r.float() / tau_l, dim=0)
+            logp = torch.log_softmax(-p.float() / self.config.listwise_pred_tau, dim=0)
+            total = total - (target * logp).sum()
+            n += 1
+        return total / max(1, n)
+
     def _mlm_aux_loss(self, batch: dict[str, Tensor]) -> Tensor:
         """Masked-LM loss on the same complexes: mask a fraction of the structure
         (codebook) tokens and predict them through the encoder's MLM head. Used
@@ -210,7 +256,7 @@ class ComplexRescoreModule(L.LightningModule):
         return self.encoder(masked, batch["attention_mask"], labels=labels).loss
 
     def _step(self, batch: dict[str, Tensor], stage: str) -> Tensor:
-        pred = self(batch)
+        pred, atom = self.forward_with_atoms(batch)
         rmsd = batch["rmsd"]
         target = rmsd.clamp(max=self.config.rmsd_cap)
         reg = nn.functional.smooth_l1_loss(pred, target)
@@ -221,6 +267,17 @@ class ComplexRescoreModule(L.LightningModule):
             loss = reg + self.config.ranking_loss_weight * rank
             self.log(f"{stage}/rank", rank, prog_bar=True, sync_dist=sync)
             self.log(f"{stage}/reg", reg, sync_dist=sync)
+        if atom is not None and "disp" in batch:
+            dm = batch["disp_mask"]
+            if bool(dm.any()):
+                tgt = batch["disp"].clamp(max=self.config.rmsd_cap)
+                aux = nn.functional.smooth_l1_loss(atom[dm], tgt[dm])
+                loss = loss + self.config.atom_aux_weight * aux
+                self.log(f"{stage}/atom", aux, prog_bar=True, sync_dist=sync)
+        if self.config.listwise_loss_weight > 0 and "group_ids" in batch:
+            lw = self._listwise_loss(pred, rmsd, batch["group_ids"])
+            loss = loss + self.config.listwise_loss_weight * lw
+            self.log(f"{stage}/list", lw, prog_bar=True, sync_dist=sync)
         if self.config.mlm_aux_weight > 0:
             mlm = self._mlm_aux_loss(batch)
             loss = loss + self.config.mlm_aux_weight * mlm

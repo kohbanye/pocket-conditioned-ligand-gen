@@ -101,11 +101,21 @@ def main() -> None:  # noqa: C901, PLR0915
 
     torch.set_float32_matmul_precision("high")
 
+    # Pin the checkpoint dir to the run-name so downstream head jobs can
+    # reference this MLM by a knowable path (not the W&B run id) for hold_jid
+    # chaining; save_last gives a stable last.ckpt.
+    ckpt_dir = (
+        Path("pocket-ligand-mlm") / args.run_name / "checkpoints"
+        if args.run_name
+        else None
+    )
     callbacks: list = [
         ModelCheckpoint(
+            dirpath=ckpt_dir,
             monitor="val/loss",
             mode="min",
             save_top_k=3,
+            save_last=True,
             filename="mlm-e{epoch:02d}-vl{val/loss:.4f}",
             auto_insert_metric_name=False,
         ),

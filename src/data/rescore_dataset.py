@@ -46,8 +46,11 @@ class RescoreDataset(Dataset):
         rmsd_path: Path,
         block_size: int,
         group_path: Path | None = None,
+        disp_path: Path | None = None,
         *,
         divide_by_size: bool = False,
+        max_label: float = 0.0,
+        max_docs: int = 0,
     ) -> None:
         self.block_size = block_size
         # Train on ligand efficiency (pK / heavy-atom count) instead of raw pK.
@@ -60,6 +63,17 @@ class RescoreDataset(Dataset):
         self.lengths = np.fromfile(len_path, dtype=np.uint16).astype(np.int64)
         self.rmsd = np.fromfile(rmsd_path, dtype=np.float32)
         self.offsets = np.concatenate([[0], np.cumsum(self.lengths)]).astype(np.int64)
+        # Optional per-ligand-atom displacement labels (dense supervision): one
+        # float per ligand token, streamed in .disp with per-doc counts in .dlen.
+        self.disp = None
+        if disp_path is not None and disp_path.exists():
+            dlen_path = disp_path.with_suffix(".dlen")
+            if dlen_path.exists():
+                self.disp = np.memmap(disp_path, dtype=np.float32, mode="r")
+                self.dlen = np.fromfile(dlen_path, dtype=np.uint16).astype(np.int64)
+                self.doffsets = np.concatenate(
+                    [[0], np.cumsum(self.dlen)]
+                ).astype(np.int64)
         if group_path is not None and group_path.exists():
             # Explicit group ids, one per doc (affinity corpus: the protein).
             # The RMSD==0 heuristic below cannot work there -- that stream holds
@@ -76,16 +90,34 @@ class RescoreDataset(Dataset):
             self.doc_group = (
                 np.searchsorted(starts, np.arange(len(self.lengths)), side="right") - 1
             ).clip(min=0)
+        # Hard-example specialist: keep only poses at or below ``max_label`` A.
+        # Docking power is decided among the few near-native candidates (the best
+        # available pose already sits at median rank 3), so a head that never
+        # sees the easy 6-8 A decoys spends all of its capacity on the
+        # distinctions that actually pick the winner.
+        self.index = np.arange(len(self.lengths), dtype=np.int64)
+        # Corpus-size ablation / fast iteration: docs are written complex by
+        # complex, so a prefix is a subset of complexes with all their poses
+        # (never a partial pose set, which would break the grouped losses).
+        if max_docs > 0:
+            self.index = self.index[:max_docs]
+        if max_label > 0:
+            self.index = self.index[self.rmsd[self.index] <= max_label]
+        keep = set(self.index.tolist())
         # Group ids may be sparse (protein ids), so index by value, not by range.
+        # Groups index into THIS dataset's positions, not raw doc ids.
+        pos = {int(d): i for i, d in enumerate(self.index)}
         by_group: dict[int, list[int]] = {}
-        for i, g in enumerate(self.doc_group.tolist()):
-            by_group.setdefault(g, []).append(i)
+        for d in self.index.tolist():
+            if d in keep:
+                by_group.setdefault(int(self.doc_group[d]), []).append(pos[d])
         self.groups = list(by_group.values())
 
     def __len__(self) -> int:
-        return len(self.lengths)
+        return len(self.index)
 
-    def __getitem__(self, idx: int) -> dict[str, Tensor]:
+    def __getitem__(self, i: int) -> dict[str, Tensor]:
+        idx = int(self.index[i])
         s = int(self.offsets[idx])
         e = min(int(self.offsets[idx + 1]), s + self.block_size)
         arr = np.asarray(self.tokens[s:e], dtype=np.int64)
@@ -93,13 +125,23 @@ class RescoreDataset(Dataset):
         label = float(self.rmsd[idx])
         if self.divide_by_size:
             label /= max(int(lig.sum()), 1)
-        return {
+        out = {
             "input_ids": torch.from_numpy(arr),
             "ligand_mask": torch.from_numpy(lig),
             "rmsd": torch.tensor(label, dtype=torch.float32),
             "length": torch.tensor(arr.shape[0], dtype=torch.int64),
             "group": torch.tensor(int(self.doc_group[idx]), dtype=torch.int64),
         }
+        if self.disp is not None:
+            ds, de = int(self.doffsets[idx]), int(self.doffsets[idx + 1])
+            # copy: a memmap slice is read-only and torch.from_numpy warns on it
+            d = np.array(self.disp[ds:de], dtype=np.float32)
+            # Only usable when it lines up with the ligand tokens of THIS doc
+            # (a truncated block_size read can shorten the token side).
+            if d.shape[0] != int(lig.sum()):
+                d = np.zeros(0, np.float32)
+            out["disp"] = torch.from_numpy(d)
+        return out
 
 
 class GroupBatchSampler(Sampler[list[int]]):
@@ -171,6 +213,20 @@ def collate_rescore(batch: list[dict[str, Tensor]]) -> dict[str, Tensor]:
         "ligand_mask": ligand_mask,
         "rmsd": rmsd,
     }
+    if "disp" in batch[0]:
+        # Scatter each doc's per-atom displacements onto its ligand-token slots;
+        # docs without usable labels stay all-zero and are masked out by disp_mask.
+        disp = torch.zeros((bsz, max_len), dtype=torch.float32)
+        disp_mask = torch.zeros((bsz, max_len), dtype=torch.bool)
+        for i, b in enumerate(batch):
+            d = b["disp"]
+            if d.numel() == 0:
+                continue
+            pos = torch.nonzero(ligand_mask[i], as_tuple=True)[0]
+            disp[i, pos] = d
+            disp_mask[i, pos] = True
+        out["disp"] = disp
+        out["disp_mask"] = disp_mask
     if "group" in batch[0]:
         # Remap absolute complex ids to 0..K-1 within this batch for the loss.
         raw = torch.tensor([int(b["group"]) for b in batch])
@@ -199,7 +255,10 @@ class RescoreDataModule(L.LightningDataModule):
                     self.token_dir / f"{split}.rmsd",
                     self.config.block_size,
                     group_path=self.token_dir / f"{split}.grp",
+                    disp_path=self.token_dir / f"{split}.disp",
                     divide_by_size=self.config.label_divide_by_size,
+                    max_label=self.config.max_label,
+                    max_docs=self.config.max_docs if split == "train" else 0,
                 )
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:
@@ -210,7 +269,9 @@ class RescoreDataModule(L.LightningDataModule):
             "pin_memory": True,
             "collate_fn": collate_rescore,
         }
-        if self.config.ranking_loss_weight > 0:
+        # Both the pairwise ranking loss and the listwise loss need whole
+        # complexes in a batch, not a random sample of poses.
+        if self.config.ranking_loss_weight > 0 or self.config.listwise_loss_weight > 0:
             sampler = GroupBatchSampler(
                 self._datasets[split].groups,
                 self.config.complexes_per_batch,

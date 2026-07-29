@@ -4,12 +4,31 @@ Given a prepared target (see ``scripts/prepare_target.py``) — a protein-only
 receptor PDB and a reference ligand SDF defining the pocket — this:
 
 1. Extracts the pocket around the reference ligand, computes its canonical
-   frame, and encodes the backbone with the protein VQ-VAE -> protein codes.
+   frame, and encodes the pocket with the protein VQ-VAE -> protein codes.
 2. Prompts the LM with ``<bos><p> pocket-codes </p><l>`` and autoregressively
    samples ligand structure codes, in batches, until ``--num-samples`` ligands
    are produced.
 3. Decodes each sample with the ligand VQ-VAE, places atoms in the real pocket
    frame (global coords matching the receptor), and infers bonds.
+
+Three tokenizer paths are supported (all share the sampling / output code, so
+the emitted ``generated.sdf`` is identical in layout for every arm — this is
+what the sbdd-bench ``own`` adapter consumes):
+
+* legacy 2-codebook (default): protein VQ + ligand VQ inside one
+  :class:`VQVAEModule` (``--vqvae-ckpt``).
+* ``--all-atom``: the unified single-codebook all-atom VQ (``--vqvae-ckpt`` is
+  an :class:`AtomVQVAEModule`); ``--split-codebook`` for the split protein/ligand
+  book variant.
+* ``--separate-protein-ckpt`` (+ the other ``--separate-*`` flags): the ablation
+  separate-tokenizers arm — pocket encoded by a protein-only VQ, ligand decoded
+  by a ligand-only VQ over one combined ``2*--codebook-size`` space
+  (:class:`SeparateVQVAE`); the LM is the matching separate LM.
+
+The three encode/decode branches mirror ``scripts/generate_ligands_3d.py``
+exactly (that script is the validated reference for the all-atom + separate
+paths); only the driver here differs (single external target -> ``generated.sdf``
+instead of an internal test-pool sweep -> per-pocket PDBs).
 
 Outputs (under ``--out-dir``):
     generated.sdf      every decoded ligand as a heavy-atom V2000 mol block
@@ -24,11 +43,20 @@ known inhibitor can be docked as a positive control alongside the generations.
 Run on a GPU node with the venv python directly (``uv run`` rebuilds the
 editable package, which is very slow here)::
 
+    # legacy 2-codebook
     PYTHONPATH=$PWD .venv/bin/python scripts/generate_ligands_for_target.py \
         --receptor data/targets/2ity/2ity_receptor.pdb \
         --ref-ligand data/targets/2ity/2ity_ref_ligand.sdf \
         --lm-ckpt pocket-ligand-lm/g79let5b/checkpoints/lm-e09-vl1.4088.ckpt \
-        --num-samples 10000 --batch-size 128 --out-dir outputs/egfr_2ity
+        --num-samples 100 --batch-size 100 --out-dir outputs/egfr_2ity
+
+    # all-atom joint (single 8192 codebook)
+    ... --all-atom --vqvae-ckpt <atom-vqvae.ckpt> --codebook-size 8192 ...
+
+    # separate 4096+4096 tokenizers (combined 8192 space)
+    ... --separate-protein-ckpt <p.ckpt> --separate-protein-norm <p.pt> \
+        --separate-ligand-ckpt <l.ckpt> --separate-ligand-norm <l.pt> \
+        --codebook-size 4096 ...
 """
 
 from __future__ import annotations
@@ -47,7 +75,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.generate_ligands_3d import _decode_ligand, _pocket_codes  # noqa: E402
+from scripts.generate_ligands_3d import (  # noqa: E402
+    _decode_ligand,
+    _decode_ligand_atom,
+    _pocket_codes,
+    _pocket_codes_atom,
+    load_atom_lm,
+    load_atom_norm_stats,
+    load_atom_vqvae,
+)
 from scripts.write_reconstruction_pdbs import infer_bonds  # noqa: E402
 from src.config import (  # noqa: E402
     CrossDockedConfig,
@@ -58,14 +94,13 @@ from src.config import (  # noqa: E402
 from src.data.descriptors import ComplexDescriptorDataModule  # noqa: E402
 from src.model.lm_module import LigandLMModule  # noqa: E402
 from src.model.vqvae_module import VQVAEModule  # noqa: E402
+from src.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
+from src.tokenizers.descriptor_schema import SOURCE_LIGAND_IDX  # noqa: E402
 from src.tokenizers.ligand import parse_sdf  # noqa: E402
 from src.tokenizers.lm_vocab import (  # noqa: E402
-    BOS_ID,
     L_CLOSE_ID,
-    L_OPEN_ID,
-    P_CLOSE_ID,
-    P_OPEN_ID,
     PAD_ID,
+    AtomLMVocab,
     LMVocab,
 )
 from src.tokenizers.protein import (  # noqa: E402
@@ -169,6 +204,185 @@ def _pocket_context(receptor_path: Path, ref_mol: dict, frame: tuple) -> tuple |
     return pkt_canon, pocket_feats_from_descriptor(prot_desc)
 
 
+def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
+    """Load the LM + VQ-VAE(s) for the selected tokenizer path and return the
+    pieces the sampling loop needs.
+
+    Returns ``(model, vocab, code_lo, code_hi, code_base, encode_pocket,
+    decode_codes)`` where ``encode_pocket(rec_path, mol)`` yields
+    ``(protein_codes, frame, ref_coords, ref_elems)`` and
+    ``decode_codes(codes, frame, refiner, pocket_ctx)`` yields
+    ``(coords, elements)``. The three branches mirror
+    ``generate_ligands_3d.py``'s ``main`` exactly.
+    """
+    vqvae_ckpt = (
+        args.vqvae_ckpt
+        if Path(args.vqvae_ckpt).is_absolute()
+        else PROJECT_ROOT / args.vqvae_ckpt
+    )
+    pocket_config = PocketExtractionConfig()
+    receptor_cache: dict[str, tuple] = {}
+
+    if args.separate_protein_ckpt is not None:
+        # ABLATION separate-tokenizers mode: pocket encoded by a protein-only VQ,
+        # ligand decoded by a ligand-only VQ, unified into one combined code space
+        # (protein codes [0, Pc), ligand codes [Pc, 2*Pc)) by SeparateVQVAE. The
+        # LM is the separate LM trained over an AtomLMVocab of 2*codebook-size.
+        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+
+        separate_vqvae = SeparateVQVAE.from_checkpoints(
+            args.separate_protein_ckpt,
+            args.separate_protein_norm,
+            args.separate_ligand_ckpt,
+            args.separate_ligand_norm,
+            device,
+            codebook_size=args.codebook_size,
+        )
+        combined_codebook_size = 2 * args.codebook_size
+        model = load_atom_lm(args.lm_ckpt, combined_codebook_size, device, split=False)
+        protein_norm = load_atom_norm_stats(args.separate_protein_norm, device)
+        ligand_norm = separate_vqvae.ligand_norm_stats
+        vocab = AtomLMVocab(codebook_size=combined_codebook_size)
+        code_lo = vocab.offset + args.codebook_size
+        code_hi = vocab.offset + vocab.codebook_size
+        code_base = vocab.offset
+        prot_atom_desc = ProteinAtomDescriptor()
+
+        def encode_pocket(rec_path, mol):  # noqa: ANN001, ANN202
+            return _pocket_codes_atom(
+                rec_path,
+                mol,
+                pocket_config,
+                prot_atom_desc,
+                separate_vqvae.protein,
+                protein_norm,
+                device,
+                receptor_cache=receptor_cache,
+            )
+
+        def decode_codes(codes, frame, refiner=None, pocket_ctx=None):  # noqa: ANN001, ANN202
+            return _decode_ligand_atom(
+                codes,
+                separate_vqvae,
+                ligand_norm,
+                frame,
+                device,
+                source_idx=None,
+                refiner=refiner,
+                pocket_ctx=pocket_ctx,
+            )
+
+    elif args.all_atom or args.split_codebook:
+        split = args.split_codebook
+        atom_vqvae = load_atom_vqvae(
+            vqvae_ckpt,
+            args.codebook_size,
+            device,
+            split=split,
+            ligand_codebook_size=args.ligand_codebook_size,
+        )
+        model = load_atom_lm(
+            args.lm_ckpt,
+            args.codebook_size,
+            device,
+            split=split,
+            ligand_codebook_size=args.ligand_codebook_size,
+        )
+        norm_stats = load_atom_norm_stats(args.norm_stats, device)
+        if split:
+            vocab = LMVocab(
+                protein_codebook_size=args.codebook_size,
+                ligand_codebook_size=args.ligand_codebook_size,
+            )
+            code_lo, code_hi = (
+                vocab.ligand_offset,
+                vocab.ligand_offset + vocab.ligand_codebook_size,
+            )
+            dec_source = SOURCE_LIGAND_IDX
+        else:
+            vocab = AtomLMVocab(codebook_size=args.codebook_size)
+            code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
+            dec_source = None
+        code_base = code_lo
+        prot_atom_desc = ProteinAtomDescriptor()
+
+        def encode_pocket(rec_path, mol):  # noqa: ANN001, ANN202
+            return _pocket_codes_atom(
+                rec_path,
+                mol,
+                pocket_config,
+                prot_atom_desc,
+                atom_vqvae,
+                norm_stats,
+                device,
+                receptor_cache=receptor_cache,
+            )
+
+        def decode_codes(codes, frame, refiner=None, pocket_ctx=None):  # noqa: ANN001, ANN202
+            return _decode_ligand_atom(
+                codes,
+                atom_vqvae,
+                norm_stats,
+                frame,
+                device,
+                source_idx=dec_source,
+                refiner=refiner,
+                pocket_ctx=pocket_ctx,
+            )
+
+    else:
+        vqvae = (
+            VQVAEModule.load_from_checkpoint(str(vqvae_ckpt), map_location=device)
+            .eval()
+            .to(device)
+        )
+        model = (
+            LigandLMModule.load_from_checkpoint(
+                args.lm_ckpt, config=LMTrainingConfig(), map_location=device
+            )
+            .eval()
+            .to(device)
+            .model
+        )
+        dm = ComplexDescriptorDataModule(
+            VQVAETrainingConfig(), CrossDockedConfig(data_dir=PROJECT_ROOT / "data")
+        )
+        dm.cache_dir = args.cache_dir
+        dm.setup()
+        norm_stats = {k: v.to(device) for k, v in dm.norm_stats.items()}
+        vocab = LMVocab()
+        code_lo, code_hi = (
+            vocab.ligand_offset,
+            vocab.ligand_offset + vocab.ligand_codebook_size,
+        )
+        code_base = code_lo
+        protein_desc_calc = BackboneSphericalDescriptor()
+
+        def encode_pocket(rec_path, mol):  # noqa: ANN001, ANN202
+            return _pocket_codes(
+                rec_path,
+                mol,
+                pocket_config,
+                protein_desc_calc,
+                vqvae.protein_vqvae,
+                norm_stats,
+                device,
+            )
+
+        def decode_codes(codes, frame, refiner=None, pocket_ctx=None):  # noqa: ANN001, ANN202
+            return _decode_ligand(
+                codes,
+                vqvae.ligand_vqvae,
+                norm_stats,
+                frame,
+                device,
+                refiner=refiner,
+                pocket_ctx=pocket_ctx,
+            )
+
+    return model, vocab, code_lo, code_hi, code_base, encode_pocket, decode_codes
+
+
 @torch.no_grad()
 def main() -> None:  # noqa: C901, PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
@@ -192,6 +406,29 @@ def main() -> None:  # noqa: C901, PLR0915
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-new-tokens", type=int, default=160)
+    parser.add_argument(
+        "--min-atoms-abs",
+        type=int,
+        default=0,
+        help="Absolute floor on the generated heavy-atom count, combined with "
+        "--min-atoms-frac as max(frac * n_ref, abs). Reference-tied sizing alone "
+        "loses affinity on small-reference pockets: the baselines regress ligand "
+        "size toward their own corpus mean (DiffSBDD averages 20.9 heavy atoms "
+        "and runs 1.48x the reference on the smallest-reference third of the "
+        "CrossDocked test set), while this LM's length tracks the reference "
+        "almost deterministically. This floor matches that behaviour.",
+    )
+    parser.add_argument(
+        "--min-atoms-frac",
+        type=float,
+        default=0.0,
+        help="Condition the generated ligand LENGTH on the reference ligand: "
+        "suppress the </l> stop token until at least round(frac * n_ref_heavy) "
+        "ligand codes have been emitted. One ligand token decodes to exactly one "
+        "heavy atom, so this is a per-target minimum heavy-atom count -- the same "
+        "kind of size conditioning TargetDiff/DiffSBDD apply by sampling N from a "
+        "pocket-conditioned distribution. 0 disables it (unconstrained length).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--refine-ckpt",
@@ -201,63 +438,76 @@ def main() -> None:  # noqa: C901, PLR0915
         "refined by the E(3)-equivariant pose refiner before bond inference "
         "(removes clashes/strain from the raw pose). Default off = unchanged.",
     )
+    # --- tokenizer-path flags (mirror scripts/generate_ligands_3d.py) ---
+    parser.add_argument(
+        "--all-atom",
+        action="store_true",
+        help="Use the unified single-codebook all-atom tokenizer (AtomLMVocab + "
+        "AtomVQVAEModule) instead of the legacy protein+ligand 2-codebook path.",
+    )
+    parser.add_argument(
+        "--split-codebook",
+        action="store_true",
+        help="All-atom VQ with SPLIT codebooks (protein + ligand books, one "
+        "shared descriptor/encoder/decoder) -> 2-range LMVocab. Implies all-atom.",
+    )
+    parser.add_argument("--codebook-size", type=int, default=8192)
+    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
+    parser.add_argument(
+        "--separate-protein-ckpt",
+        type=Path,
+        default=None,
+        help="ABLATION separate-tokenizers mode: protein-only VQ ckpt. When set "
+        "(with the other --separate-* flags), decode uses a SeparateVQVAE over a "
+        "combined 2*codebook-size code space and the LM must be the separate LM "
+        "(AtomLMVocab sized 2*codebook-size). Implies the all-atom encode path.",
+    )
+    parser.add_argument("--separate-protein-norm", type=Path, default=None)
+    parser.add_argument("--separate-ligand-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-ligand-norm", type=Path, default=None)
+    parser.add_argument(
+        "--norm-stats",
+        type=Path,
+        default=PROJECT_ROOT
+        / "data"
+        / "descriptor_cache_allatom"
+        / "normalization_stats.pt",
+        help="All-atom normalization stats (.pt with atom_mean/atom_std).",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    vocab = LMVocab()
-    lig_lo = vocab.ligand_offset
 
-    # ---- models ----
-    vqvae_ckpt = (
-        args.vqvae_ckpt
-        if Path(args.vqvae_ckpt).is_absolute()
-        else PROJECT_ROOT / args.vqvae_ckpt
-    )
-    vqvae = (
-        VQVAEModule.load_from_checkpoint(str(vqvae_ckpt), map_location=device)
-        .eval()
-        .to(device)
-    )
-    lm = (
-        LigandLMModule.load_from_checkpoint(
-            args.lm_ckpt, config=LMTrainingConfig(), map_location=device
-        )
-        .eval()
-        .to(device)
-    )
-    model = lm.model
+    # ---- models + tokenizer setup (legacy / all-atom / separate) ----
+    (
+        model,
+        vocab,
+        code_lo,
+        code_hi,
+        code_base,
+        encode_pocket,
+        decode_codes,
+    ) = _build_generator(args, device)
 
-    # ---- normalization stats (identical path to the validated 3D script) ----
-    dm = ComplexDescriptorDataModule(
-        VQVAETrainingConfig(), CrossDockedConfig(data_dir=PROJECT_ROOT / "data")
-    )
-    dm.cache_dir = args.cache_dir
-    dm.setup()
-    norm_stats = {k: v.to(device) for k, v in dm.norm_stats.items()}
+    def build_prompt(prot_codes: list[int]) -> list[int]:
+        # build_sequence(prot, [])[:-2] drops the trailing </l><eos>, leaving
+        # <bos><p> prot </p><l>; identical for LMVocab and AtomLMVocab.
+        return vocab.build_sequence(prot_codes, [])[:-2]
 
     # ---- pocket conditioning from the target ----
     mols = parse_sdf(args.ref_ligand)
     if not mols:
         msg = f"Could not parse reference ligand {args.ref_ligand}"
         raise SystemExit(msg)
-    res = _pocket_codes(
-        args.receptor,
-        mols[0],
-        PocketExtractionConfig(),
-        BackboneSphericalDescriptor(),
-        vqvae.protein_vqvae,
-        norm_stats,
-        device,
-    )
+    res = encode_pocket(args.receptor, mols[0])
     if res is None:
         msg = "Pocket extraction failed for the target."
         raise SystemExit(msg)
     prot_codes, frame, ref_coords, ref_elems = res
     logger.info(
-        "Pocket: %d residues -> %d protein codes | reference ligand %d atoms",
-        len(prot_codes),
+        "Pocket: %d protein codes | reference ligand %d atoms",
         len(prot_codes),
         len(ref_elems),
     )
@@ -286,13 +536,7 @@ def main() -> None:  # noqa: C901, PLR0915
                 "Pose refiner loaded (%d pocket atoms).", pocket_ctx[0].shape[0]
             )
 
-    prompt = [
-        BOS_ID,
-        P_OPEN_ID,
-        *(vocab.protein_offset + c for c in prot_codes),
-        P_CLOSE_ID,
-        L_OPEN_ID,
-    ]
+    prompt = build_prompt(prot_codes)
     prompt_t = torch.tensor([prompt], device=device)
     prompt_len = len(prompt)
 
@@ -346,6 +590,25 @@ def main() -> None:  # noqa: C901, PLR0915
         )
 
     # Reference ligand as positive control (idx = -1).
+    # Reference-conditioned minimum ligand length (see --min-atoms-frac). The LM
+    # under-generates size relative to the crystal ligand, and Vina is not
+    # size-normalised, so an unconstrained length systematically loses affinity.
+    min_new_tokens = max(
+        int(round(args.min_atoms_frac * len(ref_elems)))
+        if args.min_atoms_frac > 0
+        else 0,
+        args.min_atoms_abs,
+    )
+    min_new_tokens = min(min_new_tokens, args.max_new_tokens - 1)
+    if min_new_tokens > 0:
+        logger.info(
+            "min_new_tokens=%d (max of %.2f x %d reference heavy atoms, abs %d)",
+            min_new_tokens,
+            args.min_atoms_frac,
+            len(ref_elems),
+            args.min_atoms_abs,
+        )
+
     ref_bonds = infer_bonds(ref_elems, ref_coords)
     emit(-1, ref_elems, ref_coords, ref_bonds, terminated=True, n_codes=0)
 
@@ -366,6 +629,7 @@ def main() -> None:  # noqa: C901, PLR0915
             temperature=args.temperature,
             top_p=args.top_p,
             max_new_tokens=args.max_new_tokens,
+            min_new_tokens=min_new_tokens,
             eos_token_id=L_CLOSE_ID,
             pad_token_id=PAD_ID,
         )
@@ -375,11 +639,7 @@ def main() -> None:  # noqa: C901, PLR0915
             lig_tok = (
                 out_tokens[: out_tokens.index(L_CLOSE_ID)] if terminated else out_tokens
             )
-            codes = [
-                t - lig_lo
-                for t in lig_tok
-                if lig_lo <= t < lig_lo + vocab.ligand_codebook_size
-            ]
+            codes = [t - code_base for t in lig_tok if code_lo <= t < code_hi]
             idx = produced
             produced += 1
             terminated_count += int(terminated)
@@ -398,14 +658,8 @@ def main() -> None:  # noqa: C901, PLR0915
                     }
                 )
                 continue
-            coords, elems = _decode_ligand(
-                codes,
-                vqvae.ligand_vqvae,
-                norm_stats,
-                frame,
-                device,
-                refiner=refiner,
-                pocket_ctx=pocket_ctx,
+            coords, elems = decode_codes(
+                codes, frame, refiner=refiner, pocket_ctx=pocket_ctx
             )
             bonds = infer_bonds(elems, coords)
             emit(idx, elems, coords, bonds, terminated=terminated, n_codes=len(codes))

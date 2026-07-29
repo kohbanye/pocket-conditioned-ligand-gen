@@ -57,6 +57,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser.add_argument("--online-rigid-prob", type=float, default=None)
     parser.add_argument("--precision", type=str, default=None)
     parser.add_argument("--early-stop-patience", type=int, default=0)
+    parser.add_argument(
+        "--init-from",
+        type=str,
+        default=None,
+        help="Warm-start the network weights from this checkpoint. Only the "
+        "net state is copied, so the optimiser and LR schedule restart -- this "
+        "is for fine-tuning an existing refiner on a NEW teacher, not for "
+        "resuming an interrupted run.",
+    )
     parser.add_argument("--fast-dev-run", action="store_true")
     args = parser.parse_args()
 
@@ -131,6 +140,11 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     dm = PoseRefineDataModule(config)
     module = PoseRefinerModule(config)
+    if args.init_from:
+        state = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        sd = state.get("state_dict", state)
+        missing, unexpected = module.load_state_dict(sd, strict=False)
+        print(f"[warm-start] {args.init_from}: missing={len(missing)} unexpected={len(unexpected)}")
 
     trainer = L.Trainer(
         max_epochs=config.max_epochs,

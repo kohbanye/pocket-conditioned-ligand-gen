@@ -101,7 +101,9 @@ def _load_shard_pair_map(  # noqa: PLR0913
 
 
 def _process_atom_tar_shard(  # noqa: C901, PLR0915
-    args: tuple[int, Path, Path, Path, list[str], dict, Path, int | None, bool, bool],
+    args: tuple[
+        int, Path, Path, Path, list[str], dict, Path, int | None, bool, bool, str
+    ],
 ) -> tuple[list[str], list[int], set[str], int]:
     """Stream one ligand tar, compute all-atom descriptors, write shard parts."""
     from src.config import PocketExtractionConfig  # noqa: PLC0415
@@ -117,6 +119,7 @@ def _process_atom_tar_shard(  # noqa: C901, PLR0915
         max_files,
         good_poses_only,
         min_only,
+        ligand_frame,
     ) = args
     pocket_cfg = PocketExtractionConfig(**pocket_cfg_dict)
     protein_desc = ProteinAtomDescriptor()
@@ -192,7 +195,13 @@ def _process_atom_tar_shard(  # noqa: C901, PLR0915
                 attempted += 1
                 try:
                     result = _atom_process_pose(
-                        mol, precomputed, feats, pocket_cfg, protein_desc, ligand_desc
+                        mol,
+                        precomputed,
+                        feats,
+                        pocket_cfg,
+                        protein_desc,
+                        ligand_desc,
+                        ligand_frame,
                     )
                 except Exception:
                     logger.exception(
@@ -231,8 +240,13 @@ def prepare_atom_descriptors_from_tars(  # noqa: PLR0913
     min_only: bool = True,
     max_files_per_tar: int | None = None,
     shard_ids: list[int] | None = None,
+    ligand_frame: str = "pocket",
 ) -> tuple[int, list[int]]:
-    """Build the all-atom descriptor shard cache by streaming ligand tars."""
+    """Build the all-atom descriptor shard cache by streaming ligand tars.
+
+    ``ligand_frame`` is forwarded to :func:`_atom_process_pose`; use ``"local"``
+    to build the single-modality-ligand ablation cache.
+    """
     import multiprocessing  # noqa: PLC0415
 
     import pyarrow.parquet as pq  # noqa: PLC0415
@@ -248,11 +262,13 @@ def prepare_atom_descriptors_from_tars(  # noqa: PLR0913
         wanted = set(shard_ids)
         shard_indices = [s for s in shard_indices if s in wanted]
     logger.info(
-        "Streaming %d ligand tars (source_types=%s, good_poses_only=%s, min_only=%s)",
+        "Streaming %d ligand tars "
+        "(source_types=%s, good_poses_only=%s, min_only=%s, ligand_frame=%s)",
         len(shard_indices),
         source_types,
         good_poses_only,
         min_only,
+        ligand_frame,
     )
 
     pocket_cfg_dict = asdict(pocket_config)
@@ -268,6 +284,7 @@ def prepare_atom_descriptors_from_tars(  # noqa: PLR0913
             max_files_per_tar,
             good_poses_only,
             min_only,
+            ligand_frame,
         )
         for si in shard_indices
     ]

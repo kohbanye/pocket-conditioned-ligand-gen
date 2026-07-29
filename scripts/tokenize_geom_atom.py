@@ -109,16 +109,25 @@ class _Tokenizer:
             self.flush(split)
 
 
-def main() -> None:  # noqa: C901, PLR0915
+def main() -> None:  # noqa: C901, PLR0915, PLR0912
     parser = argparse.ArgumentParser()
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--geom-tar", type=Path, default=None)
     src.add_argument("--geom-root", type=Path, default=None)
-    parser.add_argument("--ckpt", type=Path, required=True, help="Atom VQ-VAE ckpt.")
+    parser.add_argument(
+        "--ckpt",
+        type=Path,
+        default=None,
+        help="Atom VQ-VAE ckpt (joint). Omit when using --separate-*-ckpt.",
+    )
+    parser.add_argument("--separate-protein-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-protein-norm", type=Path, default=None)
+    parser.add_argument("--separate-ligand-ckpt", type=Path, default=None)
+    parser.add_argument("--separate-ligand-norm", type=Path, default=None)
     parser.add_argument(
         "--norm-stats",
         type=Path,
-        required=True,
+        default=None,
         help="Atom VQ-VAE training normalization stats (.pt).",
     )
     parser.add_argument(
@@ -144,6 +153,18 @@ def main() -> None:  # noqa: C901, PLR0915
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--max-mols", type=int, default=None, help="Debug subset.")
     parser.add_argument(
+        "--num-partitions",
+        type=int,
+        default=1,
+        help="Split the (deterministically-ordered) conformer stream into this "
+        "many disjoint partitions and keep only conformers whose stream index "
+        "conf_idx %% num_partitions == partition_index. Run one job per index and "
+        "concatenate the partial caches (build_mixed_pretrain_cache.py). The "
+        "molecule->split assignment is derived from the SMILES + seed identically "
+        "in every partition, so partial corpora concatenate without leakage.",
+    )
+    parser.add_argument("--partition-index", type=int, default=0)
+    parser.add_argument(
         "--splits", type=str, nargs="+", default=["train", "val", "test"]
     )
     args = parser.parse_args()
@@ -156,23 +177,48 @@ def main() -> None:  # noqa: C901, PLR0915
     if args.split_codebook:
         config.atom.split_codebook = True
         config.atom.ligand_codebook_size = args.ligand_codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.ckpt, config=config, map_location=device
-    )
-    module.eval()
-    module.to(device)
-    norm_stats = torch.load(args.norm_stats, weights_only=False)
-    module.vqvae.set_normalization(norm_stats["atom_mean"], norm_stats["atom_std"])
-    mean = norm_stats["atom_mean"].numpy()
-    std = norm_stats["atom_std"].numpy()
+    if args.separate_protein_ckpt is not None:
+        # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
+        # unified into one code space. Feed RAW descriptors (identity external
+        # norm) -- SeparateVQVAE normalizes per modality internally. GEOM is
+        # ligand-only, so tokens land in the ligand half of the 2*codebook_size
+        # combined single-range AtomLMVocab.
+        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+            ATOM_DESCRIPTOR_DIM,
+        )
+        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
-    if args.split_codebook:
-        vocab: AtomLMVocab | LMVocab = LMVocab(
-            protein_codebook_size=args.codebook_size,
-            ligand_codebook_size=args.ligand_codebook_size,
+        module = SeparateVQVAE.from_checkpoints(
+            args.separate_protein_ckpt,
+            args.separate_protein_norm,
+            args.separate_ligand_ckpt,
+            args.separate_ligand_norm,
+            device,
+            codebook_size=args.codebook_size,
+        )
+        mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+        std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+        vocab: AtomLMVocab | LMVocab = AtomLMVocab(
+            codebook_size=2 * args.codebook_size
         )
     else:
-        vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        module = AtomVQVAEModule.load_from_checkpoint(
+            args.ckpt, config=config, map_location=device
+        )
+        module.eval()
+        module.to(device)
+        norm_stats = torch.load(args.norm_stats, weights_only=False)
+        module.vqvae.set_normalization(norm_stats["atom_mean"], norm_stats["atom_std"])
+        mean = norm_stats["atom_mean"].numpy()
+        std = norm_stats["atom_std"].numpy()
+
+        if args.split_codebook:
+            vocab = LMVocab(
+                protein_codebook_size=args.codebook_size,
+                ligand_codebook_size=args.ligand_codebook_size,
+            )
+        else:
+            vocab = AtomLMVocab(codebook_size=args.codebook_size)
     wanted = set(args.splits)
 
     from tqdm import tqdm  # noqa: PLC0415
@@ -211,7 +257,16 @@ def main() -> None:  # noqa: C901, PLR0915
 
     n_confs = 0
     n_skipped = 0
-    for split, mol in tqdm(_mol_source(), desc="geom-confs", unit="conf"):
+    for conf_idx, (split, mol) in enumerate(
+        tqdm(_mol_source(), desc="geom-confs", unit="conf")
+    ):
+        # Deterministic, non-overlapping partition of the raw conformer stream
+        # (mirrors the shard_idx %% num_partitions filter of tokenize_dataset_atom).
+        if (
+            args.num_partitions > 1
+            and conf_idx % args.num_partitions != args.partition_index
+        ):
+            continue
         if split not in wanted:
             continue
         atoms = mol["atoms"]
@@ -244,6 +299,8 @@ def main() -> None:  # noqa: C901, PLR0915
             "conformers_skipped": n_skipped,
             "seed": args.seed,
             "ligand_only": True,
+            "num_partitions": args.num_partitions,
+            "partition_index": args.partition_index,
         },
         "splits": {},
     }
@@ -254,8 +311,15 @@ def main() -> None:  # noqa: C901, PLR0915
         meta["protein_offset"] = vocab.protein_offset
         meta["ligand_offset"] = vocab.ligand_offset
     else:
-        meta["atom_codebook_size"] = args.codebook_size
+        # Separate-tokenizers mode doubles the code space (protein then ligand).
+        meta["atom_codebook_size"] = (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        )
         meta["atom_offset"] = vocab.offset
+        if args.separate_protein_ckpt is not None:
+            meta["separate_tokenizers"] = True
     for split, writer in writers.items():
         writer.close()
         meta["splits"][split] = {

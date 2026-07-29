@@ -115,8 +115,12 @@ def _parse_affinity_sites(
 
 def main() -> None:  # noqa: C901, PLR0912, PLR0915
     p = argparse.ArgumentParser()
-    p.add_argument("--ckpt", type=Path, required=True)
-    p.add_argument("--norm-stats", type=Path, required=True)
+    p.add_argument("--ckpt", type=Path, default=None)
+    p.add_argument("--separate-protein-ckpt", type=Path, default=None)
+    p.add_argument("--separate-protein-norm", type=Path, default=None)
+    p.add_argument("--separate-ligand-ckpt", type=Path, default=None)
+    p.add_argument("--separate-ligand-norm", type=Path, default=None)
+    p.add_argument("--norm-stats", type=Path, default=None)
     p.add_argument("--biolip-dir", type=Path, default=Path("data/biolip"))
     p.add_argument(
         "--cd-manifest", type=Path, default=Path("data/hub_cache/repo/manifest.parquet")
@@ -149,17 +153,44 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     cfg = AtomVQVAETrainingConfig()
     cfg.atom.codebook_size = args.codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.ckpt, config=cfg, map_location=device
-    )
-    module.eval().to(device)
-    norm = torch.load(args.norm_stats, weights_only=False)
-    module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
+    if args.separate_protein_ckpt is not None:
+        # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
+        # unified into one code space. Feed RAW descriptors (identity external
+        # norm) via _PoseEncoder -- SeparateVQVAE normalizes per modality
+        # internally. Combined single-range AtomLMVocab over 2*codebook_size
+        # codes. _PoseEncoder encodes pocket + ligand in separate (single-
+        # modality) encode_batch calls, which SeparateVQVAE requires.
+        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+            ATOM_DESCRIPTOR_DIM,
+        )
+        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+
+        module = SeparateVQVAE.from_checkpoints(
+            args.separate_protein_ckpt,
+            args.separate_protein_norm,
+            args.separate_ligand_ckpt,
+            args.separate_ligand_norm,
+            device,
+            codebook_size=args.codebook_size,
+        )
+        mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+        std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+        vocab = AtomLMVocab(codebook_size=2 * args.codebook_size)
+    else:
+        module = AtomVQVAEModule.load_from_checkpoint(
+            args.ckpt, config=cfg, map_location=device
+        )
+        module.eval().to(device)
+        norm = torch.load(args.norm_stats, weights_only=False)
+        module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
+        mean = norm["atom_mean"].numpy()
+        std = norm["atom_std"].numpy()
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
     enc = _PoseEncoder(
         module,
-        norm["atom_mean"].numpy(),
-        norm["atom_std"].numpy(),
-        AtomLMVocab(codebook_size=args.codebook_size),
+        mean,
+        std,
+        vocab,
         device,
         PocketExtractionConfig(max_residues=args.max_residues),
     )
@@ -279,8 +310,13 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 continue
 
     meta = {
-        "vocab_size": AtomLMVocab(codebook_size=args.codebook_size).vocab_size,
-        "atom_codebook_size": args.codebook_size,
+        "vocab_size": vocab.vocab_size,
+        # Separate-tokenizers mode doubles the code space (protein then ligand).
+        "atom_codebook_size": (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        ),
         "source": "biolip2_affinity_pk",
         "label": "pK (-log10 molar)",
         "n_complexes": n_ok,
@@ -288,6 +324,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         "val_docs": writers["val"].num_docs,
         "max_len": max(writers["train"].max_len, writers["val"].max_len),
     }
+    if args.separate_protein_ckpt is not None:
+        meta["separate_tokenizers"] = True
     for w in writers.values():
         w.close()
     for split, gl in gids_out.items():
