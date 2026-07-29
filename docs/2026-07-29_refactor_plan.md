@@ -183,16 +183,36 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
   | 追跡ファイル | 207 |
   | src+scripts+notebooks 行数 | 29,908 |
 
-### Phase 1 — モノレポ統合 (1 日)
-- **先に各ベンチをコミット**する。特に plbench の未コミット 50 件 (論文 Table 1 の実装) と
-  sbdd-bench の submodule 更新。ここを取りこぼすと論文の行が復元できなくなる。
-- `git subtree add --prefix=benchmarks/<name> <path> <branch>` で履歴ごと取り込む
-  (plbench / sbddbench / ctbench の 3 本。affinity-prediction-bench は対象外)。
-- 各ベンチの `third_party/pocket-conditioned-ligand-gen` **自己 submodule を除去**。
-- `third_party/` をトップレベルに 1 つへ統合 (DiffSBDD, targetdiff, DiffGui, esm, FoldToken_open, token-mol)。
-- `pyproject.toml` を統合: base 依存 + `bench-recon` / `bench-gen` / `bench-rescore` の extras。
-- ⚠️ 追跡済み結果ファイルが計 ~220 MB (sbdd-bench 117M / ctbench 56M / plbench 44M)。
-  取り込む前に「巨大 parquet を残すか、集計 CSV だけにするか」を決める。
+### Phase 1 — モノレポ統合 ✅ 完了 (2026-07-30)
+作業ブランチ `refactor/monorepo`。
+
+- 3 ベンチを **履歴ごと** `benchmarks/{plbench,sbddbench,ctbench}/` へ取り込み
+  (`git subtree` は未インストールだったので `merge -s ours --allow-unrelated-histories`
+  + `read-tree --prefix` の等価手順)。各ベンチの元コミットが祖先として辿れることを確認済み。
+- **`third_party/` をトップレベルに統合** — 8 本 (bio2token / ConfSeq / DiffGui / DiffSBDD /
+  esm / FoldToken_open / targetdiff / token-mol) を元と同じ commit で pin。
+  git はトップレベルの `.gitmodules` しか読まないので、ネストした gitlink は取り込んだ時点で
+  死んでいた。**自己 submodule 2 本は削除**し、両ベンチの `paths.py` に `MONOREPO_ROOT` を
+  導入して `THIRD_PARTY` / `OWN_MODEL_REPO` を張り替え。
+- `patches/` と `scripts/apply_patches.sh` をルートへ (submodule の隣が正しい位置)。
+- **依存は uv workspace 化** (member = sbddbench + ctbench、lock 1 本)。ctbench は
+  `sys.path` 注入をやめてモデルライブラリを workspace パッケージとして依存。
+- **plbench だけ workspace から除外**。ESM3 を in-process で動かす都合上
+  fork 版 transformers (`Biohub/transformers@ef32577`) を要求し、workspace は 1 パッケージ
+  1 バージョンなので**モデル側の transformers 5.x を巻き戻してしまう**。plbench は
+  FoldToken / Bio2Token 用の専用 venv と同じ扱いで単独プロジェクトのまま。
+- 副産物のバグ修正 2 件:
+  - ルートの `[tool.setuptools.packages.find]` が無制限で `data/` `outputs/` `wandb/` を
+    走査していた (ctbench が「インストールが固まる」と回避策を書いていた真因) → `include = ["src*"]`。
+  - `posebusters` が `scripts/eval_posebusters.py` から使われているのに未宣言だった → 依存に追加。
+    ついでに transformers 5.9.0 → 5.14.1。
+
+**回帰確認**: モデル側 66 tests **全 pass**。ctbench は **26 passed / 2 failed** で
+統合前と同一 — 2 件は `test_reproduce_generation.py` が **DiffGui を含む旧 3 ベースライン表**を
+検証したままの既存不具合 (論文 Table 3 は DiffSBDD / TargetDiff の 2 本に変更済み)。
+統合起因ではないことを元リポジトリで実行して確認済み。**Table 3 確定時に Phase 5 で修正する**。
+
+結果ファイルは合計 ~220 MB のまま取り込んだ (巨大 parquet の間引きは Phase 5 で判断)。
 
 ### Phase 2 — トークナイザ世代の整理 (1.5 日)
 **残すのは joint all-atom と separate の 2 つだけ。** legacy 2-codebook と split-codebook を削除。
