@@ -1,7 +1,7 @@
 [project]
-name = "ml-project-boilerplate"
+name = "complex-tokenizer-bench"
 version = "0.1.0"
-description = "Add your description here"
+description = "Evaluation & ablation benchmark for the protein-ligand complex tokenizer."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -11,18 +11,46 @@ dependencies = [
     "matplotlib>=3.10.7",
     "numpy>=2.3.5",
     "pandas>=2.3.3",
+    "pyarrow>=18.0.0",
     "pytest>=9.0.1",
+    "rdkit",
     "scikit-learn>=1.7.2",
+    "scipy>=1.14",
     "seaborn>=0.13.2",
     "torch>=2.9.1",
     "torchmetrics>=1.8.2",
     "tqdm>=4.67.1",
     "wandb>=0.23.0",
+    # Runtime deps of the source repo's library layer (`src.*`), which we import
+    # to run inference. The source repo itself is NOT a build dependency: its
+    # setuptools packaging scans its huge data/wandb/outputs trees and hangs
+    # metadata generation, so we put it on sys.path at runtime instead (see
+    # ctbench/inference/__init__.py::ensure_source_repo_importable) and declare
+    # its heavy transitive deps here so `import src.*` resolves.
+    "biopython>=1.84",
+    "e3nn>=0.6.0",
+    "huggingface-hub>=0.25.0",
+    "transformers>=4.51",
 ]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ctbench*"]
+
+[tool.ty.environment]
+# Resolve `import src.*` from the sibling source repo without installing it.
+extra-paths = ["../pocket-conditioned-ligand-gen"]
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D", "N812"]
+ignore = ["D", "N812", "COM812"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*.py" = ["INP001"]
+"tests/*.py" = ["S101", "PLR2004", "INP001"]
 
 [dependency-groups]
 dev = [

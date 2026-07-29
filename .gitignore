@@ -209,3 +209,14 @@ __marimo__/
 lightning_logs/
 data
 wandb
+
+# complex-tokenizer-bench: keep small seed/generated dumps (CSV/parquet) tracked,
+# but ignore regenerable tables/figures and large generated 3D molecules.
+results/tables/
+results/figures/
+results/**/sdf/
+*.png
+
+# TSUBAME job stdout/stderr dropped in the repo root by qsub -cwd
+*.o[0-9]*
+*.e[0-9]*
