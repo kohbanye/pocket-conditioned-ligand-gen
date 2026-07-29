@@ -1,0 +1,5 @@
+model,modality,eval_scope,n,rmsd,kabsch_rmsd,tm_score,lddt,lddt_pli,contact_f1,clash_lig_atom_frac,iface_lig_rmsd,pb_valid,pb_valid_ref,bond_mae,bond_max,angle_mae,angle_max,n_tokens,n_atoms,bits_per_atom,pose_bits,total_bits
+own_allatom.localframe_1tok,complex,native,303,1.44 ± 0.36,1.38 ± 0.34,—,—,0.49 ± 0.10,0.18 ± 0.10,0.57 ± 0.21,4.05 ± 1.04,—,—,—,—,—,—,273.0,273.0,13.0,13.0,3562.04
+own_allatom.localframe_1tok,ligand,native,303,4.05 ± 1.03,0.22 ± 0.10,—,—,—,—,—,—,0.61 ± 0.49,0.99 ± 0.08,0.09 ± 0.05,0.38 ± 0.44,7.12 ± 3.48,25.77 ± 14.27,27.47,27.47,13.0,13.0,370.14
+own_allatom.localframe_1tok,protein_allatom,native,303,0.67 ± 0.16,0.66 ± 0.16,—,0.91 ± 0.04,—,—,—,—,—,—,—,—,—,—,245.53,245.53,13.0,13.0,3204.91
+own_allatom.localframe_1tok,protein_backbone,native,303,0.64 ± 0.17,0.58 ± 0.15,0.81 ± 0.11,0.93 ± 0.03,—,—,—,—,—,—,—,—,—,—,245.53,29.25,13.0,13.0,3204.91
