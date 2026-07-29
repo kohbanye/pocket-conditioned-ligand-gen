@@ -10,6 +10,7 @@ resolution-markers = [
 members = [
     "complex-tokenizer-bench",
     "pocket-conditioned-ligand-gen",
+    "prolit-bench-common",
     "sbdd-bench",
 ]
 
@@ -278,6 +279,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "pocket-conditioned-ligand-gen" },
+    { name = "prolit-bench-common" },
     { name = "pyarrow" },
     { name = "pytest" },
     { name = "rdkit" },
@@ -305,6 +307,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "pandas", specifier = ">=2.3.3" },
     { name = "pocket-conditioned-ligand-gen", editable = "." },
+    { name = "prolit-bench-common", editable = "benchmarks/common" },
     { name = "pyarrow", specifier = ">=18.0.0" },
     { name = "pytest", specifier = ">=9.0.1" },
     { name = "rdkit" },
@@ -1684,6 +1687,35 @@ wheels = [
 ]
 
 [[package]]
+name = "prolit-bench-common"
+version = "0.1.0"
+source = { editable = "benchmarks/common" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "scipy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "pandas", specifier = ">=2.2" },
+    { name = "scipy", specifier = ">=1.13" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
 name = "prompt-toolkit"
 version = "3.0.53"
 source = { registry = "https://pypi.org/simple" }
@@ -2146,6 +2178,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pandas" },
     { name = "posebusters" },
+    { name = "prolit-bench-common" },
     { name = "py3dmol" },
     { name = "pyarrow" },
     { name = "pyyaml" },
@@ -2173,6 +2206,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "posebusters", specifier = ">=0.3.1" },
+    { name = "prolit-bench-common", editable = "benchmarks/common" },
     { name = "py3dmol", specifier = ">=2.4" },
     { name = "pyarrow", specifier = ">=18.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },

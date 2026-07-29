@@ -26,10 +26,12 @@ dependencies = [
     # and `import prolit.*` resolves without the sys.path shim in
     # ctbench/inference/__init__.py::ensure_source_repo_importable.
     "pocket-conditioned-ligand-gen",
+    "prolit-bench-common",
 ]
 
 [tool.uv.sources]
 pocket-conditioned-ligand-gen = { workspace = true }
+prolit-bench-common = { workspace = true }
 
 [build-system]
 requires = ["setuptools>=61.0"]

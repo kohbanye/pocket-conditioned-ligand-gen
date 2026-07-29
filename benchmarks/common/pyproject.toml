@@ -1,0 +1,23 @@
+[project]
+name = "prolit-bench-common"
+version = "0.1.0"
+description = "Shared machinery for the ProLIT benchmarks: the tokenizer-arm registry and the significance tests."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+# Deliberately tiny. Every benchmark depends on this, including the one that
+# cannot share the main environment, so it must not pull in torch or RDKit.
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.13",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6"]

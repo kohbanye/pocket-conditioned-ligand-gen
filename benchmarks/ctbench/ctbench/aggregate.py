@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from ctbench import stats
+from prolit_bench import stats
 from ctbench.metrics import affinity as A
 from ctbench.metrics import rescoring as R
 

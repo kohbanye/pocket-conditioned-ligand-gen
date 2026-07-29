@@ -51,8 +51,15 @@ where = ["src"]
 # downgrade the model library. plbench stays a standalone uv project with its
 # own venv, which is already the pattern its FoldToken and Bio2Token adapters
 # use (.venv-foldtoken / .venv-bio2token, driven as subprocesses).
-members = ["benchmarks/sbddbench", "benchmarks/ctbench"]
+members = ["benchmarks/common", "benchmarks/sbddbench", "benchmarks/ctbench"]
 exclude = ["benchmarks/plbench"]
+
+[tool.pytest.ini_options]
+# One command covers the library, the pipelines and every in-workspace
+# benchmark. benchmarks/plbench is excluded: it has its own environment (ESM3
+# pins a conflicting transformers), so run it with its own interpreter.
+testpaths = ["tests", "benchmarks"]
+norecursedirs = ["third_party", "benchmarks/plbench", ".venv", "data", "outputs"]
 
 [tool.ruff]
 extend-exclude = ["third_party", "benchmarks/*/third_party"]

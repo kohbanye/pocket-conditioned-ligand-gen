@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
-
-from ctbench import stats
+from prolit_bench import stats
 
 
 def test_paired_ttest_detects_shift() -> None:

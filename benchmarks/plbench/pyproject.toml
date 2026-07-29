@@ -27,9 +27,12 @@ dependencies = [
     "seaborn>=0.13",
     "py3dmol>=2.4",
     "marimo>=0.23",
+    "prolit-bench-common",
 ]
 
 [tool.uv.sources]
+# Outside the workspace (see the root pyproject), so this is a plain path dep.
+prolit-bench-common = { path = "../common", editable = true }
 # ESM3 lives in this repo as a git submodule; install it editable from there so
 # the pinned commit and the importable package always match.
 esm = { path = "../../third_party/esm", editable = true }

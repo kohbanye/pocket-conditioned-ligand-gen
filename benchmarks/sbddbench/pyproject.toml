@@ -27,7 +27,11 @@ dependencies = [
     "seaborn>=0.13",
     "py3dmol>=2.4",
     "marimo>=0.23",
+    "prolit-bench-common",
 ]
+
+[tool.uv.sources]
+prolit-bench-common = { workspace = true }
 
 [dependency-groups]
 # Protein-ligand interaction fingerprints / key-residue recovery. Heavier
