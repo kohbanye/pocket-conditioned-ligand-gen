@@ -3,7 +3,7 @@ name = "sbdd-bench"
 version = "0.1.0"
 description = "Benchmark of structure-based drug design (SBDD) 3D ligand generators (DiffSBDD, TargetDiff, DiffGui, pocket-conditioned-ligand-gen) with a shared, model-agnostic evaluation suite."
 readme = "README.md"
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.12,<3.13"
 # The bench env is the *evaluator*: it never imports a generative model. Each
 # model generates in its own (heavier, mutually incompatible) env and writes a
 # plain `generated.sdf`; this env only reads those SDFs and scores them with
@@ -51,7 +51,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 # Keep the bench lint-light; it wraps research code with heterogeneous styles.
-target-version = "py310"
+target-version = "py312"
 extend-exclude = ["third_party"]
 
 [tool.ruff.lint]

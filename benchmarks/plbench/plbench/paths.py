@@ -10,12 +10,17 @@ import os
 import shutil
 from pathlib import Path
 
+# This bench's own directory (its weights/, data/, outputs/, results/ live here).
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The monorepo root: baseline sources and the ProLIT model package are shared
+# across all benches, so they sit one level up rather than per-bench.
+MONOREPO_ROOT = REPO_ROOT.parent.parent
 
-THIRD_PARTY = REPO_ROOT / "third_party"
+THIRD_PARTY = MONOREPO_ROOT / "third_party"
 ESM_REPO = THIRD_PARTY / "esm"
 FOLDTOKEN_REPO = THIRD_PARTY / "FoldToken_open"
-OWN_MODEL_REPO = THIRD_PARTY / "pocket-conditioned-ligand-gen"
+# ProLIT itself is no longer a submodule -- it is this repository.
+OWN_MODEL_REPO = MONOREPO_ROOT
 TOKEN_MOL_REPO = THIRD_PARTY / "token-mol"
 # ConfSeq (Xiong et al., Nat Mach Intell 2026): rule-based, no weights needed.
 CONFSEQ_REPO = THIRD_PARTY / "ConfSeq"

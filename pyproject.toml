@@ -5,9 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pocket-conditioned-ligand-gen"
 version = "0.1.0"
-description = "Add your description here"
+description = "ProLIT: a chemistry-aware all-atom tokenizer for 3D protein-ligand interfaces, and the language models trained on its tokens."
 readme = "README.md"
-requires-python = ">=3.12"
+# Capped at <3.13 because the benchmark members cap there (biotite / posebusters
+# wheels), and a uv workspace resolves one environment for every member.
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "biopython>=1.84",
     "hydra-core>=1.3.2",
@@ -29,10 +31,32 @@ dependencies = [
     "pyarrow>=18.0.0",
     "transformers>=4.51",
     "e3nn>=0.6.0",
+    "posebusters>=0.3.1",
 ]
 
 [tool.setuptools.packages.find]
+# Scope this to the library. An unscoped `where = ["."]` makes setuptools walk
+# data/, outputs/, wandb/ and the run directories -- millions of files -- so
+# metadata generation stalls and anything installing this project appears to hang.
 where = ["."]
+include = ["src*"]
+
+[tool.uv.workspace]
+# Benchmarks that share this environment: they keep their own dependency lists
+# but resolve into one lockfile together with the model library they evaluate.
+#
+# benchmarks/plbench is deliberately NOT a member. It runs ESM3 in-process, and
+# ESM3 depends on a fork of transformers (Biohub/transformers @ ef32577) that
+# would replace the transformers 5.x the ProLIT language models are built on --
+# a workspace resolves one version per package, so membership would silently
+# downgrade the model library. plbench stays a standalone uv project with its
+# own venv, which is already the pattern its FoldToken and Bio2Token adapters
+# use (.venv-foldtoken / .venv-bio2token, driven as subprocesses).
+members = ["benchmarks/sbddbench", "benchmarks/ctbench"]
+exclude = ["benchmarks/plbench"]
+
+[tool.ruff]
+extend-exclude = ["third_party", "benchmarks/*/third_party"]
 
 [tool.ruff.lint]
 select = ["ALL"]

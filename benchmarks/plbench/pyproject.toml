@@ -32,7 +32,7 @@ dependencies = [
 [tool.uv.sources]
 # ESM3 lives in this repo as a git submodule; install it editable from there so
 # the pinned commit and the importable package always match.
-esm = { path = "third_party/esm", editable = true }
+esm = { path = "../../third_party/esm", editable = true }
 
 [dependency-groups]
 # In-process ESM3 reconstruction. Install with: uv sync --group esm3

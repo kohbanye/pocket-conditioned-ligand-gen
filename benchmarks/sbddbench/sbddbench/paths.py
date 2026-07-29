@@ -17,11 +17,16 @@ import os
 import shutil
 from pathlib import Path
 
+# This bench's own directory (its weights/, data/, outputs/, results/ live here).
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The monorepo root: baseline sources and the ProLIT model package are shared
+# across all benches, so they sit one level up rather than per-bench.
+MONOREPO_ROOT = REPO_ROOT.parent.parent
 
 # --- model source (git submodules) -------------------------------------------
-THIRD_PARTY = REPO_ROOT / "third_party"
-OWN_MODEL_REPO = THIRD_PARTY / "pocket-conditioned-ligand-gen"
+THIRD_PARTY = MONOREPO_ROOT / "third_party"
+# ProLIT itself is no longer a submodule -- it is this repository.
+OWN_MODEL_REPO = MONOREPO_ROOT
 DIFFSBDD_REPO = THIRD_PARTY / "DiffSBDD"
 TARGETDIFF_REPO = THIRD_PARTY / "targetdiff"
 DIFFGUI_REPO = THIRD_PARTY / "DiffGui"
