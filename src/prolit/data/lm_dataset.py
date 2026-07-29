@@ -1,6 +1,6 @@
 """LightningDataModule for the autoregressive LM over packed VQ-VAE tokens.
 
-Reads the token cache produced by ``scripts/tokenize_dataset.py``
+Reads the token cache produced by ``pipelines/corpora/tokenize_crossdocked.py``
 (``{split}.bin`` uint16 stream + ``{split}.len`` uint16 doc lengths) and packs
 whole documents into fixed-length ``block_size`` blocks. Because complexes are
 independent, packing carries per-document structure so the model can mask

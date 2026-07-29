@@ -1,7 +1,6 @@
 """Shared on-disk format for packed LM token streams.
 
-Both the CrossDocked tokenizer (``scripts/tokenize_dataset.py``) and the GEOM
-pretraining tokenizer (``scripts/tokenize_geom.py``) emit the same layout that
+Every corpus builder under ``pipelines/corpora/`` emits the same layout that
 :class:`~prolit.data.lm_dataset.PackedTokenDataset` reads back:
 
     {split}.bin   uint16   all sequences concatenated end to end

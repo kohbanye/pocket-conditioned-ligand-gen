@@ -4,7 +4,7 @@ Parses types files, creates receptor archives, ligand tar shards,
 and a Parquet manifest that replaces the ~43GB types files.
 
 Usage:
-    uv run python scripts/build_hf_dataset.py [--output-dir OUTPUT_DIR]
+    uv run python pipelines/corpora/build_hf_dataset.py [--output-dir OUTPUT_DIR]
 """
 
 from __future__ import annotations

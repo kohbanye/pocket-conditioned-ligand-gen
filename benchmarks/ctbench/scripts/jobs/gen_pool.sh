@@ -18,10 +18,10 @@
 #   qsub -g tga-ohuelab -p -3 -t 1-5 -v VARIANT=joint_nocasf,NCHUNK=5 \
 #        scripts/jobs/gen_pool.sh
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
 export CTBENCH_SOURCE_REPO=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
-export CTBENCH_SBDD_PYTHON=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench/.venv/bin/python
-export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
+export CTBENCH_SBDD_PYTHON=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench/.venv/bin/python
+export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export T4TMPDIR="${T4TMPDIR:-$HOME/tmpdir}"
@@ -52,7 +52,7 @@ IDS=$(awk -v t="$TASK" -v n="$NCHUNK" 'NR % n == (t % n)' data/target_ids.txt | 
 echo "task $TASK/$NCHUNK variant=$VARIANT n_samples=$NSAMPLES suffix=$SUFFIX seed=$SBDD_OWN_SEED min_atoms_frac=$SBDD_OWN_MIN_ATOMS_FRAC min_atoms_abs=$SBDD_OWN_MIN_ATOMS_ABS temp=${SBDD_OWN_TEMPERATURE:-default} targets: $IDS"
 
 # shellcheck disable=SC2086
-.venv/bin/python scripts/infer_generation_crossdocked.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/infer_generation_crossdocked.py \
     --variant "$VARIANT" \
     --out-suffix "$SUFFIX" \
     --n-samples "$NSAMPLES" \

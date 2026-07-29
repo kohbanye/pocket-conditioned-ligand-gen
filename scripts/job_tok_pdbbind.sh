@@ -19,7 +19,7 @@ set -e
 VQ="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 NORM=data/descriptor_cache_allatom/normalization_stats.pt
 
-.venv/bin/python scripts/tokenize_pdbbind_affinity.py \
+.venv/bin/python pipelines/corpora/tokenize_affinity_pdbbind.py \
     --ckpt "$VQ" --norm-stats "$NORM" \
     --affinity-types KD,KI,IC50 \
     --out-dir data/lm_tokens_affinity_pdbbind

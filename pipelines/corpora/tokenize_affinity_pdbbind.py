@@ -21,7 +21,7 @@ consumes it unchanged.
 
 Run (single GPU)::
 
-    uv run python scripts/tokenize_pdbbind_affinity.py \
+    uv run python pipelines/corpora/tokenize_affinity_pdbbind.py \
         --ckpt <atom-vqvae>.ckpt \
         --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
         --out-dir data/lm_tokens_affinity_pdbbind
@@ -37,11 +37,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from pipelines.corpora.tokenize_decoys import _RmsdWriter
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.lm_vocab import AtomLMVocab
-from scripts.tokenize_decoys import _RmsdWriter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

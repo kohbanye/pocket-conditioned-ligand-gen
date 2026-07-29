@@ -18,7 +18,7 @@
 # no extra sidecar needed if a class ever has to be filtered out.
 #
 #   qsub -g tga-ohuelab -t 1-12 scripts/job_tok_decoys_v10.sh
-#   .venv/bin/python scripts/concat_decoy_shards.py data/lm_tokens_decoys_v10
+#   .venv/bin/python pipelines/corpora/concat_decoy_shards.py data/lm_tokens_decoys_v10
 
 NSHARD=12
 
@@ -29,7 +29,7 @@ set -e
 
 VQ="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 
-.venv/bin/python scripts/tokenize_decoys.py \
+.venv/bin/python pipelines/corpora/tokenize_decoys.py \
     --ckpt "$VQ" \
     --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
     --casf-pdbs data/casf2016_pdbs.txt \

@@ -6,11 +6,11 @@
 
 # Ideal-geometry teacher relaxation over the CrossDocked train pockets. Produces
 # the distillation targets; these poses are never scored, so no eval step.
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
 export T4TMPDIR="${T4TMPDIR:-$HOME/tmpdir}"; export TMPDIR="$T4TMPDIR"; mkdir -p "$TMPDIR"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
 set -e
-SB=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench
+SB=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
 PY=$SB/.venv/bin/python
 IDFILE="${IDFILE:-data/trainpk_done.txt}"
 ARM="${ARM:-separate_4096_trainpk}"

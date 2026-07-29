@@ -16,7 +16,7 @@
 # frames should make the head score the pose rather than the code pattern.
 #
 #   qsub -g tga-ohuelab -t 1-12 scripts/job_tok_decoys_v8rot.sh
-#   .venv/bin/python scripts/concat_decoy_shards.py data/lm_tokens_decoys_v9
+#   .venv/bin/python pipelines/corpora/concat_decoy_shards.py data/lm_tokens_decoys_v9
 
 NSHARD=12
 
@@ -27,7 +27,7 @@ set -e
 
 VQ="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 
-.venv/bin/python scripts/tokenize_decoys.py \
+.venv/bin/python pipelines/corpora/tokenize_decoys.py \
     --ckpt "$VQ" \
     --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
     --casf-pdbs data/casf2016_pdbs.txt \

@@ -27,7 +27,7 @@ TOK=data/lm_tokens_decoys_v8
 # with an atomic mkdir: one job merges, the others wait for its .done marker.
 if [ ! -f "$TOK/train.bin" ]; then
     if mkdir "$TOK/.merge.lock" 2>/dev/null; then
-        .venv/bin/python scripts/concat_decoy_shards.py "$TOK"
+        .venv/bin/python pipelines/corpora/concat_decoy_shards.py "$TOK"
         touch "$TOK/.merge.done"
     else
         while [ ! -f "$TOK/.merge.done" ]; do sleep 20; done
@@ -41,7 +41,7 @@ CKPT_DIR="pocket-ligand-rescore/${RUN}/checkpoints"
 rm -f "$CKPT_DIR"/rescore-e*.ckpt 2>/dev/null || true
 
 echo "=== train pose head on v8: tag=$TAG extra=$* ==="
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir "$TOK" --mlm-ckpt "$MLM" --run-name "$RUN" \
     --max-epochs 8 --micro-batch-size 32 --early-stop-patience 2 \
     --pooling mean --num-workers 8 "$@"

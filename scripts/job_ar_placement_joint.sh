@@ -23,7 +23,7 @@ export WANDB_MODE=offline
 set -e
 
 echo "=== AR JOINT stage 3/3 (recovery): placement ==="
-.venv/bin/python scripts/train_lm.py \
+.venv/bin/python pipelines/train/clm.py \
     --token-dir data/lm_tokens_goodmix_joint \
     --atom-codebook-size 8192 \
     --mask-prompt \

@@ -15,7 +15,7 @@ export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:$
 export WANDB_MODE=offline
 set -e
 
-.venv/bin/python scripts/train_lm.py \
+.venv/bin/python pipelines/train/clm.py \
     --token-dir data/lm_tokens_goodmix_sep4096 \
     --atom-codebook-size 8192 \
     --mask-prompt \

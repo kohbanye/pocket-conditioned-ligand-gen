@@ -15,7 +15,7 @@ set -e
 CKPT="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 NORM="data/descriptor_cache_allatom/normalization_stats.pt"
 
-.venv/bin/python scripts/tokenize_plinder_protein.py \
+.venv/bin/python pipelines/corpora/tokenize_plinder.py \
     --ckpt "$CKPT" --norm-stats "$NORM" \
     --casf-pdbs data/casf2016_pdbs.txt \
     --num-rotations 8 --num-workers 40 --batch-size 256 \

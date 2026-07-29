@@ -13,7 +13,7 @@ Input is a pair of arm directories under ``sbdd-bench/outputs``: the generated
 poses (``--src-arm``) and their relaxed counterparts (``--dst-arm``), written by
 ``scripts/relax_in_pocket.py`` so atom order is preserved. Output is the memmap
 layout ``src/data/pose_refine_dataset.py`` reads, so the source repo's
-``scripts/train_pose_refine.py`` consumes it unchanged.
+``pipelines/train/refiner.py`` consumes it unchanged.
 
 Coordinates stay in the receptor's own frame. The refiner is E(3)-equivariant --
 it reads only relative edge vectors -- so a model trained in the PDB frame applies

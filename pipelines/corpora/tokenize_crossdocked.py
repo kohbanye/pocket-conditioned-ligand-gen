@@ -1,7 +1,6 @@
 """Tokenize CrossDocked complexes into unified all-atom LM token streams.
 
-All-atom counterpart of ``scripts/tokenize_dataset.py``: loads the frozen
-all-atom VQ-VAE, encodes BOTH the protein-pocket atoms and the ligand atoms
+Loads the frozen all-atom VQ-VAE, encodes BOTH the protein-pocket atoms and the ligand atoms
 with the SAME codebook, and assembles ``<bos><p> prot-atoms </p><l> lig-atoms
 </l><eos>`` over one shared code range (:class:`AtomLMVocab`).
 
@@ -12,7 +11,7 @@ count from the smaller good-pose corpus. Rotation 0 is the true canonical frame.
 
 Run (single GPU)::
 
-    uv run python scripts/tokenize_dataset_atom.py \
+    uv run python pipelines/corpora/tokenize_crossdocked.py \
         --ckpt "<atom-vqvae>.ckpt" --cache-dir data/descriptor_cache_allatom \
         --source-types cdonly --codebook-size 8192 --num-rotations 4 \
         --out-dir data/lm_tokens_allatom
@@ -30,8 +29,8 @@ import torch
 
 from prolit.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
 from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
-from prolit.data.descriptors import collate_molecules
 from prolit.data.token_io import SplitWriter
+from prolit.data.token_stream import ComplexTokenEncoder
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.atom import rotate_atom_descriptor
 from prolit.tokenizers.geometry import random_rotation_matrix
@@ -43,29 +42,8 @@ logger = logging.getLogger(__name__)
 _IDENTITY = np.eye(3, dtype=np.float64)
 
 
-def _encode_buffer(
-    module: AtomVQVAEModule,
-    vocab: AtomLMVocab,
-    prot_descs: list[torch.Tensor],
-    lig_descs: list[torch.Tensor],
-    device: torch.device,
-) -> list[list[int]]:
-    prot_x, prot_mask = collate_molecules(prot_descs)
-    lig_x, lig_mask = collate_molecules(lig_descs)
-    prot_idx = module.vqvae.encode_batch(
-        prot_x.to(device), prot_mask.to(device)
-    ).cpu()
-    lig_idx = module.vqvae.encode_batch(lig_x.to(device), lig_mask.to(device)).cpu()
-    sequences: list[list[int]] = []
-    for i in range(len(prot_descs)):
-        p_codes = prot_idx[i][prot_mask[i]].tolist()
-        l_codes = lig_idx[i][lig_mask[i]].tolist()
-        sequences.append(vocab.build_sequence(p_codes, l_codes))
-    return sequences
-
-
 def _tokenize_split(  # noqa: PLR0913
-    module: AtomVQVAEModule,
+    tokenizer: object,
     vocab: AtomLMVocab,
     shard_dir: Path,
     plan: list[tuple[int, list[int]]],
@@ -77,21 +55,17 @@ def _tokenize_split(  # noqa: PLR0913
     rng: np.random.Generator,
     device: torch.device,
 ) -> None:
+    """Stream one split's shards through the tokenizer into ``writer``.
+
+    Rotation 0 is the true canonical frame; the rest re-express the SAME complex
+    under a shared random rotation of protein and ligand, which is what keeps
+    the two halves in one frame.
+    """
     from tqdm import tqdm  # noqa: PLC0415
 
-    prot_buf: list[torch.Tensor] = []
-    lig_buf: list[torch.Tensor] = []
-
-    def flush() -> None:
-        if not prot_buf:
-            return
-        writer.write(_encode_buffer(module, vocab, prot_buf, lig_buf, device))
-        prot_buf.clear()
-        lig_buf.clear()
-
-    def _norm(arr: np.ndarray) -> torch.Tensor:
-        return torch.from_numpy((arr - mean) / std).float()
-
+    encoder = ComplexTokenEncoder(
+        tokenizer, vocab, mean, std, {"out": writer}, batch_size, device
+    )
     for shard_idx, local_indices in tqdm(plan, desc=writer.bin_path.stem):
         shard = torch.load(shard_dir / f"shard_{shard_idx:04d}.pt", weights_only=False)
         for local_idx in local_indices:
@@ -105,12 +79,9 @@ def _tokenize_split(  # noqa: PLR0913
                     rot = random_rotation_matrix(rng)
                     prot_a = rotate_atom_descriptor(prot_raw, rot)
                     lig_a = rotate_atom_descriptor(lig_raw, rot)
-                prot_buf.append(_norm(prot_a))
-                lig_buf.append(_norm(lig_a))
-                if len(prot_buf) >= batch_size:
-                    flush()
+                encoder.add("out", prot_a, lig_a)
         del shard
-    flush()
+    encoder.flush_all()
 
 
 def _build_pocket_plans(  # noqa: PLR0913
@@ -375,7 +346,7 @@ def main() -> None:  # noqa: PLR0915
         n_rot = args.num_rotations if split == "train" else 1
         writer = SplitWriter(args.out_dir, split)
         _tokenize_split(
-            module,
+            module.vqvae,
             vocab,
             shard_dir,
             plan,

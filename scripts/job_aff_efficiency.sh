@@ -33,7 +33,7 @@ CKPT_DIR="pocket-ligand-rescore/${RUN_NAME}/checkpoints"
 rm -f "$CKPT_DIR"/rescore-e*.ckpt 2>/dev/null || true
 
 echo "=== train efficiency head: pooling=$POOL tokens=$TOKDIR ==="
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir "$TOKDIR" --mlm-ckpt "$MLM" \
     --run-name "$RUN_NAME" \
     --max-epochs 15 --micro-batch-size 32 --early-stop-patience 3 \

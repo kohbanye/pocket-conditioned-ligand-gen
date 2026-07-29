@@ -1,6 +1,6 @@
 """Tokenize GEOM conformers into ligand-only all-atom LM sequences (pretrain).
 
-All-atom counterpart of ``scripts/tokenize_geom.py``: stage-0 of the curriculum
+Stage-0 of the curriculum
 for the unified pipeline. Encodes GEOM ligand conformers with the frozen
 all-atom VQ-VAE (ligand atoms only, source=ligand) and emits
 ``<bos><p></p><l> ligand atom tokens </l><eos>`` over the single atom code range
@@ -8,7 +8,7 @@ all-atom VQ-VAE (ligand atoms only, source=ligand) and emits
 
 Run (single GPU)::
 
-    uv run python scripts/tokenize_geom_atom.py \
+    uv run python pipelines/corpora/tokenize_geom.py \
         --geom-tar data/geom/rdkit_folder.tar.gz \
         --ckpt "<atom-vqvae>.ckpt" \
         --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
@@ -28,13 +28,13 @@ import numpy as np
 import torch
 
 from prolit.config import AtomVQVAETrainingConfig
-from prolit.data.descriptors import collate_molecules
 from prolit.data.geom import (
     iter_geom_tar_conformers,
     iter_mol_conformers,
     load_geom_refs,
 )
 from prolit.data.token_io import SplitWriter
+from prolit.data.token_stream import ComplexTokenEncoder
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.atom import LigandAtomDescriptor, rotate_atom_descriptor
 from prolit.tokenizers.geometry import random_rotation_matrix
@@ -59,54 +59,6 @@ def _heavy_centroid(atoms: list[tuple[str, float, float, float]]) -> np.ndarray:
         dtype=np.float64,
     )
     return heavy.mean(axis=0)
-
-
-class _Tokenizer:
-    """Buffers per-split ligand-atom descriptors and flushes through the VQ-VAE."""
-
-    def __init__(  # noqa: PLR0913
-        self,
-        module: AtomVQVAEModule,
-        vocab: AtomLMVocab,
-        mean: np.ndarray,
-        std: np.ndarray,
-        writers: dict[str, SplitWriter],
-        batch_size: int,
-        device: torch.device,
-    ) -> None:
-        self.module = module
-        self.vocab = vocab
-        self.mean = mean
-        self.std = std
-        self.writers = writers
-        self.batch_size = batch_size
-        self.device = device
-        self._buf: dict[str, list[torch.Tensor]] = {s: [] for s in writers}
-
-    def add(self, split: str, descriptor: np.ndarray) -> None:
-        norm = (descriptor - self.mean) / self.std
-        self._buf[split].append(torch.from_numpy(norm).float())
-        if len(self._buf[split]) >= self.batch_size:
-            self.flush(split)
-
-    def flush(self, split: str) -> None:
-        buf = self._buf[split]
-        if not buf:
-            return
-        lig_x, lig_mask = collate_molecules(buf)
-        idx = self.module.vqvae.encode_batch(
-            lig_x.to(self.device), lig_mask.to(self.device)
-        ).cpu()
-        seqs = [
-            self.vocab.build_sequence([], idx[i][lig_mask[i]].tolist())
-            for i in range(len(buf))
-        ]
-        self.writers[split].write(seqs)
-        buf.clear()
-
-    def flush_all(self) -> None:
-        for split in self._buf:
-            self.flush(split)
 
 
 def main() -> None:  # noqa: C901, PLR0915
@@ -235,7 +187,9 @@ def main() -> None:  # noqa: C901, PLR0915
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     writers = {s: SplitWriter(args.out_dir, s) for s in args.splits}
-    tok = _Tokenizer(module, vocab, mean, std, writers, args.batch_size, device)
+    tok = ComplexTokenEncoder(
+        module.vqvae, vocab, mean, std, writers, args.batch_size, device
+    )
     descriptor = LigandAtomDescriptor()
     rng = np.random.default_rng(args.seed)
 
@@ -268,7 +222,7 @@ def main() -> None:  # noqa: C901, PLR0915
         n_confs += 1
         for _ in range(args.num_rotations):
             rot = random_rotation_matrix(rng)
-            tok.add(split, rotate_atom_descriptor(base_desc, rot))
+            tok.add_ligand(split, rotate_atom_descriptor(base_desc, rot))
     tok.flush_all()
 
     meta: dict = {

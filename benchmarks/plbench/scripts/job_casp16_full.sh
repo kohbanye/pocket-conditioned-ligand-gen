@@ -39,7 +39,7 @@
 #   qsub -g tga-ohuelab -p -3 scripts/job_casp16_full.sh
 #   qsub -g tga-ohuelab -p -3 -v LIMIT=4 scripts/job_casp16_full.sh   # smoke test
 
-cd /gs/bs/tga-ohuelab/sakano/git/protein-ligand-3d-reconstruction-bench || exit 1
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/plbench || exit 1
 
 # Deliberately NOT sourcing ~/.bashrc: under /bin/sh it terminates the script
 # outright (verified -- a first attempt exited after 0.3 s with empty stdout and

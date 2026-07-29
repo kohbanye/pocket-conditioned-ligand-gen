@@ -9,12 +9,12 @@
 # head). Node: gpu_1 (1 GPU). Runtime: ~1-2 h. Set VARIANT to
 # joint | protein_only | ligand_only. Prereq: `uv sync` on a login node first.
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
-export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
+export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 export CTBENCH_SOURCE_REPO=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
 export WANDB_MODE=offline
 set -e
 
 VARIANT="${VARIANT:-joint}"
-.venv/bin/python scripts/infer_affinity.py --variant "$VARIANT"
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/infer_affinity.py --variant "$VARIANT"
 echo "AFFINITY INFERENCE DONE ($VARIANT)"

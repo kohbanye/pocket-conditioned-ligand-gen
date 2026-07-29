@@ -14,7 +14,7 @@ export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:$
 export WANDB_MODE=offline
 set -e
 
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir data/lm_tokens_affinity_kdki_sep \
     --mlm-ckpt pocket-ligand-mlm/mlm_nocasf_sep/checkpoints/last.ckpt \
     --atom-codebook-size 16384 \

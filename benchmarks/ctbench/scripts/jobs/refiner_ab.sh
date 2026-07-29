@@ -22,10 +22,10 @@
 #     -v VARIANT=separate_4096,TAG=geo1,REFINER=pocket-ligand-refine/refine_atom_geo_v1/checkpoints/refine-e11-r0.9280.ckpt \
 #     scripts/jobs/refiner_ab.sh
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
 export CTBENCH_SOURCE_REPO=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
-export CTBENCH_SBDD_PYTHON=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench/.venv/bin/python
-export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
+export CTBENCH_SBDD_PYTHON=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench/.venv/bin/python
+export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export T4TMPDIR="${T4TMPDIR:-$HOME/tmpdir}"
@@ -51,16 +51,16 @@ REFARG=""
 [ -n "$REFINER" ] && REFARG="--refiner $REFINER"
 
 # shellcheck disable=SC2086
-.venv/bin/python scripts/infer_generation_crossdocked.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/infer_generation_crossdocked.py \
     --variant "$VARIANT" --out-suffix "$SUF" --n-samples "$NSAMPLES" \
     --skip-eval $REFARG --ids $IDS
 
-SB=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench
-RES=/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench/results/generation/${VARIANT}${SUF}
+SB=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
+RES=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench/results/generation/${VARIANT}${SUF}
 mkdir -p "$RES"
 cd "$SB"
 # shellcheck disable=SC2086
-.venv/bin/python scripts/run_evaluation.py --models own \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/run_evaluation.py --models own \
     --index "$SB/data/targets/index.json" \
     --out-dir "$SB/outputs/${VARIANT}${SUF}" --results "$RES" \
     --ids $IDS --dock-modes score --dock-workers 7

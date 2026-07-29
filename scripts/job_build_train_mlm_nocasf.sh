@@ -18,7 +18,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 set -e
 
 # 1) Assemble the leak-free corpus (clean + retokenized ingredients).
-.venv/bin/python scripts/build_mixed_pretrain_cache.py \
+.venv/bin/python pipelines/corpora/mix.py \
     --inputs \
         data/lm_tokens_geom_allatom \
         data/lm_tokens_protein_plinder_nocasf \
@@ -28,7 +28,7 @@ set -e
     --out-dir data/lm_tokens_pretrain_nocasf
 
 # 2) Train the leak-free MLM from scratch.
-.venv/bin/python scripts/train_mlm.py \
+.venv/bin/python pipelines/train/mlm.py \
     --token-dir data/lm_tokens_pretrain_nocasf \
     --atom-codebook-size 8192 \
     --micro-batch-size 256 --num-workers 7 \

@@ -17,7 +17,7 @@ export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:$
 export WANDB_MODE=offline
 set -e
 
-.venv/bin/python scripts/build_mixed_pretrain_cache.py \
+.venv/bin/python pipelines/corpora/mix.py \
     --inputs \
         data/lm_tokens_geom_allatom_sep \
         data/lm_tokens_protein_plinder_nocasf_sep \

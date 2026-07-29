@@ -24,7 +24,7 @@ export WANDB_MODE=offline
 set -e
 
 echo "=== AR SEP stage 3/3 (recovery): placement ==="
-.venv/bin/python scripts/train_lm.py \
+.venv/bin/python pipelines/train/clm.py \
     --token-dir data/lm_tokens_goodmix_sep \
     --atom-codebook-size 16384 \
     --mask-prompt \

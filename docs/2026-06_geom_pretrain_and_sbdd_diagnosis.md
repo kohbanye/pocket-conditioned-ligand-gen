@@ -19,7 +19,7 @@ CrossDocked, with random-rotation augmentation, to teach good ligand geometry.
   sequences so fine-tuning is the same format with the pocket filled in.
   Cheap rotation primitive: `ligand.rotate_ligand_descriptor` (verified
   equivalent to recomputing the descriptor in the rotated frame).
-- `scripts/download_geom.py` (Harvard Dataverse; needs a browser User-Agent),
+- `pipelines/corpora/download/geom.py` (Harvard Dataverse; needs a browser User-Agent),
   `train_lm.py --init-from` warm start, job scripts.
 - **Data downloaded**: `data/geom/rdkit_folder.tar.gz` = 50 GB. Dataverse serves
   it as a *plain* tar despite the `.tar.gz` name → read with `tarfile r|*`.

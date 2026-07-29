@@ -21,7 +21,7 @@ set -e
 
 CKPT="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 
-.venv/bin/python scripts/tokenize_dataset_atom.py \
+.venv/bin/python pipelines/corpora/tokenize_crossdocked.py \
     --ckpt "$CKPT" \
     --cache-dir data/descriptor_cache_atom_full \
     --out-dir data/lm_tokens_allatom_full \

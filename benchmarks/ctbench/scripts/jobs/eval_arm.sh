@@ -15,19 +15,19 @@
 #
 #   qsub -g tga-ohuelab -p -3 -v ARM=joint_bo scripts/jobs/eval_arm.sh
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
 export T4TMPDIR="${T4TMPDIR:-$HOME/tmpdir}"
 export TMPDIR="$T4TMPDIR"
 mkdir -p "$TMPDIR"
 set -e
 
 ARM="${ARM:?set ARM=<output dir name under sbdd-bench/outputs>}"
-SB=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench
-RESULTS=/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench/results/generation/$ARM
+SB=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
+RESULTS=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench/results/generation/$ARM
 mkdir -p "$RESULTS"
 
 cd "$SB"
-.venv/bin/python scripts/run_evaluation.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/run_evaluation.py \
     --models own \
     --index "$SB/data/targets/index.json" \
     --out-dir "$SB/outputs/$ARM" \

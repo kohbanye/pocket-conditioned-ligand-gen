@@ -23,7 +23,7 @@ export WANDB_MODE=offline
 set -e
 
 echo "=== AR SEP stage 1/3: pretrain ==="
-.venv/bin/python scripts/train_lm.py \
+.venv/bin/python pipelines/train/clm.py \
     --token-dir data/lm_tokens_pretrain_mixed_sep \
     --atom-codebook-size 16384 \
     --micro-batch-size 64 \
@@ -31,7 +31,7 @@ echo "=== AR SEP stage 1/3: pretrain ==="
     --run-name lm_pretrain_sep
 
 echo "=== AR SEP stage 2/3: fullft ==="
-.venv/bin/python scripts/train_lm.py \
+.venv/bin/python pipelines/train/clm.py \
     --token-dir data/lm_tokens_allatom_full_sep \
     --atom-codebook-size 16384 \
     --mask-prompt \
@@ -43,7 +43,7 @@ echo "=== AR SEP stage 2/3: fullft ==="
     --run-name lm_fullft_sep
 
 echo "=== AR SEP stage 3/3: placement ==="
-.venv/bin/python scripts/train_lm.py \
+.venv/bin/python pipelines/train/clm.py \
     --token-dir data/lm_tokens_goodmix_sep \
     --atom-codebook-size 16384 \
     --mask-prompt \

@@ -57,7 +57,7 @@ RPROB="${RPROB:-0.5}"
 
 echo "train $RUN: data=$DATA lambda_pkt=$LPKT clash=$LCLASH bond=$LBOND angle=$LANGLE jitter=$JITTER hidden=$HIDDEN layers=$LAYERS mb=$MB epochs=$EPOCHS"
 
-.venv/bin/python scripts/train_pose_refine.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python pipelines/train/refiner.py \
     --data-dir "$DATA" \
     --online-jitter-sigma "$JITTER" \
     --lambda-bond "$LBOND" \

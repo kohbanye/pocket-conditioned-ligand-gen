@@ -11,9 +11,9 @@ Lustre ``data/`` (NOT ``$HOME`` -- it is inode/space limited). The default
 by :mod:`prolit.data.geom`.
 
     # see what's available
-    uv run python scripts/download_geom.py --list
+    uv run python pipelines/corpora/download/geom.py --list
     # fetch + extract the rdkit_folder distribution
-    uv run python scripts/download_geom.py --file rdkit_folder.tar.gz \
+    uv run python pipelines/corpora/download/geom.py --file rdkit_folder.tar.gz \
         --out-dir data/geom
     tar -xf data/geom/rdkit_folder.tar.gz -C data/geom
 """

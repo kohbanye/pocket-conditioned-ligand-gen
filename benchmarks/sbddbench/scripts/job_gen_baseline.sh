@@ -10,12 +10,12 @@
 # (envs/<model>/bin/python) with its weights (weights/<model>/). Node: gpu_1.
 # Set MODEL to diffsbdd | targetdiff | diffgui. Submit with -p -3 + a distinct -N.
 
-cd /gs/bs/tga-ohuelab/sakano/git/sbdd-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
 export WANDB_MODE=offline
 set -e
 
 MODEL="${MODEL:-diffsbdd}"
-.venv/bin/python scripts/run_generation.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/run_generation.py \
     --models "$MODEL" \
     --index data/targets/index.json \
     --n-samples 100

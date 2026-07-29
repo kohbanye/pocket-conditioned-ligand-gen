@@ -13,7 +13,7 @@ module load cuda
 # Dense Qwen3 (~0.3B) from-scratch LM on packed VQ-VAE tokens.
 # node_f = 4x H100; Lightning auto-detects the GPUs and uses DDP.
 # Submit with: qsub -g <group> scripts/train_lm.sh
-uv run python scripts/train_lm.py \
+uv run python pipelines/train/clm.py \
     --token-dir data/lm_tokens \
     --run-name lm_10ep \
     --max-epochs 10

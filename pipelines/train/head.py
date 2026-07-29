@@ -1,12 +1,12 @@
 """Fine-tune a pose-scoring head on the pretrained complex-token MLM encoder.
 
 Warm-starts the ESM3-style encoder from an MLM checkpoint and trains an MLP head
-to regress pose RMSD on rigid-perturbation decoys (:mod:`scripts.tokenize_decoys`).
+to regress pose RMSD on rigid-perturbation decoys (:mod:`pipelines.corpora.tokenize_decoys`).
 The discriminative complement to zero-shot masked PLL.
 
 Run (single GPU)::
 
-    uv run python scripts/train_rescore.py \
+    uv run python pipelines/train/head.py \
         --token-dir data/lm_tokens_decoys \
         --mlm-ckpt pocket-ligand-mlm/j90rlrgm/checkpoints/mlm-e01-vl0.8528.ckpt \
         --run-name rescore_v1 --max-epochs 8

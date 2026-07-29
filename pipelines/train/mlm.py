@@ -1,12 +1,12 @@
 """From-scratch training of the bidirectional complex-token MLM (ESM-style).
 
-Consumes the SAME packed token cache as ``scripts/train_lm.py`` but serves one
+Consumes the SAME packed token cache as ``pipelines/train/clm.py`` but serves one
 complex per example and trains with a masked-token objective (loss on masked
 positions only). This is the representation backbone for pose rescoring.
 
 Run on TSUBAME (single GPU is usually enough for the ~110M default)::
 
-    uv run python scripts/train_mlm.py \
+    uv run python pipelines/train/mlm.py \
         --token-dir data/lm_tokens_finetune_mixed \
         --run-name mlm_allatom_v1 --max-epochs 10
 

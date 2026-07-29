@@ -14,7 +14,7 @@ cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
 export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 export WANDB_MODE=offline
 
-.venv/bin/python scripts/train_vqvae_atom.py \
+.venv/bin/python pipelines/train/vqvae.py \
     --source-types cdonly \
     --cache-dir data/descriptor_cache_allatom \
     --codebook-size 8192 \

@@ -23,7 +23,7 @@ set -e
 
 IDX=$((SGE_TASK_ID - 1))
 
-.venv/bin/python scripts/tokenize_dataset_atom.py \
+.venv/bin/python pipelines/corpora/tokenize_crossdocked.py \
     --ckpt "pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt" \
     --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
     --codebook-size 8192 \

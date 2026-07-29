@@ -18,7 +18,7 @@ module load cuda
 # ~3-5 h expected for 3 epochs (h_rt 12 h leaves margin). Save the best
 # checkpoint path for the fine-tune stage (train_lm.py --init-from).
 # Submit: qsub -g tga-ohuelab scripts/pretrain_lm_geom.sh
-uv run python scripts/train_lm.py \
+uv run python pipelines/train/clm.py \
     --token-dir data/lm_tokens_geom \
     --run-name lm_geom_pretrain \
     --max-epochs 3

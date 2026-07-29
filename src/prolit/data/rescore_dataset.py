@@ -1,6 +1,6 @@
 """LightningDataModule for the pose-scoring head (complex tokens + RMSD label).
 
-Reads the decoy token set from :mod:`scripts.tokenize_decoys`
+Reads the decoy token set from :mod:`pipelines.corpora.tokenize_decoys`
 (``{split}.bin`` uint16 tokens + ``{split}.len`` uint16 doc lengths +
 ``{split}.rmsd`` float32 per-doc RMSD). Serves one pose per example with a
 ligand-token mask (the head mean-pools the encoder output over the

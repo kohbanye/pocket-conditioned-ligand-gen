@@ -47,7 +47,7 @@ RESUME_ARG=""
 
 echo "=== train: tok=$TOK mlm=$MLM mode=$VQMODE extra=$* ==="
 # shellcheck disable=SC2086
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir "$TOK" --mlm-ckpt "$MLM" --run-name "$RUN" \
     --atom-codebook-size 8192 --block-size 640 \
     --micro-batch-size 24 --num-workers 8 --pooling mean \

@@ -33,7 +33,7 @@ CKPT_DIR="pocket-ligand-rescore/${RUN_NAME}/checkpoints"
 rm -f "$CKPT_DIR"/rescore-e*.ckpt 2>/dev/null || true
 
 echo "=== train affinity-aware head: pool=$POOL rank=$RANKW mlm=$MLMW int=$NLAYERS ==="
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir "$TOKDIR" --mlm-ckpt "$MLM" \
     --run-name "$RUN_NAME" \
     --max-epochs 20 --micro-batch-size 32 --early-stop-patience 4 \

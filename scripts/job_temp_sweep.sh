@@ -53,8 +53,8 @@ done
 
 echo "GEN DONE, models:$MODELS"
 
-cd /gs/bs/tga-ohuelab/sakano/git/sbdd-bench
-.venv/bin/python scripts/run_evaluation.py \
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/run_evaluation.py \
     --models $MODELS \
     --dock-modes score min \
     --dock-workers 7 \

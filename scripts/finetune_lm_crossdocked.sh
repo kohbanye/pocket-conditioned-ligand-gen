@@ -19,7 +19,7 @@ module load cuda
 # Submit: qsub -g tga-ohuelab scripts/finetune_lm_crossdocked.sh
 PRETRAIN_CKPT="pocket-ligand-lm/gdnesyzx/checkpoints/lm-e01-vl1.8593.ckpt"
 
-uv run python scripts/train_lm.py \
+uv run python pipelines/train/clm.py \
     --token-dir data/lm_tokens \
     --run-name lm_cd_finetune \
     --max-epochs 3 \

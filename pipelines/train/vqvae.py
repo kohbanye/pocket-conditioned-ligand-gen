@@ -1,14 +1,14 @@
 """Training script for the unified all-atom VQ-VAE (one codebook).
 
 Consumes the ``data/descriptor_cache_allatom`` shard cache built by
-``scripts/prepare_descriptors_atom.py`` (run that first; this script does NOT
+``pipelines/corpora/build_descriptors.py`` (run that first; this script does NOT
 extract raw data, to stay inode-safe). Trains a single
 :class:`~prolit.tokenizers.vqvae.TransformerVQVAE` (domain="atom") over protein +
 ligand atoms.
 
 Run (single GPU)::
 
-    uv run python scripts/train_vqvae_atom.py \
+    uv run python pipelines/train/vqvae.py \
         --source-types cdonly --cache-dir data/descriptor_cache_allatom \
         --codebook-size 8192 --mol-batch-size 256 --run-name atomvqvae-v1
 """
@@ -124,7 +124,7 @@ def main() -> None:
     if not (dm.cache_dir / "shard_metadata.pt").exists():
         msg = (
             f"Atom cache missing at {dm.cache_dir}. Run "
-            "scripts/prepare_descriptors_atom.py first (inode-safe tar streaming)."
+            "pipelines/corpora/build_descriptors.py first (inode-safe tar streaming)."
         )
         raise FileNotFoundError(msg)
 

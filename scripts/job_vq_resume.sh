@@ -46,7 +46,7 @@ echo "[job] run=$RUN modality=$MODALITY codebook=$CODEBOOK cache=$CACHE"
 echo "[job] resuming from $CKPT ($(date -r "$CKPT" -Is))"
 nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
 
-.venv/bin/python scripts/train_vqvae_atom.py \
+.venv/bin/python pipelines/train/vqvae.py \
     --source-types cdonly \
     --cache-dir "$CACHE" \
     --codebook-size "$CODEBOOK" \

@@ -20,7 +20,7 @@ Three phases on ONE node (96-core + H100):
 
 Run (interactive H100 node)::
 
-    .venv/bin/python scripts/generate_docking_decoys.py \
+    .venv/bin/python pipelines/corpora/build_docking_decoys.py \
         --ckpt <atom-vqvae>.ckpt \
         --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
         --out-dir data/lm_tokens_dock_decoys --n-complexes 6000 --workers 90
@@ -39,6 +39,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from pipelines.corpora.tokenize_biolip import (
+    _bucket_code,
+    _load_ccd_smiles,
+    _parse_biolip_txt,
+)
+from pipelines.corpora.tokenize_decoys import _cd_test_pdbs, _RmsdWriter
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.descriptors import collate_molecules
 from prolit.model.vqvae_module import AtomVQVAEModule
@@ -54,12 +60,6 @@ from prolit.tokenizers.protein import (
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates_from_text,
 )
-from scripts.tokenize_biolip import (
-    _bucket_code,
-    _load_ccd_smiles,
-    _parse_biolip_txt,
-)
-from scripts.tokenize_decoys import _cd_test_pdbs, _RmsdWriter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

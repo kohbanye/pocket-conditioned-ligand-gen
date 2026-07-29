@@ -19,19 +19,19 @@ set -e
 CKPT="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 
 # 1) PLINDER complex tokenization (~215k drug-like pocket-ligand pairs).
-.venv/bin/python scripts/tokenize_plinder_protein.py --complex --ckpt "$CKPT" \
+.venv/bin/python pipelines/corpora/tokenize_plinder.py --complex --ckpt "$CKPT" \
     --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
     --num-rotations 2 --num-workers 40 --batch-size 256 \
     --mw-min 150 --mw-max 600 \
     --out-dir data/lm_tokens_complex_plinder
 
 # 2) Combine PLINDER + CrossDocked complexes (train + val, held-out pockets).
-.venv/bin/python scripts/build_mixed_pretrain_cache.py \
+.venv/bin/python pipelines/corpora/mix.py \
     --inputs data/lm_tokens_complex_plinder data/lm_tokens_complex_crossdocked \
     --out-dir data/lm_tokens_finetune_mixed
 
 # 3) Condition-only fine-tune (held-out-pocket val -> generalising model).
-.venv/bin/python scripts/train_lm.py \
+.venv/bin/python pipelines/train/clm.py \
     --token-dir data/lm_tokens_finetune_mixed \
     --atom-codebook-size 8192 \
     --mask-prompt \

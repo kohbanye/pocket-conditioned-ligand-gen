@@ -23,7 +23,7 @@ export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 set -e
 
-.venv/bin/python scripts/train_pose_refine.py \
+.venv/bin/python pipelines/train/refiner.py \
     --data-dir data/pose_refine_atom \
     --online-jitter-sigma 0.3 \
     --online-rigid-trans 1.2 \

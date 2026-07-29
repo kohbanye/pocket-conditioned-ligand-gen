@@ -23,7 +23,7 @@ export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:$
 export WANDB_MODE=offline
 set -e
 
-.venv/bin/python scripts/tokenize_biolip.py --complex \
+.venv/bin/python pipelines/corpora/tokenize_biolip.py --complex \
     --ckpt "pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt" \
     --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
     --casf-pdbs data/casf2016_pdbs.txt \

@@ -10,7 +10,7 @@ ligand blocks across each epoch, so no doc-level interleaving is needed here.
 
 Run::
 
-    uv run python scripts/build_mixed_pretrain_cache.py \
+    uv run python pipelines/corpora/mix.py \
         --inputs data/lm_tokens_protein_plinder data/lm_tokens_geom_allatom \
         --out-dir data/lm_tokens_pretrain_mixed
 """

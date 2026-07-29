@@ -5,7 +5,7 @@ The shards are flat streams (``.bin`` uint16 tokens, ``.len`` uint16 lengths,
 every shard used the same vocabulary and the same val-split rule -- which they
 do, being the same command with a different ``--shard-id``.
 
-    python scripts/concat_decoy_shards.py data/lm_tokens_decoys_v8
+    python pipelines/corpora/concat_decoy_shards.py data/lm_tokens_decoys_v8
 """
 
 from __future__ import annotations

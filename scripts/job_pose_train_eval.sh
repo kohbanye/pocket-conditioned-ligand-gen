@@ -47,7 +47,7 @@ rm -f "$CKPT_DIR"/rescore-e*.ckpt 2>/dev/null || true
 
 echo "=== train pose head: pooling=$POOL int=$NINT tokens=$TOKDIR mlm=$MLM ==="
 # shellcheck disable=SC2086
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir "$TOKDIR" \
     --mlm-ckpt "$MLM" \
     --run-name "$RUN_NAME" \

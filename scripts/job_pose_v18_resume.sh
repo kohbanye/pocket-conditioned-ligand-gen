@@ -37,7 +37,7 @@ else
 fi
 
 # shellcheck disable=SC2086
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir "$TOK" --mlm-ckpt "$MLM" --run-name "$RUN" \
     --max-epochs 3 --micro-batch-size 24 --early-stop-patience 1 \
     --block-size 640 --pooling mean --num-workers 8 \

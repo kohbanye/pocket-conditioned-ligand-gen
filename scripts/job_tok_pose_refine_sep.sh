@@ -17,7 +17,7 @@ export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:$
 export WANDB_MODE=offline
 set -e
 
-.venv/bin/python scripts/tokenize_pose_refine.py \
+.venv/bin/python pipelines/corpora/tokenize_pose_refine.py \
     --ckpt pocket-ligand-vqvae/ligand-vqvae/checkpoints/last.ckpt \
     --norm-stats data/descriptor_cache_allatom/normalization_stats_ligand.pt \
     --codebook-size 8192 \

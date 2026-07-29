@@ -18,14 +18,14 @@
 #   qsub -g <group> -v VARIANT=joint_nocasf scripts/jobs/eval_crossdocked.sh
 #   qsub -g <group> -v VARIANT=separate_4096 scripts/jobs/eval_crossdocked.sh
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
 export CTBENCH_SOURCE_REPO=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
-export CTBENCH_SBDD_PYTHON=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench/.venv/bin/python
-export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
+export CTBENCH_SBDD_PYTHON=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench/.venv/bin/python
+export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 export T4TMPDIR="${T4TMPDIR:-$HOME/tmpdir}"
 set -e
 
 VARIANT="${VARIANT:-separate_4096}"
-.venv/bin/python scripts/infer_generation_crossdocked.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/infer_generation_crossdocked.py \
     --variant "$VARIANT" --skip-gen --dock-modes score min dock
 echo "CROSSDOCKED EVAL DONE ($VARIANT)"

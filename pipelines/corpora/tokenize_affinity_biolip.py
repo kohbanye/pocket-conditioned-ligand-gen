@@ -15,7 +15,7 @@ with pK stored in the label stream, so ``train_rescore.py`` trains on it unchang
 
 Run (single GPU)::
 
-    uv run python scripts/tokenize_biolip_affinity.py \
+    uv run python pipelines/corpora/tokenize_affinity_biolip.py \
         --ckpt <atom-vqvae>.ckpt \
         --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
         --out-dir data/lm_tokens_affinity
@@ -33,16 +33,16 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from prolit.model.vqvae_module import AtomVQVAEModule
-from prolit.tokenizers.ligand import parse_ligand_pdb_text
-from prolit.tokenizers.lm_vocab import AtomLMVocab
-from scripts.tokenize_biolip import (
+from pipelines.corpora.tokenize_biolip import (
     _bucket_code,
     _load_ccd_smiles,
     _read_needed,
 )
-from scripts.tokenize_decoys import _cd_test_pdbs, _RmsdWriter
+from pipelines.corpora.tokenize_decoys import _cd_test_pdbs, _RmsdWriter
+from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.ligand import parse_ligand_pdb_text
+from prolit.tokenizers.lm_vocab import AtomLMVocab
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -257,7 +257,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     for s in sites:
         by_bucket.setdefault(_bucket_code(s[0]), []).append(s)
 
-    import scripts.tokenize_biolip as tb  # noqa: PLC0415
+    import pipelines.corpora.tokenize_biolip as tb  # noqa: PLC0415
 
     tb._w_biolip_dir = args.biolip_dir  # noqa: SLF001
 

@@ -1,6 +1,6 @@
 """LightningDataModule for the e3nn pose refiner.
 
-Reads the corruption->native tuples written by :mod:`scripts.tokenize_pose_refine`
+Reads the corruption->native tuples written by :mod:`pipelines.corpora.tokenize_pose_refine`
 as a small set of concatenated memmaps (inode-safe: the pocket is stored ONCE
 per complex and referenced by pointer from each corruption record). One example
 is one (corrupted ligand pose ``x0``, native ligand pose ``x1``, pocket) tuple;

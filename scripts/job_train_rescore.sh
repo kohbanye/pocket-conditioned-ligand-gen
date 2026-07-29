@@ -16,7 +16,7 @@ export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 set -e
 
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir data/lm_tokens_decoys \
     --mlm-ckpt pocket-ligand-mlm/j90rlrgm/checkpoints/mlm-e01-vl0.8528.ckpt \
     --micro-batch-size 32 \

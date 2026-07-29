@@ -68,7 +68,7 @@ CKPT_DIR="pocket-ligand-rescore/${RUN_NAME}/checkpoints"
 rm -f "$CKPT_DIR"/rescore-e*.ckpt 2>/dev/null || true
 
 echo "=== train affinity head: pooling=$POOL tokens=$TOKDIR rank=$RANKW ==="
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir "$TOKDIR" \
     --mlm-ckpt "$MLM" \
     --run-name "$RUN_NAME" \

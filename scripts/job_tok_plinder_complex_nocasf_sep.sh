@@ -13,7 +13,7 @@ cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
 export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 set -e
 
-.venv/bin/python scripts/tokenize_plinder_protein.py \
+.venv/bin/python pipelines/corpora/tokenize_plinder.py \
     --complex \
     --separate-protein-ckpt pocket-ligand-vqvae/protein-vqvae/checkpoints/last.ckpt \
     --separate-protein-norm data/descriptor_cache_allatom/normalization_stats_protein.pt \

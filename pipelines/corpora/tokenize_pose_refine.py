@@ -23,7 +23,7 @@ complex, referenced by pointer -> inode-safe).
 Run (single GPU; use the venv python directly -- ``uv run`` rebuilds the editable
 package, which is very slow here)::
 
-    PYTHONPATH=$PWD .venv/bin/python scripts/tokenize_pose_refine.py \
+    PYTHONPATH=$PWD .venv/bin/python pipelines/corpora/tokenize_pose_refine.py \
         --ckpt "pocket-ligand-vqvae/3dvcbp0h/checkpoints/vqvae-epoch=99-val/\
 ligand_coord=0.1501.ckpt" \
         --cache-dir data/descriptor_cache_v4 \
@@ -40,6 +40,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from pipelines.corpora.tokenize_biolip import (
+    _bucket_code,
+    _cd_test_pdbs,
+    _load_ccd_smiles,
+    _parse_biolip_txt,
+    _read_needed,
+)
+from pipelines.corpora.tokenize_decoys import _perturb
 from prolit.model.pose_refiner import (
     FEATURE_FIELDS,
     LIG_CHEM_HEADS,
@@ -62,14 +70,6 @@ from prolit.tokenizers.protein import (
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates_from_text,
 )
-from scripts.tokenize_biolip import (
-    _bucket_code,
-    _cd_test_pdbs,
-    _load_ccd_smiles,
-    _parse_biolip_txt,
-    _read_needed,
-)
-from scripts.tokenize_decoys import _perturb
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -326,7 +326,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     from tqdm import tqdm  # noqa: PLC0415
 
-    import scripts.tokenize_biolip as tb  # noqa: PLC0415
+    import pipelines.corpora.tokenize_biolip as tb  # noqa: PLC0415
 
     n_ok = 0
     for code in tqdm(sorted(by_bucket), desc="buckets"):

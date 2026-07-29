@@ -19,7 +19,7 @@ Lustre (``data/`` under the project), not home.
 
 Run (from the project root, on a node with internet, e.g. r3n11)::
 
-    .venv/bin/python scripts/download_biolip.py [--workers 8] [--annotations-only]
+    .venv/bin/python pipelines/corpora/download/biolip.py [--workers 8] [--annotations-only]
 """
 
 from __future__ import annotations

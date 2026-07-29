@@ -21,7 +21,7 @@
 # Submit with:
 #   qsub -g tga-ohuelab -p -3 scripts/job_casp16_finish.sh
 
-cd /gs/bs/tga-ohuelab/sakano/git/protein-ligand-3d-reconstruction-bench || exit 1
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/plbench || exit 1
 
 # NOT sourcing ~/.bashrc: under /bin/sh it terminates the script outright.
 export HF_HOME=/gs/bs/tga-ohuelab/sakano/.cache/huggingface

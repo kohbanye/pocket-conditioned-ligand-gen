@@ -10,12 +10,12 @@
 # Prereq: run `uv sync` on a login node first (installs this repo + the source
 # repo editable), so .venv exists.
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
-export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
+export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 export CTBENCH_SOURCE_REPO=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
 export WANDB_MODE=offline
 set -e
 
 VARIANT="${VARIANT:-joint}"
-.venv/bin/python scripts/infer_rescoring.py --variant "$VARIANT"
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/infer_rescoring.py --variant "$VARIANT"
 echo "RESCORING INFERENCE DONE ($VARIANT)"

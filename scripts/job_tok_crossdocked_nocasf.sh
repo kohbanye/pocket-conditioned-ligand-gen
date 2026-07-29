@@ -16,7 +16,7 @@ set -e
 CKPT="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 NORM="data/descriptor_cache_allatom/normalization_stats.pt"
 
-.venv/bin/python scripts/tokenize_dataset_atom.py \
+.venv/bin/python pipelines/corpora/tokenize_crossdocked.py \
     --ckpt "$CKPT" --norm-stats "$NORM" \
     --source-types cdonly --pocket-split --max-per-pocket 128 --num-rotations 4 \
     --casf-pdbs data/casf2016_pdbs.txt \

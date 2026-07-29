@@ -18,7 +18,7 @@
 #   qsub -g tga-ohuelab -p -3 -t 1-4 -v ARM=joint_bo,NCHUNK=4 \
 #        scripts/jobs/eval_arm_chunk.sh
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
 export T4TMPDIR="${T4TMPDIR:-$HOME/tmpdir}"
 export TMPDIR="$T4TMPDIR"
 mkdir -p "$TMPDIR"
@@ -27,8 +27,8 @@ set -e
 ARM="${ARM:?set ARM=<output dir name under sbdd-bench/outputs>}"
 NCHUNK="${NCHUNK:-4}"
 TASK="${SGE_TASK_ID:-1}"
-SB=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench
-RESULTS=/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench/results/generation/$ARM/chunk$TASK
+SB=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
+RESULTS=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench/results/generation/$ARM/chunk$TASK
 mkdir -p "$RESULTS"
 
 IDS=$(awk -v t="$TASK" -v n="$NCHUNK" 'NR % n == (t % n)' data/target_ids.txt | tr '\n' ' ')
@@ -36,7 +36,7 @@ echo "eval chunk $TASK/$NCHUNK arm=$ARM targets: $IDS"
 
 cd "$SB"
 # shellcheck disable=SC2086
-.venv/bin/python scripts/run_evaluation.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/run_evaluation.py \
     --models own \
     --index "$SB/data/targets/index.json" \
     --out-dir "$SB/outputs/$ARM" \

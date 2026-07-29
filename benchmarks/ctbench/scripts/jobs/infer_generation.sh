@@ -11,12 +11,12 @@
 # plus the sbdd-bench micromamba env for scoring. See the first-run caveat in
 # ctbench/inference/generation.py.
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
-export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
+export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 export CTBENCH_SOURCE_REPO=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
 export WANDB_MODE=offline
 set -e
 
 VARIANT="${VARIANT:-joint}"
-.venv/bin/python scripts/infer_generation.py --variant "$VARIANT"
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/infer_generation.py --variant "$VARIANT"
 echo "GENERATION INFERENCE DONE ($VARIANT)"

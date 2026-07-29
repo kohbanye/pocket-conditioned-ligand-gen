@@ -18,7 +18,7 @@ Systems whose PDB is a CrossDocked fold-0 TEST receptor are dropped (leakage).
 
 Run (single GPU)::
 
-    uv run python scripts/tokenize_plinder_protein.py --complex \
+    uv run python pipelines/corpora/tokenize_plinder.py --complex \
         --ckpt "<atom-vqvae>.ckpt" \
         --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
         --num-rotations 2 --out-dir data/lm_tokens_complex_plinder
@@ -36,8 +36,8 @@ import numpy as np
 import torch
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from prolit.data.descriptors import collate_molecules
 from prolit.data.token_io import SplitWriter
+from prolit.data.token_stream import ComplexTokenEncoder
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
@@ -232,75 +232,6 @@ def _process_zip(zip_path: str) -> list[tuple]:  # noqa: C901, PLR0912
     return out
 
 
-class _Encoder:
-    """Buffers (prot, lig|None) rows and flushes them through the atom VQ-VAE."""
-
-    def __init__(  # noqa: PLR0913
-        self,
-        module: AtomVQVAEModule,
-        vocab: AtomLMVocab,
-        mean: np.ndarray,
-        std: np.ndarray,
-        writers: dict[str, SplitWriter],
-        batch_size: int,
-        device: torch.device,
-    ) -> None:
-        self.module = module
-        self.vocab = vocab
-        self.mean = mean
-        self.std = std
-        self.writers = writers
-        self.batch_size = batch_size
-        self.device = device
-        self._prot: dict[str, list[torch.Tensor]] = {s: [] for s in writers}
-        self._lig: dict[str, list[torch.Tensor | None]] = {s: [] for s in writers}
-
-    def _norm(self, arr: np.ndarray) -> torch.Tensor:
-        return torch.from_numpy((arr - self.mean) / self.std).float()
-
-    def add(self, split: str, prot: np.ndarray, lig: np.ndarray | None) -> None:
-        if split not in self._prot:
-            return
-        self._prot[split].append(self._norm(prot))
-        self._lig[split].append(self._norm(lig) if lig is not None else None)
-        if len(self._prot[split]) >= self.batch_size:
-            self.flush(split)
-
-    def _encode(self, descs: list[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        x, mask = collate_molecules(descs)
-        idx = self.module.vqvae.encode_batch(
-            x.to(self.device), mask.to(self.device)
-        ).cpu()
-        return idx, mask
-
-    def flush(self, split: str) -> None:
-        prot = self._prot[split]
-        if not prot:
-            return
-        pidx, pmask = self._encode(prot)
-        ligs = self._lig[split]
-        if all(x is None for x in ligs):
-            seqs = [
-                self.vocab.build_sequence(pidx[i][pmask[i]].tolist(), [])
-                for i in range(len(prot))
-            ]
-        else:
-            lidx, lmask = self._encode([x for x in ligs if x is not None])
-            seqs = [
-                self.vocab.build_sequence(
-                    pidx[i][pmask[i]].tolist(), lidx[i][lmask[i]].tolist()
-                )
-                for i in range(len(prot))
-            ]
-        self.writers[split].write(seqs)
-        prot.clear()
-        ligs.clear()
-
-    def flush_all(self) -> None:
-        for split in list(self._prot):
-            self.flush(split)
-
-
 def main() -> None:  # noqa: PLR0915, C901
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -412,7 +343,9 @@ def main() -> None:  # noqa: PLR0915, C901
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     writers = {s: SplitWriter(args.out_dir, s) for s in ("train", "val")}
-    enc = _Encoder(module, vocab, mean, std, writers, args.batch_size, device)
+    enc = ComplexTokenEncoder(
+        module.vqvae, vocab, mean, std, writers, args.batch_size, device
+    )
     rng = np.random.default_rng(args.seed)
 
     from dataclasses import asdict  # noqa: PLC0415

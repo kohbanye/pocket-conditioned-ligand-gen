@@ -15,7 +15,7 @@ export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 set -e
 
-.venv/bin/python scripts/tokenize_decoys.py \
+.venv/bin/python pipelines/corpora/tokenize_decoys.py \
     --separate-protein-ckpt pocket-ligand-vqvae/protein-vqvae-4096/checkpoints/last.ckpt \
     --separate-protein-norm data/descriptor_cache_allatom/normalization_stats_protein.pt \
     --separate-ligand-ckpt pocket-ligand-vqvae/ligand-vqvae-4096/checkpoints/last.ckpt \

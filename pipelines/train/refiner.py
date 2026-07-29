@@ -3,11 +3,11 @@
 Learns to map a VQ-VAE-corrupted ligand pose ``x0`` (the exact geometry the
 generation pipeline emits) back onto the crystal native pose ``x1``, conditioned
 on the frozen pocket -- a fast, differentiable, generation-time replacement for
-Vina local minimisation. Data is produced by :mod:`scripts.tokenize_pose_refine`.
+Vina local minimisation. Data is produced by :mod:`pipelines.corpora.tokenize_pose_refine`.
 
 Run (single GPU)::
 
-    uv run python scripts/train_pose_refine.py \
+    uv run python pipelines/train/refiner.py \
         --data-dir data/pose_refine \
         --run-name refine_v1 --max-epochs 40
 """

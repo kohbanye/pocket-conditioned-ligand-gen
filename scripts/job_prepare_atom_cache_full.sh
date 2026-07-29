@@ -18,7 +18,7 @@ cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
 export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 set -e
 
-.venv/bin/python scripts/prepare_descriptors_atom.py \
+.venv/bin/python pipelines/corpora/build_descriptors.py \
     --repo-dir data/hub_cache/repo \
     --receptors-dir data/hub_cache/receptors \
     --cache-dir data/descriptor_cache_atom_full \

@@ -57,7 +57,7 @@
   - `_combine_losses()` に warmup 分岐とλ·circle 加算を追加
   - **DDP 対策**: warmup 中 / coord_loss 無効時に `0.0 * (log_var_recon + log_var_coord)` を足して `TaskWeighting` の Parameter を autograd graph に残す（B1-B/C 初回投入で発生した `RuntimeError: parameters that were not used` を修正）
 - `scripts/train_vqvae.py`: `--circle-loss-weight`, `--coord-loss-warmup-epochs`, `--skip-sincos-norm`, `--run-name`, `--cache-dir` の CLI フラグ追加
-- `scripts/recompute_norm_stats.py`: stats のみ再計算するユーティリティ
+- `pipelines/corpora/recompute_norm_stats.py`: stats のみ再計算するユーティリティ
 - `tests/test_vqvae.py`: `TestCircleLoss` (3 件), `TestCoordLossRamp` (3 件) を追加
 
 最初の B1-B / B1-C 投入 (job 7239517 / 7239518) は **DDP unused-parameter エラー** で 1 step 目に死亡。warmup 分岐を通ると `TaskWeighting.log_var_*` が autograd 上で touched にならないため。`0.0 * (...)` を足す対策を入れて 7244046 / 7244047 で再投入し、いずれも完走。
@@ -69,7 +69,7 @@ B1 の結果（後述）から **B1-B (warmup) のみ若干改善, B1-A/C は逆
 4. **skip_sincos_normalization** (B2-A): `_setup_from_shards` で normalization stats 計算後、sin/cos slot に `mean=0, std=1` を上書き
 5. **skip_sincos + warmup** (B2-B): A + B1-B 勝者構成
 
-**Cache の扱い**: B1 の checkpoint は v1 cache (sin/cos 正規化) で訓練済みなので、stats を上書きすると invalidate される。そのため `data/descriptor_cache_v2/` を新規生成（並列 prep job 7245930, cpu_40, 22 分で完了）し、v2 のみ skip_sincos stats を生成。`scripts/train_vqvae.py` と `scripts/recompute_norm_stats.py` に `--cache-dir` を追加して v2 cache を指定可能に。
+**Cache の扱い**: B1 の checkpoint は v1 cache (sin/cos 正規化) で訓練済みなので、stats を上書きすると invalidate される。そのため `data/descriptor_cache_v2/` を新規生成（並列 prep job 7245930, cpu_40, 22 分で完了）し、v2 のみ skip_sincos stats を生成。`scripts/train_vqvae.py` と `pipelines/corpora/recompute_norm_stats.py` に `--cache-dir` を追加して v2 cache を指定可能に。
 
 注意: v2 は manifest 更新により complex 数が 2.44M → 2.53M に増えており、test split が異なる（v1: 244,237, v2: 253,193 complexes）。**B1 (v1) と B2 (v2) の比較は厳密に apples-to-apples ではない**。両方とも訓練から完全分離された hold-out なので相対比較は妥当。
 
@@ -199,5 +199,5 @@ B2-A 構成を base に以下を同梱:
 - 各 run の PDF: `notebooks/visualization_b1a.pdf`, `_b1b.pdf`, `_b1c.pdf`, `_b2a.pdf`, `_b2b.pdf` (baseline は `notebooks/visualization.pdf`)
 - 学習スクリプト: `scripts/train_vqvae_{b1a,b1b,b1c,b2a,b2b}.sh`
 - Cache v2 生成: `scripts/prepare_descriptors.py` + `scripts/prepare_descriptors.sh`
-- 統計再計算: `scripts/recompute_norm_stats.py`
+- 統計再計算: `pipelines/corpora/recompute_norm_stats.py`
 - visualization.py の env var: `VQVAE_CKPT` (ckpt path), `VQVAE_CACHE_DIR` (cache dir, B2 評価では `data/descriptor_cache_v2`)

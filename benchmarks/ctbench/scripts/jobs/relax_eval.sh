@@ -17,7 +17,7 @@
 #   qsub -g tga-ohuelab -p -3 -v ARM=sep4096_fin,OUT=sep4096_fin_rx \
 #        scripts/jobs/relax_eval.sh
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
 export T4TMPDIR="${T4TMPDIR:-$HOME/tmpdir}"
 export TMPDIR="$T4TMPDIR"
 mkdir -p "$TMPDIR"
@@ -50,7 +50,7 @@ IDFILE="${IDFILE:-data/target_ids.txt}"
 # rigid-geometry ligand.
 INTPATH="${INTPATH:-3}"
 PSRC="${PSRC:-pocket}"
-SB=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench
+SB=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
 PY=$SB/.venv/bin/python
 
 echo "relax $ARM -> $OUT contact=$CONTACT w_pkt=$WPKT w_tether=$WTETH w_uff=$WUFF w_internal=$WINT"
@@ -64,14 +64,14 @@ echo "relaxed $(find "$SB/outputs/$OUT/own" -name generated.sdf | wc -l) targets
 
 if [ -n "${SKIP_EVAL:-}" ]; then echo "RELAX ONLY DONE ($OUT)"; exit 0; fi
 
-RES=/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench/results/generation/$OUT
+RES=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench/results/generation/$OUT
 mkdir -p "$RES"
 cd "$SB"
 # shellcheck disable=SC2086
 "$PY" scripts/run_evaluation.py --models own \
     --index "$SB/data/targets/index.json" \
     --out-dir "$SB/outputs/$OUT" --results "$RES" \
-    --ids $(tr '\n' ' ' < /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench/"$IDFILE") \
+    --ids $(tr '\n' ' ' < /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench/"$IDFILE") \
     --dock-modes $MODES --dock-workers 38
 
 echo "RELAX EVAL DONE ($OUT) -> $RES"

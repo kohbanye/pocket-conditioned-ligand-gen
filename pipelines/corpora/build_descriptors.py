@@ -3,11 +3,11 @@
 All-atom + good-pose counterpart of ``scripts/prepare_descriptors_tar.py``:
 expands the pocket to every heavy atom, derives Full ligand-parity chemistry
 for protein atoms, and (by default) keeps only ``label == 1`` poses. Writes
-``data/descriptor_cache_allatom`` consumed by ``scripts/train_vqvae_atom.py``.
+``data/descriptor_cache_allatom`` consumed by ``pipelines/train/vqvae.py``.
 
 Run (CPU, streams tars; needs the snapshot tars/manifest + extracted receptors)::
 
-    uv run python scripts/prepare_descriptors_atom.py \
+    uv run python pipelines/corpora/build_descriptors.py \
         --repo-dir data/hub_cache/repo \
         --receptors-dir data/hub_cache/receptors \
         --cache-dir data/descriptor_cache_allatom \

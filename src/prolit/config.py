@@ -288,7 +288,7 @@ class RescoreTrainingConfig:
     The encoder (:class:`ComplexMLMConfig`) is warm-started from a pretrained MLM
     checkpoint; a small MLP head over the mean-pooled ligand-token representations
     regresses the pose RMSD (lower = more native-like). Trained on RMSD-labelled
-    decoys (:mod:`scripts.tokenize_decoys`).
+    decoys (:mod:`pipelines.corpora.tokenize_decoys`).
     """
 
     token_dir: Path = Path("data/lm_tokens_decoys")
@@ -440,7 +440,7 @@ class PoseRefineTrainingConfig:
     target ``x1`` = crystal native pose, both in the pocket canonical frame;
     interpolate ``x_t = (1-t) x0 + t x1`` and regress the clean pose ``x1`` with
     physical auxiliary losses. Data is produced offline by
-    :mod:`scripts.tokenize_pose_refine` into concatenated memmaps.
+    :mod:`pipelines.corpora.tokenize_pose_refine` into concatenated memmaps.
     """
 
     data_dir: Path = Path("data/pose_refine")

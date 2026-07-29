@@ -18,11 +18,11 @@ set -e
 VQ="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 NS="data/descriptor_cache_allatom/normalization_stats.pt"
 
-.venv/bin/python scripts/tokenize_decoys.py --ckpt "$VQ" --norm-stats "$NS" \
+.venv/bin/python pipelines/corpora/tokenize_decoys.py --ckpt "$VQ" --norm-stats "$NS" \
     --casf-pdbs data/casf2016_pdbs.txt \
     --n-complexes 12000 --n-decoys 20 --out-dir data/lm_tokens_decoys_v2
 
-.venv/bin/python scripts/train_rescore.py \
+.venv/bin/python pipelines/train/head.py \
     --token-dir data/lm_tokens_decoys_v2 \
     --mlm-ckpt pocket-ligand-mlm/j90rlrgm/checkpoints/mlm-e01-vl0.8528.ckpt \
     --micro-batch-size 32 --num-workers 7 --max-epochs 15 --early-stop-patience 3 \

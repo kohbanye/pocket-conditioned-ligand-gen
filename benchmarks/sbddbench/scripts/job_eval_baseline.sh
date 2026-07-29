@@ -8,7 +8,7 @@
 # the shared harness (Vina score/min/dock + chem/pose/diversity). Writes into
 # sbdd-bench results/; ctbench collect_baselines.py then folds it into
 # results/generation/baselines/. Set MODEL to diffsbdd | targetdiff | diffgui.
-cd /gs/bs/tga-ohuelab/sakano/git/sbdd-bench
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
 export WANDB_MODE=offline
 set -e
 MODEL="${MODEL:-diffsbdd}"
@@ -19,7 +19,7 @@ RESULTS="${RESULTS:-results}"
 # is used instead of inline ids so the -v value carries no spaces. Unset = full set.
 IDS_ARG=""
 [ -n "${IDS_FILE:-}" ] && IDS_ARG="--ids $(cat "$IDS_FILE")"
-.venv/bin/python scripts/run_evaluation.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/run_evaluation.py \
     --models "$MODEL" \
     --index data/targets/index.json \
     --results "$RESULTS" \

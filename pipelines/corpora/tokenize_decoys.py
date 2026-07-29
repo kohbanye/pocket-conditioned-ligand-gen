@@ -14,7 +14,7 @@ Output: ``{split}.bin`` (uint16 tokens) + ``{split}.len`` + ``{split}.rmsd``
 
 Run (single GPU)::
 
-    uv run python scripts/tokenize_decoys.py \
+    uv run python pipelines/corpora/tokenize_decoys.py \
         --ckpt "<atom-vqvae>.ckpt" \
         --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
         --n-complexes 12000 --n-decoys 16 --out-dir data/lm_tokens_decoys
@@ -31,18 +31,18 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from prolit.model.vqvae_module import AtomVQVAEModule
-from prolit.tokenizers.ligand import parse_ligand_pdb_text
-from prolit.tokenizers.lm_vocab import AtomLMVocab
-from scripts.eval_casf_rescore import _PoseEncoder, _random_rotation
-from scripts.tokenize_biolip import (
+from pipelines.corpora.tokenize_biolip import (
     _bucket_code,
     _cd_test_pdbs,
     _load_ccd_smiles,
     _parse_biolip_txt,
     _read_needed,
 )
+from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.ligand import parse_ligand_pdb_text
+from prolit.tokenizers.lm_vocab import AtomLMVocab
+from scripts.eval_casf_rescore import _PoseEncoder, _random_rotation
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -428,7 +428,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         needed_rec = {f"{p}{rc}.pdb" for p, rc, _c, _l, _s in site_list}
         needed_lig = {f"{p}_{cc}_{lc}_{s}.pdb" for p, _rc, cc, lc, s in site_list}
         # _read_needed uses a module-global biolip dir; set it once.
-        import scripts.tokenize_biolip as tb  # noqa: PLC0415
+        import pipelines.corpora.tokenize_biolip as tb  # noqa: PLC0415
 
         tb._w_biolip_dir = args.biolip_dir  # noqa: SLF001
         receptors = _read_needed("receptor", code, needed_rec)

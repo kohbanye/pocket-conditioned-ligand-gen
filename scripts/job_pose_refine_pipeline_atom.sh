@@ -16,7 +16,7 @@ export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 set -e
 
-.venv/bin/python scripts/tokenize_pose_refine.py \
+.venv/bin/python pipelines/corpora/tokenize_pose_refine.py \
     --ckpt "pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt" \
     --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
     --codebook-size 8192 \
@@ -27,7 +27,7 @@ set -e
 
 echo "TOKENIZE DONE, starting train"
 
-.venv/bin/python scripts/train_pose_refine.py \
+.venv/bin/python pipelines/train/refiner.py \
     --data-dir data/pose_refine_atom \
     --micro-batch-size 32 \
     --num-workers 7 \

@@ -34,7 +34,7 @@ LM=pocket-ligand-lm/p6lpk7br/checkpoints/lm-e02-vl1.0029.ckpt
 REF_BOND1=pocket-ligand-refine/refine_atom_bond_v1/checkpoints/refine-e08-r0.9440.ckpt
 
 # --- train the geometry/clash-tuned refiner -------------------------------
-.venv/bin/python scripts/train_pose_refine.py \
+.venv/bin/python pipelines/train/refiner.py \
     --data-dir data/pose_refine_atom \
     --online-jitter-sigma 0.3 \
     --lambda-bond 2.0 \
@@ -64,8 +64,8 @@ done
 
 echo "GEN DONE, starting sbdd-bench evaluation"
 
-cd /gs/bs/tga-ohuelab/sakano/git/sbdd-bench
-.venv/bin/python scripts/run_evaluation.py \
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/run_evaluation.py \
     --models own_atom_p2b_off own_atom_p2b_geo1 own_atom_p2b_bond1 \
     --dock-modes score min \
     --dock-workers 7 \

@@ -8,7 +8,7 @@ renames.
 
 Run (from the project root, on a node with internet, e.g. r3n11)::
 
-    .venv/bin/python scripts/download_plinder_systems.py [--workers 8]
+    .venv/bin/python pipelines/corpora/download/plinder.py [--workers 8]
 """
 
 from __future__ import annotations

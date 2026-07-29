@@ -17,7 +17,7 @@ export WANDB_MODE=offline
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 set -e
 
-.venv/bin/python scripts/train_mlm.py \
+.venv/bin/python pipelines/train/mlm.py \
     --token-dir data/lm_tokens_pretrain_nocasf_sep \
     --atom-codebook-size 16384 \
     --micro-batch-size 256 --num-workers 7 \

@@ -17,7 +17,7 @@ set -e
 CKPT="pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
 NORM="data/descriptor_cache_allatom/normalization_stats.pt"
 
-.venv/bin/python scripts/tokenize_biolip_affinity.py \
+.venv/bin/python pipelines/corpora/tokenize_affinity_biolip.py \
     --ckpt "$CKPT" --norm-stats "$NORM" \
     --casf-pdbs data/casf2016_pdbs.txt \
     --pk-min 2.0 --pk-max 13.0 \

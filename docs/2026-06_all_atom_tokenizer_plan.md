@@ -96,7 +96,7 @@ protein VQ-VAE goes residue→atom level. Bonus: ~5x tokens helps token/param.
 5. **LM:** new flat vocab = specials + ONE atom codebook range (no separate
    protein/ligand ranges; update `src/tokenizers/lm_vocab.py`). GEOM pretrain
    (ligand-only, empty pocket) → fine-tune on clean good poses
-   (`scripts/train_lm.py --init-from`).
+   (`pipelines/train/clm.py --init-from`).
 6. **Evaluate** with `scripts/eval_sbdd_full.py` (multi-faceted: validity /
    PoseBusters geometry / Vina) vs the current `g79let5b` / `cjp7e60q`, same 100
    pockets, seed 0.
@@ -118,7 +118,7 @@ same chemistry signal on both sides of the interface.)
 - Tokenize streaming + packing: `scripts/tokenize_dataset.py`,
   `scripts/tokenize_geom.py`, `src/data/token_io.py`.
 - VQ-VAE + LM training: `src/model/vqvae_module.py`, `src/model/lm_module.py`,
-  `scripts/train_vqvae.py`, `scripts/train_lm.py` (`--init-from` warm start).
+  `scripts/train_vqvae.py`, `pipelines/train/clm.py` (`--init-from` warm start).
 - Multi-faceted eval: `scripts/eval_sbdd_full.py` (run with
   `uv run --with posebusters python`). Geometry-only localiser:
   `scripts/diagnose_geometry.py`.
@@ -218,7 +218,7 @@ New / changed files:
 ### Phase B — remaining steps (each qsub confirmed with node/time first)
 
 1. **Cache** (CPU, tar streaming, inode-safe):
-   `python scripts/prepare_descriptors_atom.py --source-types cdonly
+   `python pipelines/corpora/build_descriptors.py --source-types cdonly
    --max-residues 50 --cache-dir data/descriptor_cache_allatom --num-workers N`.
    **Good-pose definition (verified on the manifest):** `label` is per
    docking-run FILE, not per pose. `label==1` covers 351,020 `*_min.sdf.gz`
@@ -232,7 +232,7 @@ New / changed files:
    **Measured (smoke, max-residues 50):** doc length (prot+lig atoms + 6
    markers) median 252 / p99 387 / max 431 → **0% exceed 512, so block_size
    512 is safe.** Protein ~221 atoms/complex avg, ligand ~28.
-2. **VQ-VAE** (GPU): `python scripts/train_vqvae_atom.py --source-types cdonly
+2. **VQ-VAE** (GPU): `python pipelines/train/vqvae.py --source-types cdonly
    --codebook-size 8192 --mol-batch-size 256` → `atomvqvae-*.ckpt`.
 3. **Tokenize** (GPU): `tokenize_dataset_atom.py` (CrossDocked, `--num-rotations
    K`) + `tokenize_geom_atom.py` (GEOM pretrain). Pass `--norm-stats

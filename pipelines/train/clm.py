@@ -1,21 +1,21 @@
 """From-scratch training of the dense Qwen3 pocket-conditioned ligand LM.
 
-Consumes the packed token cache from ``scripts/tokenize_dataset.py`` and trains
+Consumes the packed token cache from ``pipelines/corpora/`` and trains
 with next-token prediction (loss on all tokens). PyTorch Lightning + WandB, to
 match the VQ-VAE training stack.
 
 Run on TSUBAME node_f (4x H100, DDP)::
 
-    uv run python scripts/train_lm.py --token-dir data/lm_tokens --run-name lm_v1
+    uv run python pipelines/train/clm.py --token-dir data/lm_tokens --run-name lm_v1
 
 Two-stage curriculum: pretrain on GEOM, then fine-tune on CrossDocked by
 warm-starting the LM weights (a fresh optimizer + LR schedule, *not* a resume)::
 
     # 1) pretrain (ligand-only GEOM tokens)
-    uv run python scripts/train_lm.py --token-dir data/lm_tokens_geom \
+    uv run python pipelines/train/clm.py --token-dir data/lm_tokens_geom \
         --run-name lm_pretrain --max-epochs 3
     # 2) fine-tune (CrossDocked complexes) from the pretrained weights
-    uv run python scripts/train_lm.py --token-dir data/lm_tokens \
+    uv run python pipelines/train/clm.py --token-dir data/lm_tokens \
         --run-name lm_finetune --init-from <pretrain checkpoint>.ckpt
 """
 

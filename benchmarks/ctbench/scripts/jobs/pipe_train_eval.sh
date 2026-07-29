@@ -15,8 +15,8 @@
 #   qsub -g tga-ohuelab -p -3 -hold_jid <build_id> \
 #     -v RUN=tp400_b10,LBOND=10,LANGLE=1,EPOCHS=12 scripts/jobs/pipe_train_eval.sh
 
-cd /gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
-export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
+cd /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
+export PYTHONPATH="/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench:/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen:${PYTHONPATH}"
 export T4TMPDIR="${T4TMPDIR:-$HOME/tmpdir}"; export TMPDIR="$T4TMPDIR"; mkdir -p "$TMPDIR"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 export WANDB_MODE=offline
@@ -24,8 +24,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 set -e
 
 SRC=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen
-SB=/gs/bs/tga-ohuelab/sakano/git/sbdd-bench
-CT=/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench
+SB=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/sbddbench
+CT=/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/benchmarks/ctbench
 RUN="${RUN:?set RUN}"
 DATA="${DATA:-data/pose_refine_tp400}"
 LBOND="${LBOND:-2.0}"
@@ -37,7 +37,7 @@ INIT="${INIT:-$SRC/pocket-ligand-refine/refine_atom_bond_v1/checkpoints/refine-e
 
 # ---- train ---------------------------------------------------------------
 cd "$SRC"
-.venv/bin/python scripts/train_pose_refine.py \
+/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python pipelines/train/refiner.py \
     --data-dir "$DATA" --init-from "$INIT" \
     --online-jitter-sigma 0 --lambda-bond "$LBOND" --lambda-angle "$LANGLE" \
     --lambda-pkt 1.0 --lambda-clash 1.0 \
@@ -63,7 +63,7 @@ for REP in 1 3; do
   mkdir -p "$RES"
   cd "$SB"
   # shellcheck disable=SC2046
-  .venv/bin/python scripts/run_evaluation.py --models own \
+  /gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen/.venv/bin/python scripts/run_evaluation.py --models own \
       --index "$SB/data/targets/index.json" \
       --out-dir "$SB/outputs/$OUT" --results "$RES" \
       --ids $(tr '\n' ' ' < "$CT/$IDFILE") \

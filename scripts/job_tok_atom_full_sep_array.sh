@@ -19,7 +19,7 @@ set -e
 
 IDX=$((SGE_TASK_ID - 1))
 
-.venv/bin/python scripts/tokenize_dataset_atom.py \
+.venv/bin/python pipelines/corpora/tokenize_crossdocked.py \
     --separate-protein-ckpt pocket-ligand-vqvae/protein-vqvae/checkpoints/last.ckpt \
     --separate-protein-norm data/descriptor_cache_allatom/normalization_stats_protein.pt \
     --separate-ligand-ckpt pocket-ligand-vqvae/ligand-vqvae/checkpoints/last.ckpt \
