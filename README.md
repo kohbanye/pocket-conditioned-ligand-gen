@@ -77,6 +77,7 @@ sbdd-bench/
 
 ```bash
 git submodule update --init --recursive   # クローン直後の場合
+sh scripts/apply_patches.sh                # third_party への必須ローカル修正（`patches/README.md` 参照）
 
 uv sync                                    # bench（評価）環境。軽量・GPU 不要
 uv sync --group interactions               # ④ を使う場合のみ（ProLIF + MDAnalysis）

@@ -1,0 +1,58 @@
+diff --git a/scripts/sample.py b/scripts/sample.py
+index aac3512..386ffee 100644
+--- a/scripts/sample.py
++++ b/scripts/sample.py
+@@ -22,7 +22,14 @@ from utils.evaluation.atom_num_config import CONFIG
+ from utils.data import PDBProtein, parse_drug3d_mol, parse_lig_file
+ from utils.dataset import to_torch_dict, get_dataset, ProteinLigandData
+ from utils.evaluation import scoring_func
+-from utils.evaluation.docking_vina import VinaDockingTask
++# [sbdd-bench patch] Make the Vina docking import optional: it pulls in meeko /
++# vina / AutoDockTools, which the benchmark does not need during generation (it
++# re-docks uniformly afterward, and the per-sample docking call is patched to be
++# optional below). Falling back to None keeps generation dependency-light.
++try:
++    from utils.evaluation.docking_vina import VinaDockingTask
++except Exception:
++    VinaDockingTask = None
+ from utils.transforms import *
+ from utils.misc import *
+ from utils.reconstruct import *
+@@ -313,18 +320,27 @@ def main(args):
+                     try:
+                         logger.info('Success: %s' % smiles)
+                         chem_results = scoring_func.get_chem(rdmol)
+-                        if config.sample.mode == 'pocket':
+-                            vina_task = VinaDockingTask.from_generated_mol(rdmol, config.model.target)
+-                        elif config.sample.mode == 'test':
+-                            if config.data.dataset == 'pdbbind':
+-                                protein_fn = os.path.join(os.path.dirname(data.protein_filename), os.path.basename(data.protein_filename)[:4] + '_protein.pdb')
+-                            elif config.data.dataset == 'crossdocked':
+-                                protein_fn = os.path.join(os.path.dirname(data.protein_filename), os.path.basename(data.protein_filename)[:10] + '.pdb')
+-                            vina_task = VinaDockingTask.from_generated_mol(rdmol, os.path.join(config.data.protein_root, protein_fn))
+-                        vina_score = vina_task.run(mode='score_only', exhaustiveness=16)
+                         mol_info['sa'] = chem_results['sa']
+                         mol_info['qed'] = chem_results['qed']
+-                        mol_info['vina_score'] = vina_score[0]['affinity']
++                        # [sbdd-bench patch] Internal Vina docking is made optional.
++                        # The benchmark re-docks every generated molecule uniformly
++                        # afterward, so DiffGui's per-sample docking (exhaustiveness=16)
++                        # is redundant here, very slow, and a hard dependency (vina
++                        # python bindings + pdb2pqr30). On any failure we default the
++                        # score to 0.0 so the molecule is still kept and written.
++                        try:
++                            if config.sample.mode == 'pocket':
++                                vina_task = VinaDockingTask.from_generated_mol(rdmol, config.model.target)
++                            elif config.sample.mode == 'test':
++                                if config.data.dataset == 'pdbbind':
++                                    protein_fn = os.path.join(os.path.dirname(data.protein_filename), os.path.basename(data.protein_filename)[:4] + '_protein.pdb')
++                                elif config.data.dataset == 'crossdocked':
++                                    protein_fn = os.path.join(os.path.dirname(data.protein_filename), os.path.basename(data.protein_filename)[:10] + '.pdb')
++                                vina_task = VinaDockingTask.from_generated_mol(rdmol, os.path.join(config.data.protein_root, protein_fn))
++                            vina_score = vina_task.run(mode='score_only', exhaustiveness=16)
++                            mol_info['vina_score'] = vina_score[0]['affinity']
++                        except Exception:
++                            mol_info['vina_score'] = 0.0
+                         mol_info['mol_score'] = float(mol_info['vina_score']) - float(mol_info['sa']) - float(mol_info['qed'])
+ 
+                         p_save_traj = np.random.rand()  # save traj
