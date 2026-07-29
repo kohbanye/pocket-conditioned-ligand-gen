@@ -41,7 +41,7 @@ class _AliasLoader(Loader):
     def __init__(self, target: str) -> None:
         self._target = target
 
-    def create_module(self, spec: ModuleSpec) -> ModuleType:
+    def create_module(self, spec: ModuleSpec) -> ModuleType:  # noqa: ARG002
         return importlib.import_module(self._target)
 
     def exec_module(self, module: ModuleType) -> None:

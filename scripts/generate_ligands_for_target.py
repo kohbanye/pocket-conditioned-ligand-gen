@@ -186,7 +186,7 @@ def _pocket_context(receptor_path: Path, ref_mol: dict, frame: tuple) -> tuple |
     return pkt_canon, pocket_feats_from_descriptor(prot_desc)
 
 
-def _build_generator(args, device):  # noqa: ANN001
+def _build_generator(args, device) -> tuple:  # noqa: ANN001
     """Load the LM + VQ-VAE(s) for the selected tokenizer path and return the
     pieces the sampling loop needs.
 
@@ -486,7 +486,7 @@ def main() -> None:  # noqa: C901, PLR0915
     # under-generates size relative to the crystal ligand, and Vina is not
     # size-normalised, so an unconstrained length systematically loses affinity.
     min_new_tokens = max(
-        int(round(args.min_atoms_frac * len(ref_elems)))
+        round(args.min_atoms_frac * len(ref_elems))
         if args.min_atoms_frac > 0
         else 0,
         args.min_atoms_abs,

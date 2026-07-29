@@ -153,13 +153,15 @@ def write_pocket_pdb(receptor_pdb: Path, lig_xyz: np.ndarray, out_pocket: Path,
 
 
 def receptor_to_pdbqt(receptor_pdb: Path, out_pdbqt: Path) -> bool:
-    r = _run([paths.PREPARE_RECEPTOR, "-r", receptor_pdb, "-o", out_pdbqt,
-              "-A", "checkhydrogens", "-U", "nphs_lps_waters_nonstdres"])
+    # Success is judged by the output file, not the exit status: prepare_receptor
+    # returns 0 on inputs it silently declines to convert.
+    _run([paths.PREPARE_RECEPTOR, "-r", receptor_pdb, "-o", out_pdbqt,
+          "-A", "checkhydrogens", "-U", "nphs_lps_waters_nonstdres"])
     if out_pdbqt.exists():
         return True
     print("  prepare_receptor failed; obabel fallback")
-    r = _run([paths.OBABEL, receptor_pdb, "-O", out_pdbqt, "-xr", "-p", "7.4",
-              "--partialcharge", "gasteiger"])
+    _run([paths.OBABEL, receptor_pdb, "-O", out_pdbqt, "-xr", "-p", "7.4",
+          "--partialcharge", "gasteiger"])
     return out_pdbqt.exists()
 
 

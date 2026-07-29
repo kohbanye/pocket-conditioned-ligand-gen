@@ -16,7 +16,6 @@ Run (CPU, after the array job finishes)::
 
 from __future__ import annotations
 
-# ruff: noqa: T201  (this is a console report script; prints are the output)
 import csv
 import json
 from collections import defaultdict

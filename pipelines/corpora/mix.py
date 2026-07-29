@@ -75,13 +75,13 @@ def main() -> None:
             "num_tokens": int(lengths.sum()),
             "max_len": int(lengths.max()) if lengths.size else 0,
         }
-        print(  # noqa: T201
+        print(
             f"{split}: {lengths.size} docs, {int(lengths.sum())} tokens, "
             f"max_len={int(lengths.max()) if lengths.size else 0}"
         )
 
     (args.out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
-    print(f"Wrote mixed cache to {args.out_dir}")  # noqa: T201
+    print(f"Wrote mixed cache to {args.out_dir}")
 
 
 if __name__ == "__main__":

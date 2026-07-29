@@ -11,7 +11,7 @@ appends ``openbabel`` to the ``methods`` list.
 
     uv run python scripts/eval_openbabel_validity.py --npz outputs/gen_eval/eval_data.npz
 """
-# ruff: noqa: T201, S603, PLR2004, E501
+# ruff: noqa: S603, PLR2004, E501
 
 from __future__ import annotations
 

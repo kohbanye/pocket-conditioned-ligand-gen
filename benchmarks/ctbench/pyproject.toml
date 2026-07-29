@@ -5,7 +5,6 @@ description = "Evaluation & ablation benchmark for the protein-ligand complex to
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "hydra-core>=1.3.2",
     "ipykernel>=7.1.0",
     "lightning>=2.5.6",
     "matplotlib>=3.10.7",
@@ -45,8 +44,11 @@ select = ["ALL"]
 ignore = ["D", "N812", "COM812"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/*.py" = ["INP001"]
+# Entry points, not packages: invoked by path, and they report progress on stdout.
+"scripts/*.py" = ["INP001", "T201", "E501"]
 "tests/*.py" = ["S101", "PLR2004", "INP001"]
+# Inference drivers print per-variant progress through long qsub runs.
+"ctbench/inference/*.py" = ["T201"]
 
 [dependency-groups]
 dev = [

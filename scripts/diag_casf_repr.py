@@ -15,7 +15,7 @@ an upper bound on what any head over this representation can do.
 
 from __future__ import annotations
 
-# ruff: noqa: T201, PLC0415
+# ruff: noqa: PLC0415
 from pathlib import Path
 
 import numpy as np

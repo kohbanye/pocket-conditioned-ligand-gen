@@ -1,6 +1,7 @@
 """Tokenize CrossDocked complexes into unified all-atom LM token streams.
 
-Loads the frozen all-atom VQ-VAE, encodes BOTH the protein-pocket atoms and the ligand atoms
+Loads the frozen all-atom VQ-VAE, encodes BOTH the protein-pocket atoms and
+the ligand atoms
 with the SAME codebook, and assembles ``<bos><p> prot-atoms </p><l> lig-atoms
 </l><eos>`` over one shared code range (:class:`AtomLMVocab`).
 

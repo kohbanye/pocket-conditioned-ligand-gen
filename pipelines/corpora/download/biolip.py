@@ -1,4 +1,4 @@
-# ruff: noqa: T201  (progress is printed to stdout by design)
+
 """Download BioLIP2 receptor + ligand structure buckets and annotations.
 
 BioLIP2 (zhanggroup.org/BioLiP, the ``/BioLiP2/`` path 404s -- it *is* v2,
@@ -19,7 +19,8 @@ Lustre (``data/`` under the project), not home.
 
 Run (from the project root, on a node with internet, e.g. r3n11)::
 
-    .venv/bin/python pipelines/corpora/download/biolip.py [--workers 8] [--annotations-only]
+    .venv/bin/python pipelines/corpora/download/biolip.py \
+        [--workers 8] [--annotations-only]
 """
 
 from __future__ import annotations

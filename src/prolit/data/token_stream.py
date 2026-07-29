@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-import numpy as np
+import numpy as np  # noqa: TC002
 import torch
 
 from prolit.data.descriptors import collate_molecules

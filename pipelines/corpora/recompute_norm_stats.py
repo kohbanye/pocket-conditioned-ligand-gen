@@ -36,7 +36,8 @@ def main() -> None:
         "--cache-dir",
         type=Path,
         default=None,
-        help="Override descriptor cache directory (default: data/descriptor_cache_allatom).",
+        help="Override the descriptor cache directory "
+        "(default: data/descriptor_cache_allatom).",
     )
     args = parser.parse_args()
 

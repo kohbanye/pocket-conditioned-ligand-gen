@@ -3,7 +3,8 @@
 Learns to map a VQ-VAE-corrupted ligand pose ``x0`` (the exact geometry the
 generation pipeline emits) back onto the crystal native pose ``x1``, conditioned
 on the frozen pocket -- a fast, differentiable, generation-time replacement for
-Vina local minimisation. Data is produced by :mod:`pipelines.corpora.tokenize_pose_refine`.
+Vina local minimisation. Data comes from
+:mod:`pipelines.corpora.tokenize_pose_refine`.
 
 Run (single GPU)::
 
@@ -144,7 +145,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         state = torch.load(args.init_from, map_location="cpu", weights_only=False)
         sd = state.get("state_dict", state)
         missing, unexpected = module.load_state_dict(sd, strict=False)
-        print(f"[warm-start] {args.init_from}: missing={len(missing)} unexpected={len(unexpected)}")
+        print(
+            f"[warm-start] {args.init_from}: "
+            f"missing={len(missing)} unexpected={len(unexpected)}"
+        )
 
     trainer = L.Trainer(
         max_epochs=config.max_epochs,

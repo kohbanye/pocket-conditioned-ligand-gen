@@ -53,8 +53,6 @@ def _():
         BB_SC_VOCAB,
         LIGAND_ELEMENT_VOCAB,
         PROTEIN_AA_VOCAB,
-        SOURCE_LIGAND_IDX,
-        SOURCE_PROTEIN_IDX,
         fields_by_name,
     )
 
@@ -134,7 +132,7 @@ def _(
 
     data_config = CrossDockedConfig(data_dir=project_root / "data")
     hub = None  # fold split needs the hub manifest; supplied by the DataModule
-    from prolit.config import HubDatasetConfig  # noqa: PLC0415
+    from prolit.config import HubDatasetConfig
 
     hub = HubDatasetConfig()
     hub.source_types = ["cdonly"]

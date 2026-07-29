@@ -38,7 +38,7 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 from scipy.optimize import minimize
 
-SBDD_BENCH = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench")
+SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbddbench"
 RDLogger.DisableLog("rdApp.*")
 
 # Bondi van der Waals radii (A) for the elements the tokenizer can emit.
@@ -192,7 +192,7 @@ def _random_rigid(
     return (x - c) @ rot.T + c + rng.normal(0.0, trans, size=3)
 
 
-def relax_mol(  # noqa: PLR0913
+def relax_mol(  # noqa: PLR0913, C901
     mol: Chem.Mol,
     pkt_xyz: np.ndarray,
     pkt_rad: np.ndarray,

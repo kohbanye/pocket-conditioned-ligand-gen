@@ -288,7 +288,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 - 論文 Table 3 (generation) にまだ `\TODO{}` があり、`ctb_gen_tr` が走行中。
   **Phase 3 (rename) と Phase 5 (benchmarks 統合) は、生成 ablation が終わってからが安全**。
   Phase 0 / 1 / 2 / 6 / 7 は先行して構いません。
-- checkpoint パス (`pocket-ligand-*/…`) は `docs/best_allatom_configs.md` と
+- checkpoint パス (`pocket-ligand-*/…`) は `docs/results/best_allatom_configs.md` と
   `ctbench/variants.py` が実パス文字列で参照している。`runs/` へ移すなら両者を同時更新する
   (移さずルート据え置きのままでも構わない — 論文の再現性記録としては据え置きの方が安全)。
 - トークン列のバイト表現を変える変更 (Phase 4) は、全 checkpoint を無効化しうる。

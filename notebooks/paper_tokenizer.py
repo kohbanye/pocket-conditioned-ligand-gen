@@ -680,7 +680,7 @@ def _(os, project_root):
     )
     from prolit.tokenizers.ligand import parse_sdf_text
     from prolit.tokenizers.protein import (
-        compute_canonical_frame as compute_canonical_frame,
+        compute_canonical_frame,
         extract_pocket_atoms_from_candidates,
         precompute_pocket_atom_candidates,
     )
@@ -1061,7 +1061,6 @@ def _(mo):
 def _(OUT_DIR, os, pd, pose_records):
     from posebusters import PoseBusters
     from rdkit import Chem, RDLogger
-    from rdkit.Chem import AllChem
     from rdkit.Geometry import Point3D
 
     RDLogger.DisableLog("rdApp.*")
@@ -1195,7 +1194,7 @@ def _(ARMS, MODELS, OUT_DIR, code_usage, np, pd):
             "util": float((counts > 0).sum() / codebook_size),
             "perplexity": float(np.exp(-(nz * np.log(nz)).sum())) if len(nz) else 0.0,
             "codes": set(np.unique(flat).tolist()),
-            "n_atoms": int(len(flat)),
+            "n_atoms": len(flat),
         }
 
     cb_rows = []

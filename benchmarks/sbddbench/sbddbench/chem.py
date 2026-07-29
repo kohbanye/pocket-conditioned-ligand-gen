@@ -12,6 +12,7 @@ import os
 import sys
 from functools import lru_cache
 
+
 # RDKit's SA scorer lives in the contrib tree, not the top-level package.
 @lru_cache(maxsize=1)
 def _sascorer():

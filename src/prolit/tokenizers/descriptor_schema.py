@@ -2,7 +2,8 @@
 
 Defines the vocabularies and field layout shared by:
 - :mod:`prolit.tokenizers.atom` (encode side: the 33-D per-atom row)
-- :class:`~prolit.tokenizers.vqvae.TransformerVQVAE` (encoder embeddings + decoder heads)
+- :class:`~prolit.tokenizers.vqvae.TransformerVQVAE`
+  (encoder embeddings + decoder heads)
 - :mod:`prolit.data.descriptors` (Welford normalization, only on continuous slots)
 
 A descriptor row is a single concatenated float32 vector. Continuous slots

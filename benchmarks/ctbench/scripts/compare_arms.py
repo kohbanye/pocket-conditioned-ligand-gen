@@ -23,8 +23,13 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+#: Vina dock score below which a generated ligand counts as a strong binder.
+_GOOD_DOCK = -8.0
+
 RESULTS = Path("results/generation")
-DIFFSBDD = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench/results/per_molecule.parquet")
+DIFFSBDD = (
+    Path(__file__).resolve().parents[2] / "sbddbench" / "results" / "per_molecule.parquet"
+)
 
 METRICS = (
     "vina_dock",
@@ -114,7 +119,8 @@ def main() -> None:
         verdict = "BEATS DiffSBDD" if mean < args.target else "below target"
         print(
             f"[{arm}] n_mol={len(df)} vina_dock n={n_ok} mean={mean:.3f} "
-            f"median={float(vd.median()):.3f} frac<-8={float((vd < -8).mean()):.3f} -> {verdict}"
+            f"median={float(vd.median()):.3f} "
+            f"frac<{_GOOD_DOCK}={float((vd < _GOOD_DOCK).mean()):.3f} -> {verdict}"
         )
 
     pts = {k: per_target(v) for k, v in loaded.items()}

@@ -39,8 +39,10 @@ def load_targets(
     base = index_path.parent
     out: list[Target] = []
     for r in records:
-        def _p(key):
-            v = r.get(key)
+        # ``record=r`` binds the current row: the closure is only used inside
+        # this iteration, and binding keeps it that way if it ever escapes.
+        def _p(key, record=r):
+            v = record.get(key)
             if v is None:
                 return None
             p = Path(v)

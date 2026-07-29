@@ -11,7 +11,7 @@ on the raw arrays already in ``eval_data.npz`` -- no GPU / regeneration. Run::
 
     uv run --with posebusters python scripts/eval_posebusters.py
 """
-# ruff: noqa: T201, S603, PLR2004, E501
+# ruff: noqa: S603, PLR2004, E501
 
 from __future__ import annotations
 

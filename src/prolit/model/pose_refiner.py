@@ -515,9 +515,9 @@ def refine_ligand_canonical(  # noqa: PLR0913
     passed so the refiner preserves intramolecular geometry; without it every
     edge is treated as non-bonded.
     """
-    from prolit.data.pose_refine_dataset import (
-        make_collate,
-    )
+    # Imported here, not at module scope: pose_refine_dataset imports this
+    # module for its feature layout, so a top-level import would be circular.
+    from prolit.data.pose_refine_dataset import make_collate  # noqa: PLC0415
 
     m = module.config.model
     bp = (

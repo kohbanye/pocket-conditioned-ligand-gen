@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 
-import numpy as np
+import numpy as np  # noqa: TC002
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset

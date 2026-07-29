@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 
 SOURCE_REPO = Path("/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen")
-SBDD_BENCH = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench")
+SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbddbench"
 sys.path.insert(0, str(SOURCE_REPO))
 
 from prolit.config import PocketExtractionConfig  # noqa: E402

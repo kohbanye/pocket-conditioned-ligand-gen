@@ -92,7 +92,8 @@ def resolve_vqvae(
     ablation table.
 
     The monitored metric contains a ``/``, so Lightning writes each checkpoint
-    into its own directory: ``<run>/checkpoints/atomvqvae-epoch=NN-val/atom_coord=X.ckpt``.
+    into its own directory:
+    ``<run>/checkpoints/atomvqvae-epoch=NN-val/atom_coord=X.ckpt``.
     """
     ckpt_dir = VQ_RUNS_DIR / run / "checkpoints"
     if pinned is not None:

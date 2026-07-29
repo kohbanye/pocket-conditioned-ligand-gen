@@ -92,7 +92,7 @@ def main() -> None:
         logger.error(
             "target index missing: %s\n"
             "Prepare the 100-pocket set first (in the sbdd-bench repo):\n"
-            "  python scripts/prepare_targets.py --crossdocked-test data/crossdocked_test",  # noqa: E501
+            "  python scripts/prepare_targets.py --crossdocked-test data/crossdocked_test",
             index,
         )
         return

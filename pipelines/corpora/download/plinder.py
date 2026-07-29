@@ -1,4 +1,4 @@
-# ruff: noqa: T201  (progress is printed to stdout by design)
+
 """Download PLINDER systems/*.zip from the public GCS bucket.
 
 Inode-safe: keeps the ~1,060 zip shards as-is and NEVER extracts them (the

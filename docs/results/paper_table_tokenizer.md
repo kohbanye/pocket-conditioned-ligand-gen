@@ -157,7 +157,7 @@ separate 8192+8192）より。
 6.33°）と整合する。参照が 0.980 なので、この差はデータ側ではなく**トークナイザ
 起因**である。
 
-これは `docs/comparison_tables.md` の生成タスクで PB-valid が 0.22 と低かった
+これは `docs/results/comparison_tables.md` の生成タスクで PB-valid が 0.22 と低かった
 （DiffGui 0.70 / TargetDiff 0.50 / DiffSBDD 0.49）ことの直接の説明になる。
 生成モデルではなく **all-atom トークナイザの再構成忠実度がボトルネック**である
 ことが、これで独立に裏付けられた。

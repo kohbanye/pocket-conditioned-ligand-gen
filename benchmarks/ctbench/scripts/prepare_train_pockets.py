@@ -16,6 +16,7 @@ sets are disjoint by construction rather than by assumption.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import shutil
 import sys
@@ -24,7 +25,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 SOURCE_REPO = Path("/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen")
-SBDD_BENCH = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench")
+SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbddbench"
 sys.path.insert(0, str(SOURCE_REPO))
 
 from rdkit import Chem, RDLogger  # noqa: E402
@@ -54,10 +55,12 @@ def mol_to_sdf(mol: dict, path: Path) -> bool:
         return False
     for a, b, t in mol["bonds"]:
         if a in idx_map and b in idx_map and a != b:
-            try:
-                rw.AddBond(idx_map[a], idx_map[b], _BOND_ORDER.get(t, Chem.BondType.SINGLE))
-            except Exception:  # noqa: BLE001
-                pass
+            # A duplicate or chemically impossible bond just means this pair
+            # contributes no edge; the pocket is still usable without it.
+            with contextlib.suppress(Exception):
+                rw.AddBond(
+                    idx_map[a], idx_map[b], _BOND_ORDER.get(t, Chem.BondType.SINGLE)
+                )
     m = rw.GetMol()
     conf = Chem.Conformer(m.GetNumAtoms())
     for i, p in enumerate(conf_pos):

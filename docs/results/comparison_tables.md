@@ -1,6 +1,6 @@
 # All-atom best vs. existing methods — comparison tables
 
-Our best all-atom model (see `docs/best_allatom_configs.md`) against published
+Our best all-atom model (see `docs/results/best_allatom_configs.md`) against published
 baselines, per task. Arrows give the "better" direction. Bold = our result.
 Metrics verified 2026-07-23.
 

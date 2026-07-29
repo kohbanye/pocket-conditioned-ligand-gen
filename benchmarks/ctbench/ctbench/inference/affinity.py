@@ -134,7 +134,9 @@ def _score_complex(  # noqa: PLR0913
         batch = {
             "input_ids": ids,
             "attention_mask": torch.ones_like(ids),
-            "ligand_mask": torch.tensor(sequence_ligand_mask(seq), device=device).unsqueeze(0),
+            "ligand_mask": torch.tensor(
+                sequence_ligand_mask(seq), device=device
+            ).unsqueeze(0),
         }
         with torch.no_grad():
             head = float(rescorer(batch).item())  # affinity head: raw output = pK

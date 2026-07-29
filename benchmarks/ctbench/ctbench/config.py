@@ -1,9 +1,8 @@
 """Dataclass configuration groups (stdlib ``@dataclass`` idiom, typed defaults).
 
-Follows the boilerplate config style: plain frozen-less dataclasses with typed
-defaults, instantiated directly in ``scripts/*`` ``main()`` entrypoints (no
-hydra/argparse layer). Paths default to the sibling-repo locations on the group
-filesystem and can be overridden per run.
+Plain dataclasses with typed defaults, instantiated directly in the ``scripts/*``
+entry points. Paths default to locations inside this monorepo and can be
+overridden per run.
 """
 
 from __future__ import annotations
@@ -12,13 +11,15 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_GIT_ROOT = Path("/gs/bs/tga-ohuelab/sakano/git")
+# benchmarks/ctbench/ctbench/config.py -> up three to the monorepo root.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_GIT_ROOT = _REPO_ROOT.parent
 
 
 def _source_repo_default() -> Path:
-    """Source-repo root, overridable via ``CTBENCH_SOURCE_REPO`` for portability."""
+    """Model-library root. ``CTBENCH_SOURCE_REPO`` overrides it for portability."""
     env = os.environ.get("CTBENCH_SOURCE_REPO")
-    return Path(env) if env else _GIT_ROOT / "pocket-conditioned-ligand-gen"
+    return Path(env) if env else _REPO_ROOT
 
 
 @dataclass
@@ -26,8 +27,10 @@ class PathsConfig:
     """Filesystem locations for models, data, baselines and results."""
 
     source_repo: Path = field(default_factory=_source_repo_default)
+    # RTMScore / GenScore live in their own checkout with micromamba envs; they
+    # are not vendored here because each pins a conflicting DGL build.
     baselines_repo: Path = _GIT_ROOT / "baselines"
-    sbdd_bench_repo: Path = _GIT_ROOT / "sbdd-bench"
+    sbdd_bench_repo: Path = _REPO_ROOT / "benchmarks" / "sbddbench"
     results_dir: Path = Path("results")
 
     @property

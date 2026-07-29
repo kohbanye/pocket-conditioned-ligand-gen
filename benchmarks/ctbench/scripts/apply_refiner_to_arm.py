@@ -33,10 +33,11 @@ from pathlib import Path
 
 import numpy as np
 
-SOURCE_REPO = Path("/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen")
-SBDD_BENCH = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench")
-CTBENCH = Path("/gs/bs/tga-ohuelab/sakano/git/complex-tokenizer-bench")
-sys.path.insert(0, str(SOURCE_REPO))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SBDD_BENCH = REPO_ROOT / "benchmarks" / "sbddbench"
+CTBENCH = Path(__file__).resolve().parents[1]
+# ``prolit`` is installed; this is only so the sibling script in this directory
+# can be imported as ``scripts.build_distill_refine_set``.
 sys.path.insert(0, str(CTBENCH))
 
 import torch  # noqa: E402
@@ -109,7 +110,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     module = (
         PoseRefinerModule.load_from_checkpoint(
-            str(SOURCE_REPO / args.ckpt), map_location=device
+            str(REPO_ROOT / args.ckpt), map_location=device
         )
         .eval()
         .to(device)

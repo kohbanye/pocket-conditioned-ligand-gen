@@ -12,7 +12,6 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "biopython>=1.84",
-    "hydra-core>=1.3.2",
     "marimo>=0.23.2",
     "lightning>=2.5.6",
     "matplotlib>=3.10.7",
@@ -69,8 +68,16 @@ select = ["ALL"]
 ignore = ["D", "N812", "COM812"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/*.py" = ["INP001"]
-"tests/*.py" = ["S101", "PLR2004"]
+# Entry points, not packages: they are invoked by path, print their progress,
+# and legitimately have no __init__.py.
+"scripts/*.py" = ["INP001", "T201"]
+"pipelines/**/*.py" = ["INP001", "T201"]
+"jobs/*.py" = ["INP001", "T201"]
+"benchmarks/*/scripts/*.py" = ["INP001", "T201"]
+# Tests assert, compare against literal expected values, and are not packages.
+"tests/*.py" = ["S101", "PLR2004", "INP001"]
+"benchmarks/**/test_*.py" = ["S101", "PLR2004", "INP001"]
+"benchmarks/*/tests/*.py" = ["S101", "PLR2004", "INP001"]
 "notebooks/*.ipynb" = ["T201", "E402", "ANN", "E501", "PLR2004", "INP001", "S101"]
 "notebooks/*.py" = [
     "ANN001",     # marimo cell args are reactive-deps with complex types
@@ -89,6 +96,22 @@ ignore = ["D", "N812", "COM812"]
     "INP001",     # no __init__.py in notebooks/
     "RUF001",     # ambiguous unicode — Japanese text in markdown
     "UP037",      # quoted annotations needed — marimo exec() ignores __future__ annotations
+    "PLR2004",    # magic values — thresholds and column counts read better inline
+    "C901",       # complex-structure — a cell is one narrative block, not a function
+    "PD011",      # .values — the notebooks predate the .to_numpy() preference
+    "PD013",      # .stack() — same
+    "PD010",      # .pivot_table() — same
+    "B007",       # unused loop variable — cells iterate for side effects
+    "B905",       # zip() without strict= — lengths are asserted upstream
+    "FBT003",     # boolean positional — matplotlib/seaborn take them that way
+    "ICN001",     # import alias — notebooks import plotting libs conventionally
+    "RUF005",     # list concat — clearer than unpacking in a plotting call
+    "RUF046",     # int() cast — explicit is fine here
+    "RUF059",     # unused unpacked variable — tuple returns from cells
+    "N802",       # function name — notebook helpers mirror column names
+    "ANN202",     # return type on a nested helper inside a cell
+    "F841",       # assigned-but-unused — marimo cells export by assignment
+    "B023",       # loop-variable closure — cells build closures per subplot
 ]
 
 [dependency-groups]

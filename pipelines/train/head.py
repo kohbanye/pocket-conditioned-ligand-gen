@@ -1,7 +1,8 @@
 """Fine-tune a pose-scoring head on the pretrained complex-token MLM encoder.
 
 Warm-starts the ESM3-style encoder from an MLM checkpoint and trains an MLP head
-to regress pose RMSD on rigid-perturbation decoys (:mod:`pipelines.corpora.tokenize_decoys`).
+to regress pose RMSD on rigid-perturbation decoys
+(:mod:`pipelines.corpora.tokenize_decoys`).
 The discriminative complement to zero-shot masked PLL.
 
 Run (single GPU)::

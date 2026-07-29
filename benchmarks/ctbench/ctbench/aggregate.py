@@ -10,8 +10,8 @@ Holm-corrected across the set of pairwise comparisons.
 from __future__ import annotations
 
 import pandas as pd
-
 from prolit_bench import stats
+
 from ctbench.metrics import affinity as A
 from ctbench.metrics import rescoring as R
 

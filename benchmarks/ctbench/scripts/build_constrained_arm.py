@@ -47,7 +47,7 @@ from pathlib import Path
 
 import numpy as np
 
-SBDD_BENCH = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench")
+SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbddbench"
 sys.path.insert(0, str(SBDD_BENCH))
 
 from rdkit import Chem, RDLogger  # noqa: E402
@@ -82,7 +82,7 @@ def perceive(elements: list[str], coords: np.ndarray) -> Chem.Mol | None:
         return mol
 
 
-def build_target(  # noqa: PLR0913
+def build_target(  # noqa: PLR0913, C901
     pool_dirs: list[Path],
     out_dir: Path,
     target: str,
@@ -105,7 +105,7 @@ def build_target(  # noqa: PLR0913
     # baselines run ~1.5x the reference size (DiffSBDD averages 20.9 heavy atoms
     # against a 12.2-atom reference there), and Vina is not size-normalised, so a
     # purely reference-tied floor concedes ~0.7 kcal/mol on those pockets.
-    floor = max(int(round(size_frac * n_ref)), min_atoms) if n_ref else min_atoms
+    floor = max(round(size_frac * n_ref), min_atoms) if n_ref else min_atoms
 
     n_pool = n_sanitize = n_connected = 0
     kept: list[Chem.Mol] = []

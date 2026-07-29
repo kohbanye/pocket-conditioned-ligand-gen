@@ -82,13 +82,13 @@ def test_known_policy_divergence_is_reported() -> None:
     in. If a future change makes the policies agree, this test fails and should
     be deleted along with ``PUBLISHED_POLICY``.
     """
-    diverging = []
-    for name in ARM_NAMES:
-        best = variants.checkpoints(name, "best")
-        last = variants.checkpoints(name, "last")
-        for key in ("protein_ckpt", "ligand_ckpt"):
-            if best[key].resolve() != last[key].resolve():
-                diverging.append(f"{name}.{key}")
+    diverging = [
+        f"{name}.{key}"
+        for name in ARM_NAMES
+        for key in ("protein_ckpt", "ligand_ckpt")
+        if variants.checkpoints(name, "best")[key].resolve()
+        != variants.checkpoints(name, "last")[key].resolve()
+    ]
 
     assert diverging, (
         "'best' and 'last' now resolve identically for every arm -- the "

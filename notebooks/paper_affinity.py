@@ -10,7 +10,7 @@
 # ///
 """Paper figure/table: all-atom affinity head (CASF-2016 scoring & ranking power).
 
-Our model (see docs/best_allatom_configs.md):
+Our model (see docs/results/best_allatom_configs.md):
   leak-free MLM backbone wxlhgqx3 + pK-regression heads. Best number = a fixed
   5-head ensemble (no test-set selection). Scoring power = Pearson R of predicted
   vs experimental pKa over 285 complexes; ranking power = mean within-cluster
@@ -140,11 +140,13 @@ def _(CASF, ens, pd, ranking_rho, scoring_R):
     # Baseline aggregates from the finished cross-method run.
     method_cmp = pd.read_csv(CASF / "method_comparison.csv").set_index("method")
     rows = []
-    for m in ["GenScore", "Boltz-2", "Vina"]:
-        if m in method_cmp.index:
-            rows.append({"method": m,
-                         "scoring R ↑": round(method_cmp.loc[m, "scoring_R"], 3),
-                         "ranking ρ ↑": round(method_cmp.loc[m, "ranking_rho"], 3)})
+    rows.extend(
+        {"method": m,
+         "scoring R ↑": round(method_cmp.loc[m, "scoring_R"], 3),
+         "ranking ρ ↑": round(method_cmp.loc[m, "ranking_rho"], 3)}
+        for m in ["GenScore", "Boltz-2", "Vina"]
+        if m in method_cmp.index
+    )
     rows.append({"method": "OURS (LF5 ensemble)",
                  "scoring R ↑": round(scoring_R(ens), 3),
                  "ranking ρ ↑": round(ranking_rho(ens), 3)})

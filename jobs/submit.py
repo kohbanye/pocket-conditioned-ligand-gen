@@ -74,7 +74,9 @@ def build(  # noqa: PLR0913
     body = "\n".join(
         '"$PY" ' + " ".join(shlex.quote(a) for a in cmd) for cmd in commands
     )
-    env_lines = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in (env or {}).items())
+    env_lines = "".join(
+        f"export {k}={shlex.quote(v)}\n" for k, v in (env or {}).items()
+    )
     return _TEMPLATE.format(
         resource=resource,
         hours=hours,
@@ -151,18 +153,18 @@ def main() -> None:
 
     cost = RESOURCES[args.resource] * args.hours
     rel = path.relative_to(REPO_ROOT)
-    print(f"wrote {rel}")  # noqa: T201
-    print(  # noqa: T201
+    print(f"wrote {rel}")
+    print(
         f"  {args.resource} for up to {args.hours} h "
         f"-> at most {cost:.2f} node-hours of billing"
     )
     qsub = ["qsub", "-g", args.group, str(rel)]
-    print("  " + " ".join(qsub))  # noqa: T201
+    print("  " + " ".join(qsub))
 
     if args.submit:
         subprocess.run(qsub, check=True, cwd=REPO_ROOT)  # noqa: S603
     else:
-        print("  (not submitted; pass --submit)")  # noqa: T201
+        print("  (not submitted; pass --submit)")
 
 
 if __name__ == "__main__":

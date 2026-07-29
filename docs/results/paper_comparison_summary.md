@@ -2,7 +2,7 @@
 
 全て **all-atom 統一トークナイザ**（single-book VQ-VAE `xzkjxu9q`, vocab 8199,
 coord err 0.107 Å）を共有する 1 スタック。構成・checkpoint の詳細は
-`docs/best_allatom_configs.md`、タスク別の詳細表は `docs/comparison_tables.md`。
+`docs/results/best_allatom_configs.md`、タスク別の詳細表は `docs/results/comparison_tables.md`。
 数値は 2026-07-23 に再計算・検証済み。
 
 ---

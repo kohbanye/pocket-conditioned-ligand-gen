@@ -66,8 +66,14 @@ def clash_count(
     """Number of ligand–protein heavy-atom pairs closer than ``tol``·(r_i+r_j)."""
     from scipy.spatial import cKDTree
 
-    lig = np.asarray([(e, c) for e, c in zip(lig_elements, lig_coords) if e != "H"],
-                     dtype=object)
+    lig = np.asarray(
+        [
+            (e, c)
+            for e, c in zip(lig_elements, lig_coords, strict=True)
+            if e != "H"
+        ],
+        dtype=object,
+    )
     if len(lig) == 0 or len(prot_coords) == 0:
         return 0
     lig_xyz = np.vstack([c for _, c in lig]).astype(np.float64)
