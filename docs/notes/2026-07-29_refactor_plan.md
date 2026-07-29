@@ -251,7 +251,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
   `prolit` の import 時に自動登録）で解決。回帰テスト `tests/test_legacy_checkpoint_path.py` を追加。
   165 run ディレクトリの checkpoint を書き換えるより安全。
 
-### Phase 4 — pipelines/ 集約 (2 日)
+### Phase 4 — pipelines/ 集約 ✅ 完了 (2026-07-30)
 - 4 重複している `_Encoder` を `prolit/data/token_cache.py` の `TokenStreamWriter` +
   `ComplexEncoder` に一本化。
 - `tokenize_{dataset_atom,plinder_protein,biolip,geom_atom,decoys}.py` →
@@ -259,7 +259,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 - 見込み: ~2,300 行 → ~1,000 行。**回帰検知として、既存 cache の先頭 N doc とバイト一致することを
   テストに入れる** (トークン列が変わると全 checkpoint が無効になるため、ここは慎重に)。
 
-### Phase 5 — benchmarks 統合 (2〜3 日)
+### Phase 5 — benchmarks 統合 ✅ 完了 (2026-07-30)
 - ctbench の `metrics/` `stats.py` `report.py` `io_dumps.py` `plotting.py` → `benchmarks/common/`。
 - sbddbench の `docking.py` `pose.py` `chem.py` `diversity.py` `molio.py` → `benchmarks/common/`
   (Vina と PoseBusters は generation と reconstruction の両方で使う)。
@@ -267,12 +267,12 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 - **ctbench の再現テスト (`test_reproduce_*.py`) は必ず残す** — 論文の数値が動いていないことの
   唯一の自動チェックです。
 
-### Phase 6 — jobs/ テンプレート化 (1 日)
+### Phase 6 — jobs/ ✅ 完了 (2026-07-30)
 - 129 本 → ~12 テンプレート + `jobs/gen.py` (アーム名・ノード種別・時間をパラメータ化)。
 - 動作実績のあるパターン (`.venv/bin/python` 直叩き、`source ~/.bashrc`/`module load` 禁止、
   `export PYTHONPATH`/`WANDB_MODE`) をテンプレートに固定。
 
-### Phase 7 — 衛生 (1 日)
+### Phase 7 — 衛生 ✅ 完了 (2026-07-30)
 - ruff 52 errors → 0。`pytest --collect-only` の 130 秒を lazy import で短縮。
 - 依存を base / bench-* に分割し、未使用の Hydra を削除。CLAUDE.md の記述も実態に合わせる。
 - README を書き換え (現在「Boilerplate for ML projects」の 1 行)。ProLIT の説明・3 表・再現手順。
@@ -293,3 +293,41 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
   (移さずルート据え置きのままでも構わない — 論文の再現性記録としては据え置きの方が安全)。
 - トークン列のバイト表現を変える変更 (Phase 4) は、全 checkpoint を無効化しうる。
   既存 cache との一致テストを先に置いてから着手する。
+
+
+---
+
+## 完了記録 (2026-07-30)
+
+全 7 フェーズ完了。ブランチ `refactor/monorepo`。
+
+| 指標 | 前 | 後 |
+|---|---|---|
+| Python 行数 (src+pipelines+scripts+tests+notebooks) | 29,908 | 23,122 |
+| ruff errors (monorepo 全体) | 177 | **0** |
+| テスト | 66 pass / 204 秒 | **90 pass + 1 xfail / 17 秒** |
+| ルート直下エントリ | 549 | 28 |
+| リポジトリ数 | 4 | 1 |
+| `scripts/` の .py / job .sh | 62 / 129 | 13 / 0 |
+
+### 計画から変えた判断
+
+1. **`patches/` は必要だった**（当初「不要」と判断→撤回）。DiffGui に未コミットの
+   改変が submodule 内にあり、clone し直すと消える状態だった。
+2. **plbench を uv workspace から除外**。ESM3 の fork 版 transformers が
+   モデル側の transformers 5.x を巻き戻すため。
+3. **tokenize の単一 CLI 化はしない**。共有されていたのは flush ループだけで、
+   それは `prolit.data.token_stream` に抽出済み。残りは source 固有。
+4. **benchmarks をタスク別ディレクトリに解体しない**。重複が小さく、
+   論文数値を固定している再現テストを壊すリスクに見合わない。
+5. **job script はテンプレート化でなく「履歴」と「仕組み」の分離**。
+   121本は個別実験の記録であり provenance。
+
+### 未着手 / 引き継ぎ
+
+- `ruff format`（77 ファイル）は別コミットに分離。
+- 論文 Table 3 の TargetDiff −4.76 を再現する dump が存在しない
+  （committed の TargetDiff は全て正の Vina score）。strict xfail で明示済み。
+- separate アームの checkpoint 選択が Table 1（best）と Table 2/3（last）で
+  食い違っている。`PUBLISHED_POLICY` に記録し、
+  `benchmarks/test_variant_agreement.py` が差分を可視化する。**要判断**。
