@@ -213,7 +213,18 @@ checkpoints/
 *.ckpt
 wget-log
 
+# Training run directories (checkpoints + wandb metadata). Their paths are quoted
+# verbatim in docs/results/ and benchmarks/variants.py, so they stay where they
+# are rather than moving under runs/.
+/pocket-ligand-vqvae/
+/pocket-ligand-lm/
+/pocket-ligand-mlm/
+/pocket-ligand-rescore/
+/pocket-ligand-refine/
+/runs/
+
 # TSUBAME job logs and generated artifacts
+/logs/
 *.out
 *.err
 outputs/
