@@ -1,0 +1,2 @@
+model,n_targets,validity,connected,pb_valid_rate,clash_free_rate,qed_mean,sa_mean,lipinski_frac,vina_score_mean,vina_min_mean,div_uniqueness,div_scaffold_diversity,tanimoto_ref_mean,hit_rate,hit_scaffold_unique_rate
+own,100,1.0,1.0,0.41420668515354975,0.9984999999999999,0.4893058905150552,6.757251464467218,0.9956,-5.757671612010516,-6.025039708039297,0.7152,0.5393939393939394,0.06976840550245694,0.0,0.0

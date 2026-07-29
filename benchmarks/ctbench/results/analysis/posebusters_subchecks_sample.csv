@@ -1,0 +1,12 @@
+check,joint,separate,diffsbdd
+all_atoms_connected,1.0,1.0,1.0
+aromatic_ring_flatness,0.999,1.0,0.999
+bond_angles,0.614,0.766,0.821
+bond_lengths,0.496,0.632,0.825
+double_bond_flatness,1.0,1.0,0.996
+inchi_convertible,0.882,0.892,0.826
+internal_steric_clash,0.856,0.902,0.959
+mol_pred_loaded,1.0,1.0,1.0
+non-aromatic_ring_non-flatness,0.969,0.959,0.977
+sanitization,1.0,1.0,1.0
+__n_bustable__,1176.0,1177.0,1182.0
