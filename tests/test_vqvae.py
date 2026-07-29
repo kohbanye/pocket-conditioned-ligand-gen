@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import torch
 
-from src.config import AtomVQVAEConfig
-from src.data.descriptors import MoleculeDataset, collate_molecules
-from src.tokenizers.descriptor_schema import (
+from prolit.config import AtomVQVAEConfig
+from prolit.data.descriptors import MoleculeDataset, collate_molecules
+from prolit.tokenizers.descriptor_schema import (
     ATOM_DESCRIPTOR_DIM,
     SOURCE_LIGAND_IDX,
     SOURCE_PROTEIN_IDX,
 )
-from src.tokenizers.vqvae import TransformerVQVAE
+from prolit.tokenizers.vqvae import TransformerVQVAE
 
 
 class TestCollation:

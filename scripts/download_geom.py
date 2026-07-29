@@ -8,7 +8,7 @@ deps).
 Run on a login / data-transfer node (needs internet + ~8 GB free); write to
 Lustre ``data/`` (NOT ``$HOME`` -- it is inode/space limited). The default
 ``rdkit_folder.tar.gz`` is the per-molecule RDKit-pickle distribution consumed
-by :mod:`src.data.geom`.
+by :mod:`prolit.data.geom`.
 
     # see what's available
     uv run python scripts/download_geom.py --list

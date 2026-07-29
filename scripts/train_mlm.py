@@ -30,9 +30,9 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import WandbLogger
 
-from src.config import MLMTrainingConfig
-from src.data.mlm_dataset import MLMTokenDataModule
-from src.model.mlm_module import ComplexMLMModule
+from prolit.config import MLMTrainingConfig
+from prolit.data.mlm_dataset import MLMTokenDataModule
+from prolit.model.mlm_module import ComplexMLMModule
 
 logging.basicConfig(level=logging.INFO)
 

@@ -27,18 +27,18 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from src.config import AtomVQVAETrainingConfig
-from src.data.descriptors import collate_molecules
-from src.data.geom import (
+from prolit.config import AtomVQVAETrainingConfig
+from prolit.data.descriptors import collate_molecules
+from prolit.data.geom import (
     iter_geom_tar_conformers,
     iter_mol_conformers,
     load_geom_refs,
 )
-from src.data.token_io import SplitWriter
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.atom import LigandAtomDescriptor, rotate_atom_descriptor
-from src.tokenizers.geometry import random_rotation_matrix
-from src.tokenizers.lm_vocab import AtomLMVocab
+from prolit.data.token_io import SplitWriter
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.atom import LigandAtomDescriptor, rotate_atom_descriptor
+from prolit.tokenizers.geometry import random_rotation_matrix
+from prolit.tokenizers.lm_vocab import AtomLMVocab
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -109,7 +109,7 @@ class _Tokenizer:
             self.flush(split)
 
 
-def main() -> None:  # noqa: C901, PLR0915, PLR0912
+def main() -> None:  # noqa: C901, PLR0915
     parser = argparse.ArgumentParser()
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--geom-tar", type=Path, default=None)
@@ -173,10 +173,10 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         # norm) -- SeparateVQVAE normalizes per modality internally. GEOM is
         # ligand-only, so tokens land in the ligand half of the 2*codebook_size
         # combined single-range AtomLMVocab.
-        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+        from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
             ATOM_DESCRIPTOR_DIM,
         )
-        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
         module = SeparateVQVAE.from_checkpoints(
             args.separate_protein_ckpt,

@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from src.config import ComplexMLMConfig
-from src.data.mlm_dataset import MLMTokenDataset, collate_mlm
-from src.model.complex_mlm import build_complex_mlm, count_parameters
-from src.tokenizers.lm_vocab import (
+from prolit.config import ComplexMLMConfig
+from prolit.data.mlm_dataset import MLMTokenDataset, collate_mlm
+from prolit.model.complex_mlm import build_complex_mlm, count_parameters
+from prolit.tokenizers.lm_vocab import (
     BOS_ID,
     EOS_ID,
     L_CLOSE_ID,

@@ -15,9 +15,13 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from src.config import PoseRefinerConfig, PoseRefineTrainingConfig
-from src.data.pose_refine_dataset import make_collate
-from src.model.pose_refiner import FEATURE_FIELDS, NUM_FEATURE_FIELDS, PoseRefinerModule
+from prolit.config import PoseRefinerConfig, PoseRefineTrainingConfig
+from prolit.data.pose_refine_dataset import make_collate
+from prolit.model.pose_refiner import (
+    FEATURE_FIELDS,
+    NUM_FEATURE_FIELDS,
+    PoseRefinerModule,
+)
 
 
 def _random_rotation(gen: torch.Generator) -> torch.Tensor:

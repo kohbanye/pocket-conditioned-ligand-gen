@@ -70,23 +70,23 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from prolit.chem.pdb_io import infer_bonds  # noqa: E402
+from prolit.config import (  # noqa: E402
+    PocketExtractionConfig,
+)
+from prolit.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
+from prolit.tokenizers.ligand import parse_sdf  # noqa: E402
+from prolit.tokenizers.lm_vocab import (  # noqa: E402
+    L_CLOSE_ID,
+    PAD_ID,
+    AtomLMVocab,
+)
 from scripts.generate_ligands_3d import (  # noqa: E402
     _decode_ligand_atom,
     _pocket_codes_atom,
     load_atom_lm,
     load_atom_norm_stats,
     load_atom_vqvae,
-)
-from src.chem.pdb_io import infer_bonds  # noqa: E402
-from src.config import (  # noqa: E402
-    PocketExtractionConfig,
-)
-from src.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
-from src.tokenizers.ligand import parse_sdf  # noqa: E402
-from src.tokenizers.lm_vocab import (  # noqa: E402
-    L_CLOSE_ID,
-    PAD_ID,
-    AtomLMVocab,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -155,12 +155,12 @@ def _pocket_context(receptor_path: Path, ref_mol: dict, frame: tuple) -> tuple |
     pocket in one coordinate system. Only atoms within the refiner's cutoff of
     the ligand end up mattering (the collate filters by radius).
     """
-    from src.model.pose_refiner import pocket_feats_from_descriptor  # noqa: PLC0415
-    from src.tokenizers.atom import (  # noqa: PLC0415
+    from prolit.model.pose_refiner import pocket_feats_from_descriptor  # noqa: PLC0415
+    from prolit.tokenizers.atom import (  # noqa: PLC0415
         ProteinAtomDescriptor,
         precompute_receptor_atom_features_from_text,
     )
-    from src.tokenizers.protein import (  # noqa: PLC0415
+    from prolit.tokenizers.protein import (  # noqa: PLC0415
         extract_pocket_atoms_from_candidates,
         precompute_pocket_atom_candidates_from_text,
     )
@@ -186,7 +186,7 @@ def _pocket_context(receptor_path: Path, ref_mol: dict, frame: tuple) -> tuple |
     return pkt_canon, pocket_feats_from_descriptor(prot_desc)
 
 
-def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
+def _build_generator(args, device):  # noqa: ANN001
     """Load the LM + VQ-VAE(s) for the selected tokenizer path and return the
     pieces the sampling loop needs.
 
@@ -210,7 +210,7 @@ def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
         # ligand decoded by a ligand-only VQ, unified into one combined code space
         # (protein codes [0, Pc), ligand codes [Pc, 2*Pc)) by SeparateVQVAE. The
         # LM is the separate LM trained over an AtomLMVocab of 2*codebook-size.
-        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
         separate_vqvae = SeparateVQVAE.from_checkpoints(
             args.separate_protein_ckpt,
@@ -408,7 +408,7 @@ def main() -> None:  # noqa: C901, PLR0915
     refiner = None
     pocket_ctx = None
     if args.refine_ckpt is not None:
-        from src.model.pose_refiner import PoseRefinerModule  # noqa: PLC0415
+        from prolit.model.pose_refiner import PoseRefinerModule  # noqa: PLC0415
 
         refiner = (
             PoseRefinerModule.load_from_checkpoint(

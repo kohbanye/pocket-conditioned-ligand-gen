@@ -23,7 +23,7 @@ dependencies = [
     "wandb>=0.23.0",
     # The model library this bench evaluates. It is a workspace member now, so
     # its own transitive deps (biopython, e3nn, transformers, ...) come with it
-    # and `import src.*` resolves without the sys.path shim in
+    # and `import prolit.*` resolves without the sys.path shim in
     # ctbench/inference/__init__.py::ensure_source_repo_importable.
     "pocket-conditioned-ligand-gen",
 ]

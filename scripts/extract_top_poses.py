@@ -35,8 +35,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.chem.pdb_io import infer_bonds, write_full_protein_pdb  # noqa: E402
-from src.tokenizers.ligand import parse_sdf  # noqa: E402
+from prolit.chem.pdb_io import infer_bonds, write_full_protein_pdb  # noqa: E402
+from prolit.tokenizers.ligand import parse_sdf  # noqa: E402
 
 DEFAULT_VINA = "/home/5/uq02055/.local/bin/vina"
 DEFAULT_OBABEL = "/home/5/uq02055/usr/app/babel/bin/obabel"

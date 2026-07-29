@@ -31,6 +31,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.ligand import parse_ligand_pdb_text
+from prolit.tokenizers.lm_vocab import AtomLMVocab
 from scripts.eval_casf_rescore import _PoseEncoder, _random_rotation
 from scripts.tokenize_biolip import (
     _bucket_code,
@@ -39,10 +43,6 @@ from scripts.tokenize_biolip import (
     _parse_biolip_txt,
     _read_needed,
 )
-from src.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.ligand import parse_ligand_pdb_text
-from src.tokenizers.lm_vocab import AtomLMVocab
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -344,10 +344,10 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         # internally. Combined single-range AtomLMVocab over 2*codebook_size
         # codes. _PoseEncoder encodes pocket + ligand in separate (single-
         # modality) encode_batch calls, which SeparateVQVAE requires.
-        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+        from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
             ATOM_DESCRIPTOR_DIM,
         )
-        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
         module = SeparateVQVAE.from_checkpoints(
             args.separate_protein_ckpt,

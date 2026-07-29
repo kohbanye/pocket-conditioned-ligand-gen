@@ -51,7 +51,6 @@ SBDD_BENCH = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench")
 sys.path.insert(0, str(SBDD_BENCH))
 
 from rdkit import Chem, RDLogger  # noqa: E402
-
 from sbddbench.molio import obabel_mol  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")

@@ -294,7 +294,7 @@ def relax_mol(  # noqa: PLR0913
     return out
 
 
-def main() -> None:  # noqa: C901
+def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--arm", required=True, help="source arm dir under sbdd-bench/outputs")
     ap.add_argument("--out-arm", required=True)

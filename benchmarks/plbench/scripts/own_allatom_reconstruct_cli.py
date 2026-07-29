@@ -46,27 +46,27 @@ def load_own(workdir: Path):
     """Put the own repo on the path and import the pieces this CLI needs."""
     if str(workdir) not in sys.path:
         sys.path.insert(0, str(workdir))
-    from src.config import PocketExtractionConfig
-    from src.model.vqvae_module import AtomVQVAEModule
-    from src.tokenizers.atom import (
+    from prolit.config import PocketExtractionConfig
+    from prolit.model.vqvae_module import AtomVQVAEModule
+    from prolit.tokenizers.atom import (
         LigandAtomDescriptor,
         ProteinAtomDescriptor,
         atom_descriptor_to_coords,
         precompute_receptor_atom_features,
     )
-    from src.tokenizers.descriptor_schema import (
+    from prolit.tokenizers.descriptor_schema import (
         ATOM_DESCRIPTOR_DIM,
         ATOM_LAYOUT,
         LIGAND_ELEMENT_VOCAB,
         fields_by_name,
     )
-    from src.tokenizers.geometry import (
+    from prolit.tokenizers.geometry import (
         cartesian_to_spherical_np,
         spherical_to_cartesian_np,
     )
-    from src.tokenizers.ligand import parse_sdf
-    from src.tokenizers.protein import (
-        _compute_canonical_frame,
+    from prolit.tokenizers.ligand import parse_sdf
+    from prolit.tokenizers.protein import (
+        compute_canonical_frame,
         extract_pocket_atoms_from_candidates,
         precompute_pocket_atom_candidates,
     )
@@ -85,7 +85,7 @@ def load_own(workdir: Path):
         cartesian_to_spherical_np=cartesian_to_spherical_np,
         spherical_to_cartesian_np=spherical_to_cartesian_np,
         parse_sdf=parse_sdf,
-        compute_canonical_frame=_compute_canonical_frame,
+        compute_canonical_frame=compute_canonical_frame,
         extract_pocket_atoms_from_candidates=extract_pocket_atoms_from_candidates,
         precompute_pocket_atom_candidates=precompute_pocket_atom_candidates,
     )

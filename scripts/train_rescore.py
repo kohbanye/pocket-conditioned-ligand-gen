@@ -27,9 +27,9 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import WandbLogger
 
-from src.config import ComplexMLMConfig, RescoreTrainingConfig
-from src.data.rescore_dataset import RescoreDataModule
-from src.model.rescore_module import ComplexRescoreModule
+from prolit.config import ComplexMLMConfig, RescoreTrainingConfig
+from prolit.data.rescore_dataset import RescoreDataModule
+from prolit.model.rescore_module import ComplexRescoreModule
 
 logging.basicConfig(level=logging.INFO)
 

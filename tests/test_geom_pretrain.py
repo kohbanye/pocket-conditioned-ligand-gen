@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.data.geom import _rd_mol_to_atoms_bonds, assign_split
-from src.tokenizers.geometry import (
+from prolit.data.geom import _rd_mol_to_atoms_bonds, assign_split
+from prolit.tokenizers.geometry import (
     random_rotation_matrix,
 )
 

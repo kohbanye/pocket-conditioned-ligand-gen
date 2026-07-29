@@ -41,6 +41,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from prolit.config import (  # noqa: E402
+    PocketExtractionConfig,
+)
+from prolit.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
+from prolit.tokenizers.lm_vocab import (  # noqa: E402
+    L_CLOSE_ID,
+    PAD_ID,
+    AtomLMVocab,
+)
 from scripts.dock_vina import (  # noqa: E402
     DEFAULT_OBABEL,
     DEFAULT_VINA,
@@ -58,15 +67,6 @@ from scripts.generate_ligands_3d import (  # noqa: E402
     load_atom_lm,
     load_atom_norm_stats,
     load_atom_vqvae,
-)
-from src.config import (  # noqa: E402
-    PocketExtractionConfig,
-)
-from src.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
-from src.tokenizers.lm_vocab import (  # noqa: E402
-    L_CLOSE_ID,
-    PAD_ID,
-    AtomLMVocab,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")

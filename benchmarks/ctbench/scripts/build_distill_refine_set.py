@@ -19,7 +19,7 @@ Coordinates stay in the receptor's own frame. The refiner is E(3)-equivariant --
 it reads only relative edge vectors -- so a model trained in the PDB frame applies
 unchanged to the pocket canonical frame used at generation time.
 
-Usage (source-repo interpreter, it owns ``src.tokenizers``)::
+Usage (source-repo interpreter, it owns ``prolit.tokenizers``)::
 
     <src-repo>/.venv/bin/python scripts/build_distill_refine_set.py \
         --src-arm sep4096_cs --dst-arm sep4096_cs_rx105 \
@@ -39,28 +39,27 @@ SOURCE_REPO = Path("/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen"
 SBDD_BENCH = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench")
 sys.path.insert(0, str(SOURCE_REPO))
 
-from rdkit import Chem, RDLogger  # noqa: E402
-
-from src.config import PocketExtractionConfig  # noqa: E402
-from src.model.pose_refiner import (  # noqa: E402
+from prolit.config import PocketExtractionConfig  # noqa: E402
+from prolit.model.pose_refiner import (  # noqa: E402
     ligand_feats_from_heads,
     pocket_feats_from_descriptor,
 )
-from src.tokenizers.atom import (  # noqa: E402
+from prolit.tokenizers.atom import (  # noqa: E402
     ProteinAtomDescriptor,
     precompute_receptor_atom_features_from_text,
 )
-from src.tokenizers.descriptor_schema import (  # noqa: E402
+from prolit.tokenizers.descriptor_schema import (  # noqa: E402
     LIGAND_CHARGE_TO_IDX,
     LIGAND_ELEMENT_TO_IDX,
     LIGAND_HYBRID_VOCAB,
     LIGAND_OTHER_IDX,
     LIGAND_RING_NONE_IDX,
 )
-from src.tokenizers.protein import (  # noqa: E402
+from prolit.tokenizers.protein import (  # noqa: E402
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates_from_text,
 )
+from rdkit import Chem, RDLogger  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")
 

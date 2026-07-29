@@ -17,7 +17,7 @@ generation path emits.
 The pocket half (coordinates + per-atom chemistry) is decoder-independent and
 always comes from the all-atom receptor parse (``ProteinAtomDescriptor``).
 Everything is stored in the pocket canonical frame; output is the concatenated
-memmaps documented in :mod:`src.data.pose_refine_dataset` (pocket stored ONCE per
+memmaps documented in :mod:`prolit.data.pose_refine_dataset` (pocket stored ONCE per
 complex, referenced by pointer -> inode-safe).
 
 Run (single GPU; use the venv python directly -- ``uv run`` rebuilds the editable
@@ -40,6 +40,28 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from prolit.model.pose_refiner import (
+    FEATURE_FIELDS,
+    LIG_CHEM_HEADS,
+    ligand_feats_from_heads,
+    pocket_feats_from_descriptor,
+)
+from prolit.tokenizers.atom import (
+    LigandAtomDescriptor,
+    ProteinAtomDescriptor,
+    precompute_receptor_atom_features_from_text,
+)
+from prolit.tokenizers.descriptor_schema import (
+    ATOM_LAYOUT,
+    fields_by_name,
+)
+from prolit.tokenizers.geometry import spherical_to_cartesian_np
+from prolit.tokenizers.ligand import parse_ligand_pdb_text
+from prolit.tokenizers.protein import (
+    compute_canonical_frame,
+    extract_pocket_atoms_from_candidates,
+    precompute_pocket_atom_candidates_from_text,
+)
 from scripts.tokenize_biolip import (
     _bucket_code,
     _cd_test_pdbs,
@@ -48,28 +70,6 @@ from scripts.tokenize_biolip import (
     _read_needed,
 )
 from scripts.tokenize_decoys import _perturb
-from src.model.pose_refiner import (
-    FEATURE_FIELDS,
-    LIG_CHEM_HEADS,
-    ligand_feats_from_heads,
-    pocket_feats_from_descriptor,
-)
-from src.tokenizers.atom import (
-    LigandAtomDescriptor,
-    ProteinAtomDescriptor,
-    precompute_receptor_atom_features_from_text,
-)
-from src.tokenizers.descriptor_schema import (
-    ATOM_LAYOUT,
-    fields_by_name,
-)
-from src.tokenizers.geometry import spherical_to_cartesian_np
-from src.tokenizers.ligand import parse_ligand_pdb_text
-from src.tokenizers.protein import (
-    _compute_canonical_frame,
-    extract_pocket_atoms_from_candidates,
-    precompute_pocket_atom_candidates_from_text,
-)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -134,8 +134,8 @@ class _AtomCodec(_LigandCodec):
     def __init__(
         self, ckpt: Path, norm_stats: Path, codebook_size: int, device: torch.device
     ) -> None:
-        from src.config import AtomVQVAETrainingConfig  # noqa: PLC0415
-        from src.model.vqvae_module import AtomVQVAEModule  # noqa: PLC0415
+        from prolit.config import AtomVQVAETrainingConfig  # noqa: PLC0415
+        from prolit.model.vqvae_module import AtomVQVAEModule  # noqa: PLC0415
 
         cfg = AtomVQVAETrainingConfig()
         cfg.atom.codebook_size = codebook_size
@@ -282,7 +282,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    from src.config import PocketExtractionConfig  # noqa: PLC0415
+    from prolit.config import PocketExtractionConfig  # noqa: PLC0415
 
     codec = _AtomCodec(args.ckpt, args.norm_stats, args.codebook_size, device)
 
@@ -366,7 +366,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 if pocket is None or pocket.atom_coords.shape[0] == 0:
                     continue
                 feats = precompute_receptor_atom_features_from_text(rec_text)
-                centroid, rotation = _compute_canonical_frame(
+                centroid, rotation = compute_canonical_frame(
                     pocket.ca_coords.astype(np.float64)
                 )
                 frame = (centroid, rotation)

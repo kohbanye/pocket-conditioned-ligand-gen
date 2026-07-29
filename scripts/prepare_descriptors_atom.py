@@ -21,8 +21,8 @@ import json
 import logging
 from pathlib import Path
 
-from src.config import PocketExtractionConfig
-from src.data.atom_tar_prep import prepare_atom_descriptors_from_tars
+from prolit.config import PocketExtractionConfig
+from prolit.data.atom_tar_prep import prepare_atom_descriptors_from_tars
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

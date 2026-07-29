@@ -3,7 +3,7 @@
 Consumes the ``data/descriptor_cache_allatom`` shard cache built by
 ``scripts/prepare_descriptors_atom.py`` (run that first; this script does NOT
 extract raw data, to stay inode-safe). Trains a single
-:class:`~src.tokenizers.vqvae.TransformerVQVAE` (domain="atom") over protein +
+:class:`~prolit.tokenizers.vqvae.TransformerVQVAE` (domain="atom") over protein +
 ligand atoms.
 
 Run (single GPU)::
@@ -22,9 +22,9 @@ import torch
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 
-from src.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
-from src.data.atom_descriptors import AtomComplexDescriptorDataModule
-from src.model.vqvae_module import AtomVQVAEModule
+from prolit.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
+from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
+from prolit.model.vqvae_module import AtomVQVAEModule
 
 logging.basicConfig(level=logging.INFO)
 

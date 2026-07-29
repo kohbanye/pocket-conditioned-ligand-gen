@@ -10,7 +10,7 @@ VQ, ``codebook_size`` 8192). ``joint_nocasf`` is the fair joint-side control tha
 shares the exact downstream protocol (MLM + heads) trained alongside the separate
 arm, so the two ablation arms differ *only* in the tokenizer. ``separate`` loads
 two single-modality VQ-VAEs (protein codes ``[0, 8192)``, ligand ``[8192, 16384)``)
-via :class:`src.tokenizers.separate_vqvae.SeparateVQVAE`, so its combined
+via :class:`prolit.tokenizers.separate_vqvae.SeparateVQVAE`, so its combined
 ``codebook_size`` is 16384. ``separate_4096`` is the FAIR-ablation redo of the
 separate arm with 4096+4096 sub-codebooks (combined ``codebook_size`` 8192), so
 its LM vocabulary matches the joint arm exactly (only pose + generation tasks).

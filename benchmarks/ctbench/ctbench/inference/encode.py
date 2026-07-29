@@ -13,31 +13,26 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-
-from ctbench.inference import ensure_source_repo_importable
-
-ensure_source_repo_importable()
-
-from src.config import (  # noqa: E402
+from prolit.config import (
     AtomVQVAETrainingConfig,
     ComplexMLMConfig,
     MLMTrainingConfig,
     PocketExtractionConfig,
     RescoreTrainingConfig,
 )
-from src.data.descriptors import collate_molecules  # noqa: E402
-from src.data.rescore_dataset import _ligand_mask  # noqa: E402
-from src.model.mlm_module import ComplexMLMModule  # noqa: E402
-from src.model.rescore_module import ComplexRescoreModule  # noqa: E402
-from src.model.vqvae_module import AtomVQVAEModule  # noqa: E402
-from src.tokenizers.atom import (  # noqa: E402
+from prolit.data.descriptors import collate_molecules
+from prolit.data.rescore_dataset import ligand_mask
+from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.rescore_module import ComplexRescoreModule
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
     precompute_receptor_atom_features_from_text,
 )
-from src.tokenizers.lm_vocab import AtomLMVocab  # noqa: E402
-from src.tokenizers.protein import (  # noqa: E402
-    _compute_canonical_frame,
+from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.protein import (
+    compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates_from_text,
 )
@@ -124,7 +119,7 @@ def load_separate_vqvae(  # noqa: PLR0913
     (``np.zeros(33)`` / ``np.ones(33)``): :class:`SeparateVQVAE` normalizes each
     modality internally, so :class:`ComplexEncoder` must feed it RAW descriptors.
     """
-    from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+    from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
     sep = SeparateVQVAE.from_checkpoints(
         protein_ckpt,
@@ -237,9 +232,9 @@ def resolve_rescore_ckpt(source_repo: Path, spec: str) -> Path:
     return min(candidates, key=_rescore_val_loss)
 
 
-def ligand_mask(seq: Sequence[int]) -> np.ndarray:
+def sequence_ligand_mask(seq: Sequence[int]) -> np.ndarray:
     """0/1 mask marking ligand-token positions in an assembled sequence."""
-    return _ligand_mask(np.asarray(seq))
+    return ligand_mask(np.asarray(seq))
 
 
 class ComplexEncoder:
@@ -288,7 +283,7 @@ class ComplexEncoder:
         if pocket is None or pocket.atom_coords.shape[0] == 0:
             return None
         feats = precompute_receptor_atom_features_from_text(protein_text)
-        frame = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
+        frame = compute_canonical_frame(pocket.ca_coords.astype(np.float64))
         prot_desc, _ = self.prot_desc.compute(pocket, feats, frame)
         if prot_desc.shape[0] == 0:
             return None

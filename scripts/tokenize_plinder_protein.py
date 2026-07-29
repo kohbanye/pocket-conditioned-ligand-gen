@@ -35,21 +35,21 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from src.data.descriptors import collate_molecules
-from src.data.token_io import SplitWriter
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.atom import (
+from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
+from prolit.data.descriptors import collate_molecules
+from prolit.data.token_io import SplitWriter
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
     precompute_receptor_atom_features_from_text,
     rotate_atom_descriptor,
 )
-from src.tokenizers.geometry import random_rotation_matrix
-from src.tokenizers.ligand import parse_sdf_text
-from src.tokenizers.lm_vocab import AtomLMVocab
-from src.tokenizers.protein import (
-    _compute_canonical_frame,
+from prolit.tokenizers.geometry import random_rotation_matrix
+from prolit.tokenizers.ligand import parse_sdf_text
+from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.protein import (
+    compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates_from_text,
 )
@@ -213,7 +213,7 @@ def _process_zip(zip_path: str) -> list[tuple]:  # noqa: C901, PLR0912
             if pocket is None or pocket.atom_coords.shape[0] == 0:
                 continue
             feats = precompute_receptor_atom_features_from_text(rec_text)
-            frame = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
+            frame = compute_canonical_frame(pocket.ca_coords.astype(np.float64))
             prot_desc, _pm = _w_prot_desc.compute(pocket, feats, frame)
             if prot_desc.shape[0] == 0:
                 continue
@@ -301,7 +301,7 @@ class _Encoder:
             self.flush(split)
 
 
-def main() -> None:  # noqa: PLR0915, C901, PLR0912
+def main() -> None:  # noqa: PLR0915, C901
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--ckpt",
@@ -362,10 +362,10 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
         # unified into one code space. Feed RAW descriptors (identity external
         # norm) -- SeparateVQVAE normalizes per modality internally. Combined
         # single-range AtomLMVocab over 2*codebook_size codes.
-        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+        from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
             ATOM_DESCRIPTOR_DIM,
         )
-        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
         module = SeparateVQVAE.from_checkpoints(
             args.separate_protein_ckpt,

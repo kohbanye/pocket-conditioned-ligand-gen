@@ -36,37 +36,37 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.chem.pdb_io import (  # noqa: E402
+from prolit.chem.pdb_io import (  # noqa: E402
     infer_bonds,
     write_full_protein_pdb,
 )
-from src.config import (  # noqa: E402
+from prolit.config import (  # noqa: E402
     AtomVQVAETrainingConfig,
     LMTrainingConfig,
     PocketExtractionConfig,
 )
-from src.model.lm_module import LigandLMModule  # noqa: E402
-from src.model.vqvae_module import AtomVQVAEModule  # noqa: E402
-from src.tokenizers.atom import (  # noqa: E402
+from prolit.model.lm_module import LigandLMModule  # noqa: E402
+from prolit.model.vqvae_module import AtomVQVAEModule  # noqa: E402
+from prolit.tokenizers.atom import (  # noqa: E402
     ProteinAtomDescriptor,
     precompute_receptor_atom_features,
 )
-from src.tokenizers.descriptor_schema import (  # noqa: E402
+from prolit.tokenizers.descriptor_schema import (  # noqa: E402
     ATOM_LAYOUT,
     LIGAND_ELEMENT_VOCAB,
     fields_by_name,
 )
-from src.tokenizers.geometry import spherical_to_cartesian_np  # noqa: E402
-from src.tokenizers.ligand import (  # noqa: E402
+from prolit.tokenizers.geometry import spherical_to_cartesian_np  # noqa: E402
+from prolit.tokenizers.ligand import (  # noqa: E402
     parse_sdf_text,
 )
-from src.tokenizers.lm_vocab import (  # noqa: E402
+from prolit.tokenizers.lm_vocab import (  # noqa: E402
     L_CLOSE_ID,
     PAD_ID,
     AtomLMVocab,
 )
-from src.tokenizers.protein import (  # noqa: E402
-    _compute_canonical_frame,
+from prolit.tokenizers.protein import (  # noqa: E402
+    compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates,
 )
@@ -120,7 +120,7 @@ def _pocket_codes_atom(  # noqa: PLR0913
 
     Encodes every heavy atom of the pocket residues with the unified atom
     VQ-VAE (one codebook shared with the ligand). Mirrors the encode side of
-    :func:`src.data.atom_descriptors._atom_process_pose` so the codes match the
+    :func:`prolit.data.atom_descriptors._atom_process_pose` so the codes match the
     training-time tokenization exactly.
     """
     if not mol["atoms"]:
@@ -144,7 +144,7 @@ def _pocket_codes_atom(  # noqa: PLR0913
     pocket = extract_pocket_atoms_from_candidates(precomputed, heavy, pocket_config)
     if pocket is None or pocket.atom_coords.shape[0] == 0:
         return None
-    centroid, rotation = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
+    centroid, rotation = compute_canonical_frame(pocket.ca_coords.astype(np.float64))
     frame = (centroid, rotation)
 
     prot_arr, _ = prot_desc.compute(pocket, feats, frame)
@@ -171,7 +171,7 @@ def _decode_ligand_atom(  # noqa: PLR0913
 
     The unified coord head is the same 4-D spherical ``(r, θ, sin φ, cos φ)`` in
     the pocket canonical frame as the ligand VQ-VAE, so reconstruction mirrors
-    :func:`src.tokenizers.atom.atom_descriptor_to_coords`. When ``refiner`` +
+    :func:`prolit.tokenizers.atom.atom_descriptor_to_coords`. When ``refiner`` +
     ``pocket_ctx`` (``(pocket canonical coords, pocket node features)``) are
     given, the E(3)-equivariant pose refiner cleans the pose before the global
     transform.
@@ -185,7 +185,7 @@ def _decode_ligand_atom(  # noqa: PLR0913
     canonical = spherical_to_cartesian_np(coord_denorm)
     centroid, rotation = frame
     if refiner is not None and pocket_ctx is not None:
-        from src.model.pose_refiner import (  # noqa: PLC0415
+        from prolit.model.pose_refiner import (  # noqa: PLC0415
             LIG_CHEM_HEADS,
             ligand_feats_from_heads,
             refine_ligand_canonical,
@@ -258,7 +258,7 @@ def load_atom_lm(ckpt: str, codebook_size: int, device: torch.device) -> object:
     )
 
 
-def main() -> None:  # noqa: PLR0912, PLR0915, C901
+def main() -> None:  # noqa: PLR0915, C901
     parser = argparse.ArgumentParser()
     parser.add_argument("--lm-ckpt", type=str, required=True)
     parser.add_argument(
@@ -321,7 +321,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915, C901
         # ligand decoded by a ligand-only VQ, unified into one combined code space
         # (protein codes [0, Pc), ligand codes [Pc, 2*Pc)) by SeparateVQVAE. The
         # LM is the separate LM trained over an AtomLMVocab of 2*codebook-size.
-        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
         separate_vqvae = SeparateVQVAE.from_checkpoints(
             args.separate_protein_ckpt,

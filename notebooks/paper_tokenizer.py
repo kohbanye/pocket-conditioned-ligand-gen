@@ -64,8 +64,8 @@ def _():
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    from src.model.vqvae_module import AtomVQVAEModule
-    from src.tokenizers.descriptor_schema import (
+    from prolit.model.vqvae_module import AtomVQVAEModule
+    from prolit.tokenizers.descriptor_schema import (
         ATOM_DESCRIPTOR_DIM,
         ATOM_LAYOUT,
         LIGAND_ELEMENT_VOCAB,
@@ -584,7 +584,7 @@ def _(mo):
 
 @app.cell
 def _(ATOM_LAYOUT, LIGAND_ELEMENT_VOCAB, fields_by_name, np, torch):
-    from src.tokenizers.geometry import (
+    from prolit.tokenizers.geometry import (
         cartesian_to_spherical_np,
         spherical_to_cartesian_np,
     )
@@ -671,16 +671,16 @@ def _(os, project_root):
     import numpy as _np
     import pyarrow.parquet as pq
 
-    from src.config import PocketExtractionConfig
-    from src.tokenizers.atom import (
+    from prolit.config import PocketExtractionConfig
+    from prolit.tokenizers.atom import (
         LigandAtomDescriptor,
         ProteinAtomDescriptor,
         atom_descriptor_to_coords,
         precompute_receptor_atom_features,
     )
-    from src.tokenizers.ligand import parse_sdf_text
-    from src.tokenizers.protein import (
-        _compute_canonical_frame as compute_canonical_frame,
+    from prolit.tokenizers.ligand import parse_sdf_text
+    from prolit.tokenizers.protein import (
+        compute_canonical_frame as compute_canonical_frame,
         extract_pocket_atoms_from_candidates,
         precompute_pocket_atom_candidates,
     )

@@ -27,9 +27,9 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import WandbLogger
 
-from src.config import PoseRefinerConfig, PoseRefineTrainingConfig
-from src.data.pose_refine_dataset import PoseRefineDataModule
-from src.model.pose_refiner import PoseRefinerModule
+from prolit.config import PoseRefinerConfig, PoseRefineTrainingConfig
+from prolit.data.pose_refine_dataset import PoseRefineDataModule
+from prolit.model.pose_refiner import PoseRefinerModule
 
 logging.basicConfig(level=logging.INFO)
 

@@ -21,18 +21,18 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from scripts.eval_casf_rescore import _PoseEncoder
-from src.config import (
+from prolit.config import (
     AtomVQVAETrainingConfig,
     ComplexMLMConfig,
     MLMTrainingConfig,
     PocketExtractionConfig,
 )
-from src.data.rescore_dataset import _ligand_mask
-from src.model.mlm_module import ComplexMLMModule
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.ligand import parse_sdf
-from src.tokenizers.lm_vocab import AtomLMVocab
+from prolit.data.rescore_dataset import ligand_mask
+from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.ligand import parse_sdf
+from prolit.tokenizers.lm_vocab import AtomLMVocab
+from scripts.eval_casf_rescore import _PoseEncoder
 
 CASF = Path("data/casf2016")
 MLM = "pocket-ligand-mlm/wxlhgqx3/checkpoints/mlm-e02-vl0.8199.ckpt"
@@ -102,7 +102,7 @@ def main() -> None:
             if seq is None:
                 continue
             t = torch.tensor([seq], device=device)
-            lig = torch.tensor(_ligand_mask(np.asarray(seq)), device=device)
+            lig = torch.tensor(ligand_mask(np.asarray(seq)), device=device)
             with torch.no_grad():
                 hs = mlm.encode(t, torch.ones_like(t))[0]  # (L,H)
                 pooled = hs[lig].mean(dim=0)  # mean over ligand tokens

@@ -24,9 +24,8 @@ are collected separately via ``scripts/collect_baselines.py``.
 
 from __future__ import annotations
 
-import dataclasses
-
 import argparse
+import dataclasses
 import logging
 from pathlib import Path
 

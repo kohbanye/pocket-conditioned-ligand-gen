@@ -40,6 +40,10 @@ sys.path.insert(0, str(SOURCE_REPO))
 sys.path.insert(0, str(CTBENCH))
 
 import torch  # noqa: E402
+from prolit.model.pose_refiner import (  # noqa: E402
+    PoseRefinerModule,
+    refine_ligand_canonical,
+)
 from rdkit import Chem, RDLogger  # noqa: E402
 from scipy.optimize import minimize  # noqa: E402
 
@@ -47,7 +51,6 @@ from scripts.build_distill_refine_set import (  # noqa: E402
     ligand_feats_from_mol,
     pocket_context,
 )
-from src.model.pose_refiner import PoseRefinerModule, refine_ligand_canonical  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -88,7 +91,7 @@ def project_geometry(
     return res.x.reshape(n, 3)
 
 
-def main() -> None:  # noqa: C901, PLR0915
+def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--arm", required=True)
     ap.add_argument("--out-arm", required=True)

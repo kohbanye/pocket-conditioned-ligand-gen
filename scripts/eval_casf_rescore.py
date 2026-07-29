@@ -5,7 +5,7 @@ complex-token MLM ranks a native-like pose above decoys. For each CASF-2016 core
 target we extract the pocket ONCE around the crystal ligand (the protein does
 not move, so protein codes are fixed and only the ligand codes vary with pose),
 encode the native + ~100 docking decoys with the all-atom VQ-VAE, and score each
-by ligand PLL (:func:`src.model.mlm_score.ligand_pll`).
+by ligand PLL (:func:`prolit.model.mlm_score.ligand_pll`).
 
 Metrics (subset unless --max-targets is unset):
 - docking power: fraction of targets whose top-PLL pose is within 2 A RMSD.
@@ -30,25 +30,25 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.config import (
+from prolit.config import (
     AtomVQVAETrainingConfig,
     ComplexMLMConfig,
     MLMTrainingConfig,
     PocketExtractionConfig,
 )
-from src.data.descriptors import collate_molecules
-from src.model.mlm_module import ComplexMLMModule
-from src.model.mlm_score import ligand_pll
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.atom import (
+from prolit.data.descriptors import collate_molecules
+from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.mlm_score import ligand_pll
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
     precompute_receptor_atom_features_from_text,
     rotate_atom_descriptor,
 )
-from src.tokenizers.lm_vocab import AtomLMVocab
-from src.tokenizers.protein import (
-    _compute_canonical_frame,
+from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.protein import (
+    compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates_from_text,
 )
@@ -175,7 +175,7 @@ class _PoseEncoder:
         if pocket is None or pocket.atom_coords.shape[0] == 0:
             return None
         feats = precompute_receptor_atom_features_from_text(protein_text)
-        frame = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
+        frame = compute_canonical_frame(pocket.ca_coords.astype(np.float64))
         prot_desc, _ = self.prot_desc.compute(pocket, feats, frame)
         if prot_desc.shape[0] == 0:
             return None
@@ -353,10 +353,10 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     vq_cfg = AtomVQVAETrainingConfig()
     vq_cfg.atom.codebook_size = args.codebook_size
     if args.separate_protein_ckpt is not None:
-        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+        from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
             ATOM_DESCRIPTOR_DIM,
         )
-        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
         module = SeparateVQVAE.from_checkpoints(
             args.separate_protein_ckpt, args.separate_protein_norm,
@@ -402,9 +402,9 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     need_pll = args.score_mode in ("pll", "ensemble")
     rescorer = None
     if need_head:
-        from src.config import RescoreTrainingConfig  # noqa: PLC0415
-        from src.data.rescore_dataset import _ligand_mask  # noqa: PLC0415
-        from src.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
+        from prolit.config import RescoreTrainingConfig  # noqa: PLC0415
+        from prolit.data.rescore_dataset import ligand_mask  # noqa: PLC0415
+        from prolit.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
 
         # Prefer the config stored in the checkpoint: it records every option
         # that changes the module's parameters (pooling, interaction layers, the
@@ -448,7 +448,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                 arr = np.asarray(seq)
                 ids[j, : len(seq)] = torch.from_numpy(arr.astype(np.int64))
                 attn[j, : len(seq)] = 1
-                lig[j, : len(seq)] = torch.from_numpy(_ligand_mask(arr))
+                lig[j, : len(seq)] = torch.from_numpy(ligand_mask(arr))
             batch = {
                 "input_ids": ids.to(device),
                 "attention_mask": attn.to(device),
@@ -461,7 +461,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     def pll_score(seq: list[int]) -> float:
         return ligand_pll(mlm, seq, mask_id, device)
 
-    from src.tokenizers.ligand import parse_sdf  # noqa: PLC0415
+    from prolit.tokenizers.ligand import parse_sdf  # noqa: PLC0415
 
     targets = sorted(
         p.name for p in (args.casf_dir / "coreset").iterdir() if p.is_dir()

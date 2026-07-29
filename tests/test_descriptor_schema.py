@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.tokenizers.descriptor_schema import (
+from prolit.tokenizers.descriptor_schema import (
     ATOM_DESCRIPTOR_DIM,
     ATOM_LAYOUT,
     ATOM_PROTEIN_ONLY_HEADS,

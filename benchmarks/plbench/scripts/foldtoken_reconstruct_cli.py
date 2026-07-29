@@ -36,7 +36,7 @@ def main() -> None:
     import torch
     from model_interface import MInterface
     from omegaconf import OmegaConf
-    from src.chroma.data import Protein
+    from prolit.chroma.data import Protein
 
     config = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)
     model = MInterface(**config)

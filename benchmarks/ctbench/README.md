@@ -54,7 +54,7 @@ docking-power table; generation vs DiffGui paired t p=0.39).
 
 ## Inference (GPU, qsub)
 
-`uv sync` installs the source repo as an editable dependency, so `import src.*`
+`uv sync` installs the source repo as an editable dependency, so `import prolit.*`
 resolves. Then run per variant (SGE templates under `scripts/jobs/`):
 
 ```sh

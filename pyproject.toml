@@ -35,11 +35,10 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-# Scope this to the library. An unscoped `where = ["."]` makes setuptools walk
-# data/, outputs/, wandb/ and the run directories -- millions of files -- so
-# metadata generation stalls and anything installing this project appears to hang.
-where = ["."]
-include = ["src*"]
+# Scoped to src/. An unscoped `where = ["."]` makes setuptools walk data/,
+# outputs/, wandb/ and the run directories -- millions of files -- so metadata
+# generation stalls and anything installing this project appears to hang.
+where = ["src"]
 
 [tool.uv.workspace]
 # Benchmarks that share this environment: they keep their own dependency lists

@@ -12,8 +12,8 @@ import argparse
 import logging
 from pathlib import Path
 
-from src.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
-from src.data.atom_descriptors import AtomComplexDescriptorDataModule
+from prolit.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
+from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

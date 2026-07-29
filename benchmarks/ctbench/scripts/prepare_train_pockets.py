@@ -28,7 +28,6 @@ SBDD_BENCH = Path("/gs/bs/tga-ohuelab/sakano/git/sbdd-bench")
 sys.path.insert(0, str(SOURCE_REPO))
 
 from rdkit import Chem, RDLogger  # noqa: E402
-
 from scripts.generate_ligands_3d import _read_mol_from_tar  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")
@@ -57,7 +56,7 @@ def mol_to_sdf(mol: dict, path: Path) -> bool:
         if a in idx_map and b in idx_map and a != b:
             try:
                 rw.AddBond(idx_map[a], idx_map[b], _BOND_ORDER.get(t, Chem.BondType.SINGLE))
-            except Exception:  # noqa: BLE001, PERF203
+            except Exception:  # noqa: BLE001
                 pass
     m = rw.GetMol()
     conf = Chem.Conformer(m.GetNumAtoms())

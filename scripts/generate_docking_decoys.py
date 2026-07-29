@@ -39,27 +39,27 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
+from prolit.data.descriptors import collate_molecules
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.atom import (
+    LigandAtomDescriptor,
+    ProteinAtomDescriptor,
+    precompute_receptor_atom_features_from_text,
+)
+from prolit.tokenizers.ligand import parse_ligand_pdb_text
+from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.protein import (
+    compute_canonical_frame,
+    extract_pocket_atoms_from_candidates,
+    precompute_pocket_atom_candidates_from_text,
+)
 from scripts.tokenize_biolip import (
     _bucket_code,
     _load_ccd_smiles,
     _parse_biolip_txt,
 )
 from scripts.tokenize_decoys import _cd_test_pdbs, _RmsdWriter
-from src.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from src.data.descriptors import collate_molecules
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.atom import (
-    LigandAtomDescriptor,
-    ProteinAtomDescriptor,
-    precompute_receptor_atom_features_from_text,
-)
-from src.tokenizers.ligand import parse_ligand_pdb_text
-from src.tokenizers.lm_vocab import AtomLMVocab
-from src.tokenizers.protein import (
-    _compute_canonical_frame,
-    extract_pocket_atoms_from_candidates,
-    precompute_pocket_atom_candidates_from_text,
-)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -254,7 +254,7 @@ def _dock_and_describe(task: tuple) -> dict | None:  # noqa: C901, PLR0911, PLR0
         if pocket is None or pocket.atom_coords.shape[0] == 0:
             return None
         feats = precompute_receptor_atom_features_from_text(rec_text)
-        frame = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
+        frame = compute_canonical_frame(pocket.ca_coords.astype(np.float64))
         prot_desc, _ = ProteinAtomDescriptor().compute(pocket, feats, frame)
         if prot_desc.shape[0] == 0:
             return None

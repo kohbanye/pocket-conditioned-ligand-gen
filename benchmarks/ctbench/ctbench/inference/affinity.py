@@ -13,22 +13,18 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pandas as pd
 import torch
+from prolit.model.mlm_score import ligand_pll
+from prolit.tokenizers.ligand import parse_sdf
 
-from ctbench.inference import ensure_source_repo_importable
 from ctbench.inference.encode import (
     ComplexEncoder,
-    ligand_mask,
     load_mlm,
     load_rescorer,
     load_tokenizer,
     make_encoder,
     resolve_rescore_ckpt,
+    sequence_ligand_mask,
 )
-
-ensure_source_repo_importable()
-
-from src.model.mlm_score import ligand_pll  # noqa: E402
-from src.tokenizers.ligand import parse_sdf  # noqa: E402
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -138,7 +134,7 @@ def _score_complex(  # noqa: PLR0913
         batch = {
             "input_ids": ids,
             "attention_mask": torch.ones_like(ids),
-            "ligand_mask": torch.tensor(ligand_mask(seq), device=device).unsqueeze(0),
+            "ligand_mask": torch.tensor(sequence_ligand_mask(seq), device=device).unsqueeze(0),
         }
         with torch.no_grad():
             head = float(rescorer(batch).item())  # affinity head: raw output = pK

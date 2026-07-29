@@ -7,10 +7,10 @@ Interface*) が唯一の正。ここに載る構成だけを本流とし、そ�
 
 | 層 | 実体 | 主要 checkpoint | コード |
 |---|---|---|---|
-| **トークナイザ (本流)** | joint all-atom VQ-VAE, 33-D descriptor, 単一 codebook 8192 (vocab 8199) | `pocket-ligand-vqvae/xzkjxu9q/…atom_coord=0.1073.ckpt` | `src/tokenizers/{atom,vqvae,codebook,descriptor_schema,lm_vocab}.py`, `src/data/atom_descriptors.py` |
-| **トークナイザ (ablation)** | separate = protein 専用 VQ + ligand 専用 VQ を 1 code space に連結 (8192+8192 / 4096+4096) | `pocket-ligand-vqvae/{protein,ligand}-vqvae[-4096]/last.ckpt` | `src/tokenizers/separate_vqvae.py` |
-| **ProLIT-MLM** | encoder-only 複合体 MLM (自前 ESM3 流, 99M) + pose head | `pocket-ligand-mlm/j90rlrgm`, `pocket-ligand-rescore/*` | `src/model/{complex_mlm,mlm_module,rescore_module,mlm_score}.py` |
-| **ProLIT-CLM** | Qwen3 系 causal LM (~298M) + e3nn flow-matching pose refiner | `pocket-ligand-lm/p6lpk7br`, `pocket-ligand-refine/refine_atom_bond_v1` | `src/model/{ligand_lm,lm_module,pose_refiner}.py` |
+| **トークナイザ (本流)** | joint all-atom VQ-VAE, 33-D descriptor, 単一 codebook 8192 (vocab 8199) | `pocket-ligand-vqvae/xzkjxu9q/…atom_coord=0.1073.ckpt` | `prolit/tokenizers/{atom,vqvae,codebook,descriptor_schema,lm_vocab}.py`, `prolit/data/atom_descriptors.py` |
+| **トークナイザ (ablation)** | separate = protein 専用 VQ + ligand 専用 VQ を 1 code space に連結 (8192+8192 / 4096+4096) | `pocket-ligand-vqvae/{protein,ligand}-vqvae[-4096]/last.ckpt` | `prolit/tokenizers/separate_vqvae.py` |
+| **ProLIT-MLM** | encoder-only 複合体 MLM (自前 ESM3 流, 99M) + pose head | `pocket-ligand-mlm/j90rlrgm`, `pocket-ligand-rescore/*` | `prolit/model/{complex_mlm,mlm_module,rescore_module,mlm_score}.py` |
+| **ProLIT-CLM** | Qwen3 系 causal LM (~298M) + e3nn flow-matching pose refiner | `pocket-ligand-lm/p6lpk7br`, `pocket-ligand-refine/refine_atom_bond_v1` | `prolit/model/{ligand_lm,lm_module,pose_refiner}.py` |
 
 論文の結果表 3 本 = ベンチ 3 本に 1:1 対応する:
 
@@ -236,14 +236,20 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 
 見込み: **−4,000〜5,000 行**、CLI の 3 分岐が 2 分岐に。
 
-### Phase 3 — パッケージ化 `src/prolit/` (1 日 / 機械的)
-- `src/` → `src/prolit/`、`from src.` → `from prolit.` を一括置換。`pyproject.toml` に `package-dir`。
-- **公開 API を定義**: `prolit/tokenizer/api.py` (encode/decode) と `prolit/generate.py`。
-  ctbench の `inference/encode.py` が今やっていることをライブラリ側に引き上げ、
-  private 参照 (`_ligand_mask`, `_compute_canonical_frame`) を解消する。
-- ctbench の `ensure_source_repo_importable()` は同一パッケージ化により不要 → 削除。
-- ⚠️ **ジョブキューが空のときに実施すること。** 現在 `ctb_gen_tr` (job 8295960) が実行中で、
-  job script は `PYTHONPATH` 直指定なので走行中のジョブを壊します。
+### Phase 3 — パッケージ化 `src/prolit/` ✅ 完了 (2026-07-30)
+- `src/` → `src/prolit/`、`from src.` → `from prolit.` を 74 ファイルで一括置換。
+  `[tool.setuptools.packages.find] where = ["src"]`。
+- **公開 API を定義**: `prolit/api.py` (32 シンボル) + `prolit/tokenizers/loaders.py`。
+  checkpoint→モデルの変換が eval スクリプトとベンチで二重実装され設定が食い違っていたのを
+  1 か所に集約。private 参照は `ligand_mask` / `compute_canonical_frame` として公開名に昇格。
+- ctbench の `ensure_source_repo_importable()` は削除（workspace 依存になったので不要）。
+- ⚠️ **想定外の落とし穴（重要）**: Lightning は config **dataclass インスタンスをそのまま
+  pickle** して checkpoint に埋める。pickle はクラスをモジュールパスで記録するので、
+  リネームにより既存 checkpoint 全部（＝論文の全数値の出所）が
+  `ModuleNotFoundError: No module named 'src.config'` で**読めなくなった**。
+  → `prolit/_legacy_import_path.py`（meta-path finder で `src.*` → `prolit.*` を解決、
+  `prolit` の import 時に自動登録）で解決。回帰テスト `tests/test_legacy_checkpoint_path.py` を追加。
+  165 run ディレクトリの checkpoint を書き換えるより安全。
 
 ### Phase 4 — pipelines/ 集約 (2 日)
 - 4 重複している `_Encoder` を `prolit/data/token_cache.py` の `TokenStreamWriter` +

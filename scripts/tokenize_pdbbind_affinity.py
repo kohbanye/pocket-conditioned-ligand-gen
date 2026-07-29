@@ -37,11 +37,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.ligand import parse_sdf
+from prolit.tokenizers.lm_vocab import AtomLMVocab
 from scripts.tokenize_decoys import _RmsdWriter
-from src.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.ligand import parse_sdf
-from src.tokenizers.lm_vocab import AtomLMVocab
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

@@ -34,9 +34,9 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import WandbLogger
 
-from src.config import LMTrainingConfig
-from src.data.lm_dataset import LMTokenDataModule
-from src.model.lm_module import LigandLMModule
+from prolit.config import LMTrainingConfig
+from prolit.data.lm_dataset import LMTokenDataModule
+from prolit.model.lm_module import LigandLMModule
 
 logging.basicConfig(level=logging.INFO)
 

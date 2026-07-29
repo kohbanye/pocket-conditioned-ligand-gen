@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from src.data.mlm_dataset import (
+from prolit.data.mlm_dataset import (
     IGNORE_INDEX,
     MLMTokenDataset,
     collate_mlm,
 )
-from src.tokenizers.lm_vocab import (
+from prolit.tokenizers.lm_vocab import (
     BOS_ID,
     EOS_ID,
     L_CLOSE_ID,
