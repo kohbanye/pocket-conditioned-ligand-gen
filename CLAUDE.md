@@ -126,6 +126,22 @@ python jobs/submit.py --name lm_pre --resource node_f --hours 8 \
     -- pipelines/train/clm.py --token-dir data/lm_tokens_allatom --seed 7
 ```
 
+**値だけ違うジョブは `--sweep` で並べる。ファイルを増やさない。**
+archive の 125 本のうち 22 本は `--pooling` の値しか違わなかった:
+
+```sh
+python jobs/submit.py --name aff --resource gpu_1 --hours 8 \
+    --sweep pooling=mean,attn,meanmax -- \
+    pipelines/train/head.py --pooling '{pooling}'
+```
+
+コマンド中の `{key}` が各値に置換され、点ごとに 1 本生成される
+(`aff_pooling-attn.sh` …)。`--sweep` を重ねれば直積。定義されていない
+`{key}` はその場でエラー（typo が学習スクリプトまで届かないように）、
+どこにも使われない `--sweep` もエラー（同一ジョブ N 本になるので）。
+既定の上限は 24 ジョブで、超えるなら `--max-jobs` を明示する
+（直積は書くのは 1 行、払うのは N ノード時間）。
+
 **スクリプトを git に残さない代わりに、run が自分の出所を書く。**
 学習は `RecordProvenance` コールバックで、checkpoint と同じディレクトリに
 `run.json` を落とす:
@@ -134,7 +150,8 @@ python jobs/submit.py --name lm_pre --resource node_f --hours 8 \
 {"command": ["pipelines/train/clm.py", "--seed", "7", ...],
  "git": {"sha": "...", "dirty": false, "branch": "main"},
  "seed": 7, "started": "...", "hostname": "r9n2",
- "job": {"name": "lm_pre", "resource": "node_f", "hours": "8", "id": "8299013"}}
+ "job": {"name": "aff_pooling-attn", "resource": "gpu_1", "hours": "8",
+         "sweep": {"pooling": "attn"}, "id": "8299013"}}
 ```
 
 - **git にはコード、run ディレクトリにはそれを作ったコマンド**。両方揃えば再現できる。
@@ -143,6 +160,9 @@ python jobs/submit.py --name lm_pre --resource node_f --hours 8 \
   wandb の run id になり投入時には未確定なので、**投入側でなく run 側が記録する**。
   対話実行では `job` が無いだけで、コマンドは残る。
 - **`dirty: true` は SHA より重要**。true なら git だけからその数値を再現できない。
+- `job.sweep` は「この run が比較のどの腕か」。値自体は command にもあるが、
+  *掃引の一点である* ことは残らない。`job_pose_v8` `_v10` という名前が
+  本当に記録していたのはこれ。
 
 新しく学習スクリプトを足したら `RecordProvenance(seed=args.seed)` を
 callbacks に入れる。`tests/test_provenance.py` が入れ忘れを検出する。

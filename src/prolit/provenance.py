@@ -20,7 +20,9 @@ So every run writes ``run.json`` into its own directory:
 ``job`` is present when the run came from ``jobs/submit.py``, which passes it
 through the environment -- the submitter cannot know the run directory (with no
 ``--run-name`` it is the W&B run id, decided at startup), so the run records it
-instead.
+instead. For one arm of a ``--sweep`` it also carries ``"sweep": {"pooling":
+"attn"}``: which comparison this run belongs to, which the command alone does
+not say.
 
 The dirty flag matters more than the SHA. A clean SHA means the code is
 recoverable; a dirty one means it is not, and a number produced from it cannot be
@@ -52,6 +54,12 @@ _JOB_ENV = {
     "hours": "PROLIT_JOB_HOURS",
 }
 
+#: Set by ``--sweep``, holding this run's point as JSON. The values are in the
+#: command already; what this adds is that the run is one arm of a comparison,
+#: and which axis was varied -- the thing ``job_pose_v8`` / ``_v10`` filenames
+#: used to encode.
+_SWEEP_ENV = "PROLIT_JOB_SWEEP"
+
 
 def _git(repo: Path, *args: str) -> str | None:
     try:
@@ -82,8 +90,17 @@ def git_state(repo: Path | None = None) -> dict[str, Any]:
     }
 
 
-def _job_env() -> dict[str, str] | None:
-    found = {k: os.environ[v] for k, v in _JOB_ENV.items() if v in os.environ}
+def _job_env() -> dict[str, Any] | None:
+    found: dict[str, Any] = {
+        k: os.environ[v] for k, v in _JOB_ENV.items() if v in os.environ
+    }
+    sweep = os.environ.get(_SWEEP_ENV)
+    if sweep:
+        try:
+            found["sweep"] = json.loads(sweep)
+        except json.JSONDecodeError:
+            # Recording it wrongly beats recording nothing; the run still ran.
+            found["sweep"] = sweep
     if not found:
         return None
     job_id = os.environ.get("JOB_ID") or os.environ.get("SLURM_JOB_ID")

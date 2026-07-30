@@ -11,12 +11,29 @@ that silently kills jobs (see ``lib.sh``).
 Writes ``jobs/generated/<name>.sh`` and prints the qsub command. It does NOT
 submit unless ``--submit`` is passed: what a job does, where it runs and how
 long it takes should be stated and agreed before it enters the queue.
+
+``--sweep`` varies one flag over several values, which is where most of those
+125 files came from -- 22 of them differ only in the value of ``--pooling`` or
+``--token-dir``, and some had already been reduced to ``$POOL`` in an attempt to
+stop writing new ones:
+
+    python jobs/submit.py --name aff --resource gpu_1 --hours 8 \
+        --sweep pooling=mean,attn,meanmax -- \
+        pipelines/train/head.py --pooling '{pooling}'
+
+That is three jobs from one command. Repeat ``--sweep`` for a cross product.
+Each point gets its own script, rather than one array job indexing a shell
+array: a wrong index is silent and produces a plausible number with the wrong
+hyper-parameter, while a generated script says on its face what it will run.
 """
 
 from __future__ import annotations
 
 import argparse
+import itertools
+import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -41,6 +58,18 @@ RESOURCES: dict[str, float] = {
     "cpu_80": 0.45,
     "cpu_160": 0.9,
 }
+
+#: A ``{key}`` in the command, replaced by that axis's value for this point.
+_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
+
+#: Longest job name built from the swept values before falling back to numbering
+#: the points instead. A name is only useful while it can be read.
+_MAX_NAME = 48
+
+#: A cross product is one flag to write and N nodes to pay for. Past this it
+#: should have to be said out loud, with --max-jobs.
+_DEFAULT_MAX_JOBS = 24
 
 _TEMPLATE = """#!/bin/sh
 #$ -cwd
@@ -90,7 +119,131 @@ def build(  # noqa: PLR0913
     )
 
 
-def main() -> None:
+def parse_sweep(specs: list[str]) -> dict[str, list[str]]:
+    """``["pooling=mean,attn"]`` -> ``{"pooling": ["mean", "attn"]}``."""
+    axes: dict[str, list[str]] = {}
+    for spec in specs:
+        key, sep, values = spec.partition("=")
+        key = key.strip()
+        if not sep or not key or not values:
+            msg = f"--sweep expects KEY=v1,v2 -- got {spec!r}"
+            raise ValueError(msg)
+        if key in axes:
+            msg = f"--sweep {key} given twice"
+            raise ValueError(msg)
+        items = [v.strip() for v in values.split(",")]
+        if len(set(items)) != len(items):
+            msg = f"--sweep {key} repeats a value: {values!r}"
+            raise ValueError(msg)
+        axes[key] = items
+    return axes
+
+
+def expand(axes: dict[str, list[str]]) -> list[dict[str, str]]:
+    """The cross product of the axes, the first one varying slowest."""
+    return [
+        dict(zip(axes, combo, strict=True))
+        for combo in itertools.product(*axes.values())
+    ]
+
+
+def substitute(command: list[str], point: dict[str, str]) -> list[str]:
+    """Replace every ``{key}`` in the command with this point's value.
+
+    An unknown placeholder raises rather than passing through as a literal: a
+    typo would otherwise reach the training script as the string ``{poooling}``
+    and be rejected an hour into the queue -- or, worse, accepted. With no sweep
+    at all there is nothing to substitute and braces stay literal, so a plain
+    job is unaffected by any of this.
+    """
+    if not point:
+        return command
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key not in point:
+            known = ", ".join(point) or "none"
+            msg = f"the command uses {{{key}}} but no --sweep defines it ({known})"
+            raise ValueError(msg)
+        return point[key]
+
+    return [_PLACEHOLDER.sub(replace, arg) for arg in command]
+
+
+def _rel(path: Path) -> str:
+    """The path as qsub should be given it, from the repository root.
+
+    Absolute if the script landed outside the repo, since qsub is run with the
+    repo as its working directory and a relative path would not resolve.
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def check_sweep(
+    axes: dict[str, list[str]],
+    points: list[dict[str, str]],
+    command: list[str],
+    max_jobs: int,
+) -> None:
+    """Refuse a sweep that would not do what it looks like it does."""
+    if not axes:
+        return
+    # Undefined placeholders first: with a typo both checks fire, and "{poooling}
+    # is not defined" is the one that names the actual mistake, where "nothing
+    # uses {pooling}" sends you looking at the sweep.
+    undefined = sorted(
+        {
+            m.group(1)
+            for arg in command
+            for m in _PLACEHOLDER.finditer(arg)
+            if m.group(1) not in axes
+        }
+    )
+    if undefined:
+        shown = ", ".join("{" + k + "}" for k in undefined)
+        msg = f"the command uses {shown} but no --sweep defines it ({', '.join(axes)})"
+        raise ValueError(msg)
+    unused = [k for k in axes if not any("{" + k + "}" in arg for arg in command)]
+    if unused:
+        # Otherwise this quietly submits N identical jobs and looks like a
+        # comparison until the results all agree.
+        shown = ", ".join("{" + k + "}" for k in unused)
+        msg = f"nothing in the command uses {shown}; the jobs would be identical"
+        raise ValueError(msg)
+    if len(points) > max_jobs:
+        msg = (
+            f"that sweep is {len(points)} jobs (limit {max_jobs}); "
+            "narrow it, or raise --max-jobs deliberately"
+        )
+        raise ValueError(msg)
+
+
+def _slug(value: str) -> str:
+    """A swept value, made safe for a job name and a filename."""
+    return _UNSAFE.sub("-", value).strip("-") or "x"
+
+
+def name_points(name: str, points: list[dict[str, str]]) -> list[str]:
+    """One job name per point: readable if it fits, numbered if it does not.
+
+    A plain job keeps the name as given; anything from a sweep carries its point,
+    so the queue, the script and the run directory all say which arm it is.
+    """
+    if points == [{}]:
+        return [name]
+    named = [
+        "_".join([name, *(f"{k}-{_slug(v)}" for k, v in point.items())])
+        for point in points
+    ]
+    if len(set(named)) == len(named) and all(len(n) <= _MAX_NAME for n in named):
+        return named
+    return [f"{name}_{i + 1}" for i in range(len(points))]
+
+
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -105,6 +258,20 @@ def main() -> None:
         help="one line on what this job does; ends up in the script header",
     )
     parser.add_argument("--array", default=None, help="array spec, e.g. 1-10")
+    parser.add_argument(
+        "--sweep",
+        action="append",
+        default=[],
+        metavar="KEY=V1,V2",
+        help="vary {KEY} in the command over these values, one job per value; "
+        "repeat for a cross product",
+    )
+    parser.add_argument(
+        "--max-jobs",
+        type=int,
+        default=_DEFAULT_MAX_JOBS,
+        help=f"refuse a sweep bigger than this (default: {_DEFAULT_MAX_JOBS})",
+    )
     parser.add_argument(
         "--env",
         action="append",
@@ -127,54 +294,115 @@ def main() -> None:
         nargs=argparse.REMAINDER,
         help="entry point and its flags, after a bare --",
     )
+    return parser
+
+
+def _run_env(
+    args: argparse.Namespace,
+    job_name: str,
+    point: dict[str, str],
+    user_env: dict[str, str],
+) -> dict[str, str]:
+    """What the job exports so the run can record how it was submitted.
+
+    The submitter cannot know the run directory -- without ``--run-name`` it is
+    the W&B run id, decided at startup -- so it passes what it knows and the run
+    folds it into its own ``run.json``. The sweep point goes too: its values are
+    in the command already, but not the fact that this run is one arm of a
+    comparison, which is what the old ``job_pose_v8`` / ``_v10`` / ``_v12``
+    filenames were really recording.
+    """
+    sweep = {"PROLIT_JOB_SWEEP": json.dumps(point, sort_keys=True)} if point else {}
+    return {
+        "PROLIT_JOB_NAME": job_name,
+        "PROLIT_JOB_RESOURCE": args.resource,
+        "PROLIT_JOB_HOURS": str(args.hours),
+        **sweep,
+        **user_env,  # an explicit --env wins, so any of these can be overridden
+    }
+
+
+def generate(
+    args: argparse.Namespace,
+    cmd: list[str],
+    points: list[dict[str, str]],
+    user_env: dict[str, str],
+) -> list[tuple[Path, dict[str, str]]]:
+    """Write one script per sweep point. Returns ``(path, point)`` for each."""
+    GENERATED.mkdir(exist_ok=True)
+    written: list[tuple[Path, dict[str, str]]] = []
+    for job_name, point in zip(name_points(args.name, points), points, strict=True):
+        script = build(
+            name=job_name,
+            resource=args.resource,
+            hours=args.hours,
+            commands=[substitute(cmd, point)],
+            description=args.description or f"{cmd[0]} on {args.resource}",
+            array=args.array,
+            env=_run_env(args, job_name, point, user_env),
+        )
+        path = GENERATED / f"{job_name}.sh"
+        path.write_text(script)
+        path.chmod(0o755)
+        written.append((path, point))
+    return written
+
+
+def report(
+    args: argparse.Namespace,
+    axes: dict[str, list[str]],
+    written: list[tuple[Path, dict[str, str]]],
+) -> list[list[str]]:
+    """Print what was written and what it will cost. Returns the qsub commands."""
+    if len(written) == 1:
+        print(f"wrote {_rel(written[0][0])}")
+    else:
+        print(f"wrote {len(written)} scripts sweeping {', '.join(axes)}")
+        for path, point in written:
+            values = " ".join(f"{k}={v}" for k, v in point.items())
+            print(f"  {_rel(path)}  ({values})")
+    # Per job, times the number of jobs: the multiplier is where a sweep gets
+    # expensive, and it should not have to be worked out by the reader.
+    cost = RESOURCES[args.resource] * args.hours * len(written)
+    each = " each" if len(written) > 1 else ""
+    print(
+        f"  {args.resource} for up to {args.hours} h{each} "
+        f"-> at most {cost:.2f} node-hours of billing"
+    )
+    prefix = ["qsub", *(["-g", args.group] if args.group else [])]
+    qsubs = [[*prefix, _rel(path)] for path, _ in written]
+    for qsub in qsubs:
+        print("  " + " ".join(qsub))
+    return qsubs
+
+
+def main() -> None:
+    parser = _parser()
     args = parser.parse_args()
 
     cmd = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not cmd:
         parser.error("no command given; put it after a bare --")
 
-    env = {}
+    user_env = {}
     for item in args.env:
         key, _, value = item.partition("=")
         if not value:
             parser.error(f"--env expects K=V, got {item!r}")
-        env[key] = value
+        user_env[key] = value
 
-    # The submitter cannot know the run directory -- without --run-name it is
-    # the W&B run id, decided at startup -- so it passes what it knows through
-    # the environment and the run folds it into its own run.json.
-    env = {
-        "PROLIT_JOB_NAME": args.name,
-        "PROLIT_JOB_RESOURCE": args.resource,
-        "PROLIT_JOB_HOURS": str(args.hours),
-        **env,
-    }
-    script = build(
-        name=args.name,
-        resource=args.resource,
-        hours=args.hours,
-        commands=[cmd],
-        description=args.description or f"{cmd[0]} on {args.resource}",
-        array=args.array,
-        env=env,
-    )
-    GENERATED.mkdir(exist_ok=True)
-    path = GENERATED / f"{args.name}.sh"
-    path.write_text(script)
-    path.chmod(0o755)
+    try:
+        axes = parse_sweep(args.sweep)
+        points = expand(axes)
+        check_sweep(axes, points, cmd, args.max_jobs)
+        written = generate(args, cmd, points, user_env)
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    cost = RESOURCES[args.resource] * args.hours
-    rel = path.relative_to(REPO_ROOT)
-    print(f"wrote {rel}")
-    print(
-        f"  {args.resource} for up to {args.hours} h "
-        f"-> at most {cost:.2f} node-hours of billing"
-    )
-    qsub = ["qsub", *(["-g", args.group] if args.group else []), str(rel)]
-    print("  " + " ".join(qsub))
-
+    qsubs = report(args, axes, written)
     if args.submit:
-        subprocess.run(qsub, check=True, cwd=REPO_ROOT)  # noqa: S603
+        for qsub in qsubs:
+            subprocess.run(qsub, check=True, cwd=REPO_ROOT)  # noqa: S603
     else:
         print("  (not submitted; pass --submit)")
 

@@ -79,10 +79,33 @@ def test_job_metadata_is_picked_up_from_the_environment(
     assert job["resource"] == "node_f"
 
 
+def test_sweep_point_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Which arm of a comparison this run is -- what _v8 / _v10 names encoded."""
+    monkeypatch.setenv("PROLIT_JOB_NAME", "aff_pooling-attn")
+    monkeypatch.setenv("PROLIT_JOB_SWEEP", '{"pooling": "attn"}')
+    assert run_manifest()["job"]["sweep"] == {"pooling": "attn"}
+
+
+def test_an_unreadable_sweep_does_not_lose_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run still ran; recording it verbatim beats recording nothing."""
+    monkeypatch.setenv("PROLIT_JOB_NAME", "aff")
+    monkeypatch.setenv("PROLIT_JOB_SWEEP", "not json")
+    job = run_manifest()["job"]
+    assert job["sweep"] == "not json"
+    assert job["name"] == "aff"
+
+
 def test_no_job_metadata_for_an_interactive_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for var in ("PROLIT_JOB_NAME", "PROLIT_JOB_RESOURCE", "PROLIT_JOB_HOURS"):
+    for var in (
+        "PROLIT_JOB_NAME",
+        "PROLIT_JOB_RESOURCE",
+        "PROLIT_JOB_HOURS",
+        "PROLIT_JOB_SWEEP",
+    ):
         monkeypatch.delenv(var, raising=False)
     assert "job" not in run_manifest()
 
@@ -129,5 +152,10 @@ def test_every_training_script_records_provenance() -> None:
 def test_submit_passes_job_metadata_to_the_run() -> None:
     """Without this the manifest cannot say which submission produced it."""
     text = (REPO / "jobs" / "submit.py").read_text()
-    for var in ("PROLIT_JOB_NAME", "PROLIT_JOB_RESOURCE", "PROLIT_JOB_HOURS"):
+    for var in (
+        "PROLIT_JOB_NAME",
+        "PROLIT_JOB_RESOURCE",
+        "PROLIT_JOB_HOURS",
+        "PROLIT_JOB_SWEEP",
+    ):
         assert var in text, var
