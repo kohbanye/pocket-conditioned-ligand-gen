@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pocket-conditioned-ligand-gen"
 version = "0.1.0"
-description = "Add your description here"
+description = "ProLIT: a chemistry-aware all-atom tokenizer for 3D protein-ligand interfaces, and the language models trained on its tokens."
 readme = "README.md"
-requires-python = ">=3.12"
+# Capped at <3.13 because the benchmark members cap there (biotite / posebusters
+# wheels), and a uv workspace resolves one environment for every member.
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "biopython>=1.84",
-    "hydra-core>=1.3.2",
     "marimo>=0.23.2",
     "lightning>=2.5.6",
     "matplotlib>=3.10.7",
@@ -29,18 +30,54 @@ dependencies = [
     "pyarrow>=18.0.0",
     "transformers>=4.51",
     "e3nn>=0.6.0",
+    "posebusters>=0.3.1",
 ]
 
 [tool.setuptools.packages.find]
-where = ["."]
+# Scoped to src/. An unscoped `where = ["."]` makes setuptools walk data/,
+# outputs/, wandb/ and the run directories -- millions of files -- so metadata
+# generation stalls and anything installing this project appears to hang.
+where = ["src"]
+
+[tool.uv.workspace]
+# Benchmarks that share this environment: they keep their own dependency lists
+# but resolve into one lockfile together with the model library they evaluate.
+#
+# benchmarks/recon-bench is deliberately NOT a member. It runs ESM3 in-process, and
+# ESM3 depends on a fork of transformers (Biohub/transformers @ ef32577) that
+# would replace the transformers 5.x the ProLIT language models are built on --
+# a workspace resolves one version per package, so membership would silently
+# downgrade the model library. recon_bench stays a standalone uv project with its
+# own venv, which is already the pattern its FoldToken and Bio2Token adapters
+# use (.venv-foldtoken / .venv-bio2token, driven as subprocesses).
+members = ["benchmarks/common", "benchmarks/sbdd-bench", "benchmarks/pose-rescoring-bench"]
+exclude = ["benchmarks/recon-bench"]
+
+[tool.pytest.ini_options]
+# One command covers the library, the pipelines and every in-workspace
+# benchmark. benchmarks/recon-bench is excluded: it has its own environment (ESM3
+# pins a conflicting transformers), so run it with its own interpreter.
+testpaths = ["tests", "benchmarks"]
+norecursedirs = ["third_party", "benchmarks/recon-bench", ".venv", "data", "outputs"]
+
+[tool.ruff]
+extend-exclude = ["third_party", "benchmarks/*/third_party"]
 
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = ["D", "N812", "COM812"]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/*.py" = ["INP001"]
-"tests/*.py" = ["S101", "PLR2004"]
+# Entry points, not packages: they are invoked by path, print their progress,
+# and legitimately have no __init__.py.
+"scripts/*.py" = ["INP001", "T201"]
+"pipelines/**/*.py" = ["INP001", "T201"]
+"jobs/*.py" = ["INP001", "T201"]
+"benchmarks/*/scripts/*.py" = ["INP001", "T201"]
+# Tests assert, compare against literal expected values, and are not packages.
+"tests/*.py" = ["S101", "PLR2004", "INP001"]
+"benchmarks/**/test_*.py" = ["S101", "PLR2004", "INP001"]
+"benchmarks/*/tests/*.py" = ["S101", "PLR2004", "INP001"]
 "notebooks/*.ipynb" = ["T201", "E402", "ANN", "E501", "PLR2004", "INP001", "S101"]
 "notebooks/*.py" = [
     "ANN001",     # marimo cell args are reactive-deps with complex types
@@ -59,6 +96,22 @@ ignore = ["D", "N812", "COM812"]
     "INP001",     # no __init__.py in notebooks/
     "RUF001",     # ambiguous unicode — Japanese text in markdown
     "UP037",      # quoted annotations needed — marimo exec() ignores __future__ annotations
+    "PLR2004",    # magic values — thresholds and column counts read better inline
+    "C901",       # complex-structure — a cell is one narrative block, not a function
+    "PD011",      # .values — the notebooks predate the .to_numpy() preference
+    "PD013",      # .stack() — same
+    "PD010",      # .pivot_table() — same
+    "B007",       # unused loop variable — cells iterate for side effects
+    "B905",       # zip() without strict= — lengths are asserted upstream
+    "FBT003",     # boolean positional — matplotlib/seaborn take them that way
+    "ICN001",     # import alias — notebooks import plotting libs conventionally
+    "RUF005",     # list concat — clearer than unpacking in a plotting call
+    "RUF046",     # int() cast — explicit is fine here
+    "RUF059",     # unused unpacked variable — tuple returns from cells
+    "N802",       # function name — notebook helpers mirror column names
+    "ANN202",     # return type on a nested helper inside a cell
+    "F841",       # assigned-but-unused — marimo cells export by assignment
+    "B023",       # loop-variable closure — cells build closures per subplot
 ]
 
 [dependency-groups]

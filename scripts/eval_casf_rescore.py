@@ -5,7 +5,7 @@ complex-token MLM ranks a native-like pose above decoys. For each CASF-2016 core
 target we extract the pocket ONCE around the crystal ligand (the protein does
 not move, so protein codes are fixed and only the ligand codes vary with pose),
 encode the native + ~100 docking decoys with the all-atom VQ-VAE, and score each
-by ligand PLL (:func:`src.model.mlm_score.ligand_pll`).
+by ligand PLL (:func:`prolit.model.mlm_score.ligand_pll`).
 
 Metrics (subset unless --max-targets is unset):
 - docking power: fraction of targets whose top-PLL pose is within 2 A RMSD.
@@ -30,222 +30,23 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.config import (
+from prolit.chem.mol2 import parse_mol2_multi
+from prolit.config import (
     AtomVQVAETrainingConfig,
     ComplexMLMConfig,
     MLMTrainingConfig,
     PocketExtractionConfig,
 )
-from src.data.descriptors import collate_molecules
-from src.model.mlm_module import ComplexMLMModule
-from src.model.mlm_score import ligand_pll
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.atom import (
-    LigandAtomDescriptor,
-    ProteinAtomDescriptor,
-    precompute_receptor_atom_features_from_text,
-    rotate_atom_descriptor,
-)
-from src.tokenizers.lm_vocab import AtomLMVocab
-from src.tokenizers.protein import (
-    _compute_canonical_frame,
-    extract_pocket_atoms_from_candidates,
-    precompute_pocket_atom_candidates_from_text,
-)
+from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.mlm_score import ligand_pll
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
+from prolit.tokenizers.geometry import random_rotation_matrix
+from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def _mol_to_dict(mol) -> dict | None:  # noqa: ANN001
-    from rdkit import Chem  # noqa: PLC0415
-
-    try:
-        conf = mol.GetConformer()
-    except ValueError:
-        return None
-    bt = {
-        Chem.BondType.SINGLE: 1,
-        Chem.BondType.DOUBLE: 2,
-        Chem.BondType.TRIPLE: 3,
-        Chem.BondType.AROMATIC: 4,
-    }
-    atoms = []
-    for i, a in enumerate(mol.GetAtoms()):
-        p = conf.GetAtomPosition(i)
-        atoms.append((a.GetSymbol(), p.x, p.y, p.z))
-    bonds = [
-        (b.GetBeginAtomIdx(), b.GetEndAtomIdx(), bt.get(b.GetBondType(), 1))
-        for b in mol.GetBonds()
-    ]
-    return {"atoms": atoms, "bonds": bonds}
-
-
-_MOL2_BOND = {"1": 1, "2": 2, "3": 3, "ar": 4, "am": 1}
-
-
-def _mol2_records(block: str) -> dict | None:  # noqa: C901
-    """Read ATOM/BOND records straight out of a mol2 block.
-
-    RDKit's mol2 reader rejects some CASF decoy blocks outright -- e.g. the
-    peptide ligand of 3uri, whose near-native poses carry extra ``NORMAL`` /
-    ``ALT_TYPE`` sections. Those poses were then silently missing from the
-    scored set (for 3uri, that was every pose under 2 A, making the target
-    unwinnable). The head only needs elements, coordinates and bond orders, all
-    of which are plain columns here.
-    """
-    if "@<TRIPOS>ATOM" not in block:
-        return None
-    atoms: list[tuple[str, float, float, float]] = []
-    for ln in block.split("@<TRIPOS>ATOM")[1].split("@<TRIPOS>")[0].splitlines():
-        c = ln.split()
-        if len(c) < 6:  # noqa: PLR2004
-            continue
-        try:
-            x, y, z = float(c[2]), float(c[3]), float(c[4])
-        except ValueError:
-            continue
-        # SYBYL type "C.3" / "N.ar" -> element; "Du"/"LP" dummies are skipped.
-        el = c[5].split(".")[0]
-        if el in ("Du", "LP"):
-            continue
-        atoms.append((el.capitalize(), x, y, z))
-    if not atoms:
-        return None
-    bonds: list[tuple[int, int, int]] = []
-    if "@<TRIPOS>BOND" in block:
-        for ln in block.split("@<TRIPOS>BOND")[1].split("@<TRIPOS>")[0].splitlines():
-            c = ln.split()
-            if len(c) < 4:  # noqa: PLR2004
-                continue
-            try:
-                i, j = int(c[1]) - 1, int(c[2]) - 1
-            except ValueError:
-                continue
-            if 0 <= i < len(atoms) and 0 <= j < len(atoms):
-                bonds.append((i, j, _MOL2_BOND.get(c[3], 1)))
-    return {"atoms": atoms, "bonds": bonds}
-
-
-def _parse_mol2_multi(text: str) -> list[tuple[str, dict]]:
-    """(pose_name, mol_dict) for each molecule in a multi-``@<TRIPOS>MOLECULE`` file."""
-    from rdkit import Chem  # noqa: PLC0415
-
-    out: list[tuple[str, dict]] = []
-    for chunk in text.split("@<TRIPOS>MOLECULE")[1:]:
-        block = "@<TRIPOS>MOLECULE" + chunk
-        name = next((ln.strip() for ln in chunk.splitlines() if ln.strip()), "")
-        mol = Chem.MolFromMol2Block(block, sanitize=False, removeHs=False)
-        d = _mol_to_dict(mol) if mol is not None else None
-        if d is None:
-            d = _mol2_records(block)  # RDKit refused this block
-        if d is not None:
-            out.append((name, d))
-    return out
-
-
-class _PoseEncoder:
-    """Fixed-pocket encoder: protein codes once, ligand codes per pose."""
-
-    def __init__(self, module, mean, std, vocab, device, pocket_cfg) -> None:  # noqa: ANN001, PLR0913
-        self.module = module
-        self.mean = mean
-        self.std = std
-        self.vocab = vocab
-        self.device = device
-        self.pocket_cfg = pocket_cfg
-        self.prot_desc = ProteinAtomDescriptor()
-        self.lig_desc = LigandAtomDescriptor()
-
-    def _encode(self, desc: np.ndarray) -> list[int]:
-        x, mask = collate_molecules(
-            [torch.from_numpy((desc - self.mean) / self.std).float()]
-        )
-        idx = self.module.vqvae.encode_batch(
-            x.to(self.device), mask.to(self.device)
-        ).cpu()
-        return idx[0][mask[0]].tolist()
-
-    def setup_pocket(self, protein_text: str, native_heavy: np.ndarray) -> tuple | None:
-        """Extract the pocket around the crystal ligand; return (p_codes, frame)."""
-        precomp = precompute_pocket_atom_candidates_from_text(protein_text)
-        pocket = extract_pocket_atoms_from_candidates(
-            precomp, native_heavy, self.pocket_cfg
-        )
-        if pocket is None or pocket.atom_coords.shape[0] == 0:
-            return None
-        feats = precompute_receptor_atom_features_from_text(protein_text)
-        frame = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
-        prot_desc, _ = self.prot_desc.compute(pocket, feats, frame)
-        if prot_desc.shape[0] == 0:
-            return None
-        # Kept for rotated re-encodings of this same pocket (TTA).
-        self.prot_desc_raw = prot_desc
-        return self._encode(prot_desc), frame
-
-    def pocket_codes_rotated(self, rotation: np.ndarray) -> list[int]:
-        """Re-encode the cached pocket descriptor under an extra frame rotation."""
-        return self._encode(rotate_atom_descriptor(self.prot_desc_raw, rotation))
-
-    def ligand_descs(self, mols: list[dict], frame: tuple) -> list[np.ndarray]:
-        """Descriptors (pre-quantization) for many poses, computed once so that
-        rotated variants come from :func:`rotate_atom_descriptor` instead of a
-        full recompute."""
-        return [self.lig_desc.compute(m["atoms"], m["bonds"], frame)[0] for m in mols]
-
-    def seqs_from_descs(
-        self,
-        p_codes: list[int],
-        descs: list[np.ndarray],
-        rotation: np.ndarray | None = None,
-        batch_size: int = 64,
-    ) -> list[list[int] | None]:
-        """Quantize pose descriptors (optionally rotated) into token sequences."""
-        out: list[list[int] | None] = [None] * len(descs)
-        valid = [(i, d) for i, d in enumerate(descs) if d.shape[0] > 0]
-        for s in range(0, len(valid), batch_size):
-            chunk = valid[s : s + batch_size]
-            arrs = [
-                d if rotation is None else rotate_atom_descriptor(d, rotation)
-                for _, d in chunk
-            ]
-            tensors = [
-                torch.from_numpy((a - self.mean) / self.std).float() for a in arrs
-            ]
-            x, mask = collate_molecules(tensors)
-            idx = self.module.vqvae.encode_batch(
-                x.to(self.device), mask.to(self.device)
-            ).cpu()
-            for k, (i, _) in enumerate(chunk):
-                out[i] = self.vocab.build_sequence(p_codes, idx[k][mask[k]].tolist())
-        return out
-
-    def ligand_seq(self, p_codes: list[int], mol: dict, frame) -> list[int] | None:  # noqa: ANN001
-        lig_desc, _e, _m = self.lig_desc.compute(mol["atoms"], mol["bonds"], frame)
-        if lig_desc.shape[0] == 0:
-            return None
-        return self.vocab.build_sequence(p_codes, self._encode(lig_desc))
-
-    def ligand_seqs_batch(
-        self, p_codes: list[int], mols: list[dict], frame: tuple
-    ) -> list[list[int] | None]:
-        """Encode MANY ligand poses in ONE VQ call (per-pose batch-1 is the
-        decoy-generation bottleneck). Returns one sequence (or None) per mol."""
-        descs = [self.lig_desc.compute(m["atoms"], m["bonds"], frame)[0] for m in mols]
-        valid = [(i, d) for i, d in enumerate(descs) if d.shape[0] > 0]
-        out: list[list[int] | None] = [None] * len(mols)
-        if not valid:
-            return out
-        tensors = [
-            torch.from_numpy((d - self.mean) / self.std).float() for _, d in valid
-        ]
-        x, mask = collate_molecules(tensors)
-        idx = self.module.vqvae.encode_batch(
-            x.to(self.device), mask.to(self.device)
-        ).cpu()
-        for k, (i, _) in enumerate(valid):
-            out[i] = self.vocab.build_sequence(p_codes, idx[k][mask[k]].tolist())
-        return out
 
 
 def _spearman(x: np.ndarray, y: np.ndarray) -> float:
@@ -254,15 +55,6 @@ def _spearman(x: np.ndarray, y: np.ndarray) -> float:
     rx = np.argsort(np.argsort(x))
     ry = np.argsort(np.argsort(y))
     return float(np.corrcoef(rx, ry)[0, 1])
-
-
-def _random_rotation(rng: np.random.Generator) -> np.ndarray:
-    """Uniform random 3D rotation (QR of a Gaussian matrix, det fixed to +1)."""
-    q, r = np.linalg.qr(rng.normal(size=(3, 3)))
-    q = q @ np.diag(np.sign(np.diag(r)))
-    if np.linalg.det(q) < 0:
-        q[:, 0] = -q[:, 0]
-    return q
 
 
 def _zscore(x: np.ndarray) -> np.ndarray:
@@ -342,7 +134,9 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         default=None,
         help="Write per-pose (rmsd, head, pll) scores here for offline sweeps.",
     )
+    add_seed_argument(parser)
     args = parser.parse_args()
+    seed_from_args(args)
 
     from rdkit import RDLogger  # noqa: PLC0415
 
@@ -353,10 +147,10 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     vq_cfg = AtomVQVAETrainingConfig()
     vq_cfg.atom.codebook_size = args.codebook_size
     if args.separate_protein_ckpt is not None:
-        from src.tokenizers.descriptor_schema import (  # noqa: PLC0415
+        from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
             ATOM_DESCRIPTOR_DIM,
         )
-        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
         module = SeparateVQVAE.from_checkpoints(
             args.separate_protein_ckpt, args.separate_protein_norm,
@@ -364,7 +158,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
             device, codebook_size=args.codebook_size,
         )
         # SeparateVQVAE normalizes per modality internally, so feed RAW
-        # descriptors through _PoseEncoder (identity external normalization).
+        # descriptors through PoseEncoder (identity external normalization).
         mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
         std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
         vocab_codebook = 2 * args.codebook_size
@@ -389,8 +183,8 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     mlm.eval().to(device)
     mask_id = mlm_cfg.model.mask_token_id
     vocab = AtomLMVocab(codebook_size=vocab_codebook)
-    enc = _PoseEncoder(
-        module,
+    enc = PoseEncoder(
+        module.vqvae,
         mean,
         std,
         vocab,
@@ -402,9 +196,9 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     need_pll = args.score_mode in ("pll", "ensemble")
     rescorer = None
     if need_head:
-        from src.config import RescoreTrainingConfig  # noqa: PLC0415
-        from src.data.rescore_dataset import _ligand_mask  # noqa: PLC0415
-        from src.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
+        from prolit.config import RescoreTrainingConfig  # noqa: PLC0415
+        from prolit.data.rescore_dataset import ligand_mask  # noqa: PLC0415
+        from prolit.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
 
         # Prefer the config stored in the checkpoint: it records every option
         # that changes the module's parameters (pooling, interaction layers, the
@@ -448,7 +242,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                 arr = np.asarray(seq)
                 ids[j, : len(seq)] = torch.from_numpy(arr.astype(np.int64))
                 attn[j, : len(seq)] = 1
-                lig[j, : len(seq)] = torch.from_numpy(_ligand_mask(arr))
+                lig[j, : len(seq)] = torch.from_numpy(ligand_mask(arr))
             batch = {
                 "input_ids": ids.to(device),
                 "attention_mask": attn.to(device),
@@ -461,7 +255,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     def pll_score(seq: list[int]) -> float:
         return ligand_pll(mlm, seq, mask_id, device)
 
-    from src.tokenizers.ligand import parse_sdf  # noqa: PLC0415
+    from prolit.tokenizers.ligand import parse_sdf  # noqa: PLC0415
 
     targets = sorted(
         p.name for p in (args.casf_dir / "coreset").iterdir() if p.is_dir()
@@ -496,7 +290,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                     continue
                 name, val = ln.split()[:2]
                 rmsd[name] = float(val)
-            poses = _parse_mol2_multi(decoys.read_text())
+            poses = parse_mol2_multi(decoys.read_text())
             if args.max_decoys is not None:
                 poses = poses[: args.max_decoys]
 
@@ -526,7 +320,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                         seqs = [seqs0[i] for i in keep]
                         pc = p_codes
                     else:
-                        rot = _random_rotation(np.random.default_rng(1000 + r))
+                        rot = random_rotation_matrix(np.random.default_rng(1000 + r))
                         pc = enc.pocket_codes_rotated(rot)
                         srot = enc.seqs_from_descs(pc, descs, rotation=rot)
                         seqs = [srot[i] if srot[i] is not None else seqs0[i]

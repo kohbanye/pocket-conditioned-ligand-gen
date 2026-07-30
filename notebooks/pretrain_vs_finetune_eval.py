@@ -44,6 +44,7 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import os
     from collections import Counter
     from pathlib import Path
 
@@ -65,16 +66,17 @@ def _():
     GT_COLOR = "#3a7ca5"  # ground-truth reference (filled grey-blue)
     # Per-model colors, assigned in spec order.
     MODEL_COLORS = ["#d1495b", "#e0a32e", "#66a182", "#8d5fd3"]
-    return Counter, GT_COLOR, MODEL_COLORS, Path, mo, np, plt
+    return Counter, GT_COLOR, MODEL_COLORS, Path, mo, np, os, plt
 
 
 @app.cell
-def _(MODEL_COLORS, Path, np):
+def _(MODEL_COLORS, Path, np, os):
     # Which dumps to compare. Edit labels/paths as needed; missing files are
     # skipped so the notebook works before every checkpoint has been evaluated.
-    PROJECT = Path(
-        "/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen"
-    )
+    # Repository root, found from this file so the notebook runs from any
+    # checkout; PROLIT_ROOT overrides it.
+    _repo = Path(os.environ.get("PROLIT_ROOT") or Path(__file__).resolve().parent.parent)
+    PROJECT = _repo
     SPECS = [
         ("finetune (GEOM->CrossDocked)", "outputs/gen_cmp/finetune.npz"),
         ("pretrain (GEOM, empty pocket)", "outputs/gen_cmp/pretrain.npz"),

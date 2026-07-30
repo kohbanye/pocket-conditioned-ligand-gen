@@ -213,13 +213,43 @@ checkpoints/
 *.ckpt
 wget-log
 
-# TSUBAME job logs and generated artifacts
+# Training run directories (checkpoints + wandb metadata). Their paths are quoted
+# verbatim in the shared arm registry, so they stay where they are rather than
+# moving under runs/.
+/pocket-ligand-vqvae/
+/pocket-ligand-lm/
+/pocket-ligand-mlm/
+/pocket-ligand-rescore/
+/pocket-ligand-refine/
+/runs/
+
+# Results and artifacts. Only code is tracked: anything a run reproduces --
+# per-sample dumps, summary tables, figures, notebook exports -- stays local.
+# ``results*`` rather than ``results`` because sbdd-bench also writes
+# results_td_a/, results_diffsbdd/ and friends for one-off baseline reruns.
+/results*/
+benchmarks/*/results*/
+
+# Notes, frozen result records and figure sources. They describe artifacts that
+# are themselves local (weights, caches, dumps), so they live beside them.
+/docs/
+
+# Cluster job scripts: what to run is in pipelines/, how to submit it is
+# site-specific. jobs/submit.py generates them; the generated and previously-run
+# ones stay local.
+jobs/generated/
+jobs/archive/
+**/scripts/jobs/
+**/scripts/job_*.sh
+scripts/run_*.sh
+/logs/
 *.out
 *.err
 outputs/
 .codex
 
-# Rendered notebook exports
+# Notebook exports (the .py source is tracked; the rendered PDF/HTML is not)
+notebooks/*.pdf
 notebooks/*.html
 
 # SGE/TSUBAME job stdout/stderr (name.e<jobid> / name.o<jobid>[.<taskid>])

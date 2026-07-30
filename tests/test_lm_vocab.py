@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.tokenizers.lm_vocab import (
+from prolit.tokenizers.lm_vocab import (
     BOS_ID,
     EOS_ID,
     L_CLOSE_ID,

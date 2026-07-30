@@ -11,24 +11,21 @@ receptor PDB and a reference ligand SDF defining the pocket — this:
 3. Decodes each sample with the ligand VQ-VAE, places atoms in the real pocket
    frame (global coords matching the receptor), and infers bonds.
 
-Three tokenizer paths are supported (all share the sampling / output code, so
-the emitted ``generated.sdf`` is identical in layout for every arm — this is
-what the sbdd-bench ``own`` adapter consumes):
+Two tokenizer arms are supported (both share the sampling / output code, so the
+emitted ``generated.sdf`` is identical in layout for either — this is what the
+sbdd-bench ``own`` adapter consumes):
 
-* legacy 2-codebook (default): protein VQ + ligand VQ inside one
-  :class:`VQVAEModule` (``--vqvae-ckpt``).
-* ``--all-atom``: the unified single-codebook all-atom VQ (``--vqvae-ckpt`` is
-  an :class:`AtomVQVAEModule`); ``--split-codebook`` for the split protein/ligand
-  book variant.
+* the joint tokenizer (default): one all-atom VQ over a shared codebook
+  (``--vqvae-ckpt`` is an :class:`AtomVQVAEModule`).
 * ``--separate-protein-ckpt`` (+ the other ``--separate-*`` flags): the ablation
-  separate-tokenizers arm — pocket encoded by a protein-only VQ, ligand decoded
-  by a ligand-only VQ over one combined ``2*--codebook-size`` space
-  (:class:`SeparateVQVAE`); the LM is the matching separate LM.
+  arm — pocket encoded by a protein-only VQ, ligand decoded by a ligand-only VQ
+  over one combined ``2*--codebook-size`` space (:class:`SeparateVQVAE`); the LM
+  is the matching separate LM.
 
-The three encode/decode branches mirror ``scripts/generate_ligands_3d.py``
-exactly (that script is the validated reference for the all-atom + separate
-paths); only the driver here differs (single external target -> ``generated.sdf``
-instead of an internal test-pool sweep -> per-pocket PDBs).
+Both encode/decode branches mirror ``scripts/generate_ligands_3d.py`` exactly
+(that script is the validated reference); only the driver here differs (single
+external target -> ``generated.sdf`` instead of an internal test-pool sweep ->
+per-pocket PDBs).
 
 Outputs (under ``--out-dir``):
     generated.sdf      every decoded ligand as a heavy-atom V2000 mol block
@@ -43,15 +40,13 @@ known inhibitor can be docked as a positive control alongside the generations.
 Run on a GPU node with the venv python directly (``uv run`` rebuilds the
 editable package, which is very slow here)::
 
-    # legacy 2-codebook
+    # joint tokenizer (single 8192 codebook)
     PYTHONPATH=$PWD .venv/bin/python scripts/generate_ligands_for_target.py \
         --receptor data/targets/2ity/2ity_receptor.pdb \
         --ref-ligand data/targets/2ity/2ity_ref_ligand.sdf \
-        --lm-ckpt pocket-ligand-lm/g79let5b/checkpoints/lm-e09-vl1.4088.ckpt \
+        --vqvae-ckpt <atom-vqvae.ckpt> --codebook-size 8192 \
+        --lm-ckpt pocket-ligand-lm/p6lpk7br/checkpoints/lm-e02-vl1.0029.ckpt \
         --num-samples 100 --batch-size 100 --out-dir outputs/egfr_2ity
-
-    # all-atom joint (single 8192 codebook)
-    ... --all-atom --vqvae-ckpt <atom-vqvae.ckpt> --codebook-size 8192 ...
 
     # separate 4096+4096 tokenizers (combined 8192 space)
     ... --separate-protein-ckpt <p.ckpt> --separate-protein-norm <p.pt> \
@@ -64,48 +59,39 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from scripts.generate_ligands_3d import (  # noqa: E402
-    _decode_ligand,
+# Sibling module, imported by bare name: Python puts the script's own
+# directory on sys.path[0], so this resolves no matter where it is run from
+# (a ``scripts.`` prefix would need the repository root on the path).
+from generate_ligands_3d import (
     _decode_ligand_atom,
-    _pocket_codes,
     _pocket_codes_atom,
     load_atom_lm,
     load_atom_norm_stats,
     load_atom_vqvae,
 )
-from scripts.write_reconstruction_pdbs import infer_bonds  # noqa: E402
-from src.config import (  # noqa: E402
-    CrossDockedConfig,
-    LMTrainingConfig,
+
+from prolit.chem.pdb_io import infer_bonds
+from prolit.config import (
     PocketExtractionConfig,
-    VQVAETrainingConfig,
 )
-from src.data.descriptors import ComplexDescriptorDataModule  # noqa: E402
-from src.model.lm_module import LigandLMModule  # noqa: E402
-from src.model.vqvae_module import VQVAEModule  # noqa: E402
-from src.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
-from src.tokenizers.descriptor_schema import SOURCE_LIGAND_IDX  # noqa: E402
-from src.tokenizers.ligand import parse_sdf  # noqa: E402
-from src.tokenizers.lm_vocab import (  # noqa: E402
+from prolit.seeding import add_seed_argument, seed_from_args
+from prolit.tokenizers.atom import ProteinAtomDescriptor
+from prolit.tokenizers.ligand import parse_sdf
+from prolit.tokenizers.lm_vocab import (
     L_CLOSE_ID,
     PAD_ID,
     AtomLMVocab,
-    LMVocab,
 )
-from src.tokenizers.protein import (  # noqa: E402
-    BackboneSphericalDescriptor,
-)
+
+# Repository root, used only for default data/output locations. ``prolit`` is
+# an installed package, so nothing needs to be put on sys.path.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -173,12 +159,12 @@ def _pocket_context(receptor_path: Path, ref_mol: dict, frame: tuple) -> tuple |
     pocket in one coordinate system. Only atoms within the refiner's cutoff of
     the ligand end up mattering (the collate filters by radius).
     """
-    from src.model.pose_refiner import pocket_feats_from_descriptor  # noqa: PLC0415
-    from src.tokenizers.atom import (  # noqa: PLC0415
+    from prolit.model.pose_refiner import pocket_feats_from_descriptor  # noqa: PLC0415
+    from prolit.tokenizers.atom import (  # noqa: PLC0415
         ProteinAtomDescriptor,
         precompute_receptor_atom_features_from_text,
     )
-    from src.tokenizers.protein import (  # noqa: PLC0415
+    from prolit.tokenizers.protein import (  # noqa: PLC0415
         extract_pocket_atoms_from_candidates,
         precompute_pocket_atom_candidates_from_text,
     )
@@ -204,7 +190,7 @@ def _pocket_context(receptor_path: Path, ref_mol: dict, frame: tuple) -> tuple |
     return pkt_canon, pocket_feats_from_descriptor(prot_desc)
 
 
-def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
+def _build_generator(args, device) -> tuple:  # noqa: ANN001
     """Load the LM + VQ-VAE(s) for the selected tokenizer path and return the
     pieces the sampling loop needs.
 
@@ -212,8 +198,8 @@ def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
     decode_codes)`` where ``encode_pocket(rec_path, mol)`` yields
     ``(protein_codes, frame, ref_coords, ref_elems)`` and
     ``decode_codes(codes, frame, refiner, pocket_ctx)`` yields
-    ``(coords, elements)``. The three branches mirror
-    ``generate_ligands_3d.py``'s ``main`` exactly.
+    ``(coords, elements)``. Both branches mirror ``generate_ligands_3d.py``'s
+    ``main`` exactly.
     """
     vqvae_ckpt = (
         args.vqvae_ckpt
@@ -228,7 +214,7 @@ def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
         # ligand decoded by a ligand-only VQ, unified into one combined code space
         # (protein codes [0, Pc), ligand codes [Pc, 2*Pc)) by SeparateVQVAE. The
         # LM is the separate LM trained over an AtomLMVocab of 2*codebook-size.
-        from src.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
         separate_vqvae = SeparateVQVAE.from_checkpoints(
             args.separate_protein_ckpt,
@@ -267,42 +253,16 @@ def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
                 ligand_norm,
                 frame,
                 device,
-                source_idx=None,
                 refiner=refiner,
                 pocket_ctx=pocket_ctx,
             )
 
-    elif args.all_atom or args.split_codebook:
-        split = args.split_codebook
-        atom_vqvae = load_atom_vqvae(
-            vqvae_ckpt,
-            args.codebook_size,
-            device,
-            split=split,
-            ligand_codebook_size=args.ligand_codebook_size,
-        )
-        model = load_atom_lm(
-            args.lm_ckpt,
-            args.codebook_size,
-            device,
-            split=split,
-            ligand_codebook_size=args.ligand_codebook_size,
-        )
+    else:
+        atom_vqvae = load_atom_vqvae(vqvae_ckpt, args.codebook_size, device)
+        model = load_atom_lm(args.lm_ckpt, args.codebook_size, device)
         norm_stats = load_atom_norm_stats(args.norm_stats, device)
-        if split:
-            vocab = LMVocab(
-                protein_codebook_size=args.codebook_size,
-                ligand_codebook_size=args.ligand_codebook_size,
-            )
-            code_lo, code_hi = (
-                vocab.ligand_offset,
-                vocab.ligand_offset + vocab.ligand_codebook_size,
-            )
-            dec_source = SOURCE_LIGAND_IDX
-        else:
-            vocab = AtomLMVocab(codebook_size=args.codebook_size)
-            code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
-            dec_source = None
+        vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        code_lo, code_hi = vocab.offset, vocab.offset + vocab.codebook_size
         code_base = code_lo
         prot_atom_desc = ProteinAtomDescriptor()
 
@@ -322,57 +282,6 @@ def _build_generator(args, device):  # noqa: ANN001, ANN201, C901, PLR0915
             return _decode_ligand_atom(
                 codes,
                 atom_vqvae,
-                norm_stats,
-                frame,
-                device,
-                source_idx=dec_source,
-                refiner=refiner,
-                pocket_ctx=pocket_ctx,
-            )
-
-    else:
-        vqvae = (
-            VQVAEModule.load_from_checkpoint(str(vqvae_ckpt), map_location=device)
-            .eval()
-            .to(device)
-        )
-        model = (
-            LigandLMModule.load_from_checkpoint(
-                args.lm_ckpt, config=LMTrainingConfig(), map_location=device
-            )
-            .eval()
-            .to(device)
-            .model
-        )
-        dm = ComplexDescriptorDataModule(
-            VQVAETrainingConfig(), CrossDockedConfig(data_dir=PROJECT_ROOT / "data")
-        )
-        dm.cache_dir = args.cache_dir
-        dm.setup()
-        norm_stats = {k: v.to(device) for k, v in dm.norm_stats.items()}
-        vocab = LMVocab()
-        code_lo, code_hi = (
-            vocab.ligand_offset,
-            vocab.ligand_offset + vocab.ligand_codebook_size,
-        )
-        code_base = code_lo
-        protein_desc_calc = BackboneSphericalDescriptor()
-
-        def encode_pocket(rec_path, mol):  # noqa: ANN001, ANN202
-            return _pocket_codes(
-                rec_path,
-                mol,
-                pocket_config,
-                protein_desc_calc,
-                vqvae.protein_vqvae,
-                norm_stats,
-                device,
-            )
-
-        def decode_codes(codes, frame, refiner=None, pocket_ctx=None):  # noqa: ANN001, ANN202
-            return _decode_ligand(
-                codes,
-                vqvae.ligand_vqvae,
                 norm_stats,
                 frame,
                 device,
@@ -429,7 +338,7 @@ def main() -> None:  # noqa: C901, PLR0915
         "kind of size conditioning TargetDiff/DiffSBDD apply by sampling N from a "
         "pocket-conditioned distribution. 0 disables it (unconstrained length).",
     )
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     parser.add_argument(
         "--refine-ckpt",
         type=str,
@@ -439,20 +348,7 @@ def main() -> None:  # noqa: C901, PLR0915
         "(removes clashes/strain from the raw pose). Default off = unchanged.",
     )
     # --- tokenizer-path flags (mirror scripts/generate_ligands_3d.py) ---
-    parser.add_argument(
-        "--all-atom",
-        action="store_true",
-        help="Use the unified single-codebook all-atom tokenizer (AtomLMVocab + "
-        "AtomVQVAEModule) instead of the legacy protein+ligand 2-codebook path.",
-    )
-    parser.add_argument(
-        "--split-codebook",
-        action="store_true",
-        help="All-atom VQ with SPLIT codebooks (protein + ligand books, one "
-        "shared descriptor/encoder/decoder) -> 2-range LMVocab. Implies all-atom.",
-    )
     parser.add_argument("--codebook-size", type=int, default=8192)
-    parser.add_argument("--ligand-codebook-size", type=int, default=4096)
     parser.add_argument(
         "--separate-protein-ckpt",
         type=Path,
@@ -475,8 +371,7 @@ def main() -> None:  # noqa: C901, PLR0915
         help="All-atom normalization stats (.pt with atom_mean/atom_std).",
     )
     args = parser.parse_args()
-
-    torch.manual_seed(args.seed)
+    seed_from_args(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -516,7 +411,7 @@ def main() -> None:  # noqa: C901, PLR0915
     refiner = None
     pocket_ctx = None
     if args.refine_ckpt is not None:
-        from src.model.pose_refiner import PoseRefinerModule  # noqa: PLC0415
+        from prolit.model.pose_refiner import PoseRefinerModule  # noqa: PLC0415
 
         refiner = (
             PoseRefinerModule.load_from_checkpoint(
@@ -594,7 +489,7 @@ def main() -> None:  # noqa: C901, PLR0915
     # under-generates size relative to the crystal ligand, and Vina is not
     # size-normalised, so an unconstrained length systematically loses affinity.
     min_new_tokens = max(
-        int(round(args.min_atoms_frac * len(ref_elems)))
+        round(args.min_atoms_frac * len(ref_elems))
         if args.min_atoms_frac > 0
         else 0,
         args.min_atoms_abs,

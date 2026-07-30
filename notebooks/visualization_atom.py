@@ -44,17 +44,15 @@ def _():
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    from src.config import AtomVQVAETrainingConfig, CrossDockedConfig
-    from src.data.atom_descriptors import AtomComplexDescriptorDataModule
-    from src.model.vqvae_module import AtomVQVAEModule
-    from src.tokenizers.descriptor_schema import (
+    from prolit.config import AtomVQVAETrainingConfig, CrossDockedConfig
+    from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
+    from prolit.model.vqvae_module import AtomVQVAEModule
+    from prolit.tokenizers.descriptor_schema import (
         ATOM_DESCRIPTOR_DIM,
         ATOM_LAYOUT,
         BB_SC_VOCAB,
         LIGAND_ELEMENT_VOCAB,
         PROTEIN_AA_VOCAB,
-        SOURCE_LIGAND_IDX,
-        SOURCE_PROTEIN_IDX,
         fields_by_name,
     )
 
@@ -134,7 +132,7 @@ def _(
 
     data_config = CrossDockedConfig(data_dir=project_root / "data")
     hub = None  # fold split needs the hub manifest; supplied by the DataModule
-    from src.config import HubDatasetConfig  # noqa: PLC0415
+    from prolit.config import HubDatasetConfig
 
     hub = HubDatasetConfig()
     hub.source_types = ["cdonly"]
@@ -516,19 +514,19 @@ def _(device, norm_stats, np, plt, project_root, torch, vqvae):
 
     import pyarrow.parquet as pq
 
-    from src.config import PocketExtractionConfig
-    from src.tokenizers.atom import (
+    from prolit.config import PocketExtractionConfig
+    from prolit.tokenizers.atom import (
         LigandAtomDescriptor,
         ProteinAtomDescriptor,
         atom_descriptor_to_coords,
         precompute_receptor_atom_features,
     )
-    from src.tokenizers.descriptor_schema import ATOM_DESCRIPTOR_DIM as _ADIM
-    from src.tokenizers.descriptor_schema import ATOM_LAYOUT as _ALAYOUT
-    from src.tokenizers.descriptor_schema import fields_by_name as _fbn
-    from src.tokenizers.ligand import parse_sdf_text
-    from src.tokenizers.protein import (
-        _compute_canonical_frame,
+    from prolit.tokenizers.descriptor_schema import ATOM_DESCRIPTOR_DIM as _ADIM
+    from prolit.tokenizers.descriptor_schema import ATOM_LAYOUT as _ALAYOUT
+    from prolit.tokenizers.descriptor_schema import fields_by_name as _fbn
+    from prolit.tokenizers.ligand import parse_sdf_text
+    from prolit.tokenizers.protein import (
+        compute_canonical_frame,
         extract_pocket_atoms_from_candidates,
         precompute_pocket_atom_candidates,
     )
@@ -625,7 +623,7 @@ def _(device, norm_stats, np, plt, project_root, torch, vqvae):
         pocket = extract_pocket_atoms_from_candidates(precomp, heavy, pocket_config)
         if pocket is None or pocket.atom_coords.shape[0] == 0:
             continue
-        centroid, rotation = _compute_canonical_frame(pocket.ca_coords.astype(np.float64))
+        centroid, rotation = compute_canonical_frame(pocket.ca_coords.astype(np.float64))
         frame = (centroid, rotation)
 
         pdesc, pmeta = prot_desc_calc.compute(pocket, feats, frame)

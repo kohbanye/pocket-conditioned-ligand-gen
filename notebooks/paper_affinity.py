@@ -10,7 +10,7 @@
 # ///
 """Paper figure/table: all-atom affinity head (CASF-2016 scoring & ranking power).
 
-Our model (see docs/best_allatom_configs.md):
+Our model (recorded in docs/results/best_allatom_configs.md, kept locally):
   leak-free MLM backbone wxlhgqx3 + pK-regression heads. Best number = a fixed
   5-head ensemble (no test-set selection). Scoring power = Pearson R of predicted
   vs experimental pKa over 285 complexes; ranking power = mean within-cluster
@@ -25,6 +25,8 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+
+    import os
     from pathlib import Path
 
     import marimo as mo
@@ -33,12 +35,17 @@ def _():
     import pandas as pd
     from scipy.stats import pearsonr, spearmanr
 
-    return Path, mo, np, pd, pearsonr, plt, spearmanr
+    return Path, mo, np, os, pd, pearsonr, plt, spearmanr
 
 
 @app.cell
-def _(Path):
-    REPO = Path("/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen")
+def _(Path, os):
+    # The repository root, found from this file so the notebook runs from any
+    # checkout. PROLIT_ROOT overrides it.
+    REPO = Path(
+        os.environ.get("PROLIT_ROOT")
+        or Path(__file__).resolve().parent.parent
+    )
     CASF = REPO / "outputs" / "casf"
     BASE = REPO.parent / "baselines" / "casf_work"
     return BASE, CASF
@@ -140,11 +147,13 @@ def _(CASF, ens, pd, ranking_rho, scoring_R):
     # Baseline aggregates from the finished cross-method run.
     method_cmp = pd.read_csv(CASF / "method_comparison.csv").set_index("method")
     rows = []
-    for m in ["GenScore", "Boltz-2", "Vina"]:
-        if m in method_cmp.index:
-            rows.append({"method": m,
-                         "scoring R ↑": round(method_cmp.loc[m, "scoring_R"], 3),
-                         "ranking ρ ↑": round(method_cmp.loc[m, "ranking_rho"], 3)})
+    rows.extend(
+        {"method": m,
+         "scoring R ↑": round(method_cmp.loc[m, "scoring_R"], 3),
+         "ranking ρ ↑": round(method_cmp.loc[m, "ranking_rho"], 3)}
+        for m in ["GenScore", "Boltz-2", "Vina"]
+        if m in method_cmp.index
+    )
     rows.append({"method": "OURS (LF5 ensemble)",
                  "scoring R ↑": round(scoring_R(ens), 3),
                  "ranking ρ ↑": round(ranking_rho(ens), 3)})

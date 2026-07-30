@@ -1,116 +1,117 @@
-# CLAUDE.md — Pocket-Conditioned Ligand Generation
+# CLAUDE.md — ProLIT
 
 ## Project Overview
 
-標的タンパク質のポケット構造・配列情報を条件として、結合リガンドの3次元構造を自己回帰型Transformerで生成する研究プロジェクト。
-創薬プロセスにおけるリード化合物設計の効率化を目指す。
+タンパク質ポケットとリガンドを**ひとつの共有語彙**で離散トークン化する
+**ProLIT** (Protein–Ligand Interface Tokenizer) の研究リポジトリ。
+論文は `../aaai27-paper/main.tex`（AAAI 2027 投稿,
+*Learning the Language of the Binding Interface*）。**論文が唯一の正**で、
+そこに載る構成だけが本流。
 
-### Research Items
+### 構成
 
-1. **項目(1)**: タンパク質構造・配列、化合物の立体構造を離散トークンにエンコードするトークナイザの構築
-2. **項目(2)**: トークン化したデータによる自己回帰型Transformerの学習
-3. **項目(3)**: 複数の標的タンパク質に対して生成した分子セットの評価
+| 層 | 実体 |
+|---|---|
+| **トークナイザ (本流)** | joint all-atom VQ-VAE。33-D per-atom descriptor、単一 codebook 8192 (vocab 8199) |
+| **トークナイザ (ablation)** | separate = protein 専用 VQ + ligand 専用 VQ を 1 code space に連結 |
+| **ProLIT-MLM** | encoder-only 複合体 MLM (~99M)。pose rescoring / affinity head の backbone |
+| **ProLIT-CLM** | Qwen3 系 causal LM (~298M) + e3nn flow-matching pose refiner。生成 |
 
-### Architecture
-
-- **タンパク質エンコーダ**: ESM3 — タンパク質の構造・配列をトークン化
-- **リガンドエンコーダ**: Mol-StrucTok — 化合物の3次元構造を離散トークンにエンコード
-- **生成モデル**: 自己回帰型Transformer (GPT/Llama ベース)
-- **デコード戦略**: 2段階 — Step1: 粗い原子配置の復元、Step2: 拡散モデルによる構造微調整
-
-### Token Sequence Format
+### トークン列
 
 ```
-<p>...protein pocket structure tokens...</p><s>...protein sequence tokens...</s><l>...ligand structure tokens...</l>
+<bos><p> pocket atom tokens </p><l> ligand atom tokens </l><eos>
 ```
 
-- `<p></p>`: タンパク質ポケット構造トークン
-- `<s></s>`: タンパク質配列トークン
-- `<l></l>`: リガンド構造トークン
-- Retrieval augmentation: 類似複合体の構造・配列情報を入力先頭に追加
+protein 原子と ligand 原子は**同じ codebook**から引く。片方が空でもよい
+（空の `<p></p>` = リガンド単独コーパス）ので、単独事前学習 → 複合体 finetune が
+同じフォーマットで繋がる。
+
+## 重要な前提
+
+- **checkpoint と `normalization_stats.pt` は必ずセット**。取り違えるとエラーにならず、
+  もっともらしいがスケールの狂った座標が出る。
+- **どのアームがどの重みを指すかは
+  `benchmarks/common/src/prolit_bench/variants.py` が唯一の定義**。ここを迂回しない。
+  モジュール冒頭に、benchmark 間で checkpoint 選択が食い違っていた既知の問題が
+  書いてあるので、触る前に読むこと。
+- **`prolit/api.py` が公開 API**。`__all__` の外は内部実装。ベンチから private を
+  掴まない。
+- **旧 `src.*` import パス**は checkpoint の pickle 互換のために
+  `prolit/_legacy_import_path.py` で生かしてある。消すと既存 checkpoint が全部読めなくなる。
 
 ## Tech Stack
 
-- **Language**: Python 3.12
-- **Package Manager**: uv
-- **Deep Learning**: PyTorch + PyTorch Lightning
-- **Config**: Hydra (hydra-core)
-- **Experiment Tracking**: Weights & Biases (wandb)
-- **Notebooks**: marimo (`.py` format, not Jupyter)
-- **Linter**: Ruff (select = ALL, ignore = D, N812)
-- **Type Checker**: ty
-- **Testing**: pytest
+- Python 3.12 / uv (workspace) / PyTorch + Lightning / wandb
+- Config は **dataclass** (`prolit/config.py`)。**Hydra は使っていない**
+- Notebooks は **marimo** (`.py` 形式)
+- Lint: Ruff (`select = ["ALL"]`, ignore `D`, `N812`, `COM812`) / 型: ty / テスト: pytest
 
-## Project Structure
+## Structure とレイヤ規約
 
 ```
-pocket-conditioned-ligand-gen/
-├── src/
-│   ├── tokenizers/           # Tokenization modules
-│   │   ├── protein.py        # ESM3 wrapper for pocket structure/sequence
-│   │   ├── ligand.py         # Mol-StrucTok wrapper for 3D ligand structure
-│   │   └── sequence.py       # Assemble <p>...<s>...<l>... format
-│   ├── data/                 # Data loading and preprocessing
-│   │   ├── crossdocked.py    # CrossDocked2020 DataModule
-│   │   └── preprocessing.py  # Data preprocessing utilities
-│   ├── model/                # Model architecture
-│   │   ├── transformer.py    # GPT/Llama-based autoregressive model
-│   │   └── decoder.py        # Two-stage decoding (coarse + diffusion)
-│   ├── evaluation/           # Evaluation utilities
-│   │   └── metrics.py        # Validity, novelty, diversity, docking score
-│   └── config.py             # Dataclass-based configuration
-├── scripts/                  # CLI entry points
-│   ├── tokenize.py           # Tokenization pipeline
-│   └── train.py              # Training pipeline
-├── notebooks/                # marimo notebooks (.py) for exploration/visualization
-├── data/                     # Downloaded datasets (gitignored)
-├── pyproject.toml            # Project config and dependencies
-└── uv.lock                   # Dependency lock file
+                  pipelines/  ─┐
+                  benchmarks/ ─┼──→  src/prolit/   （下向きのみ）
+                  scripts/    ─┘
 ```
 
-## Key Datasets
+```
+src/prolit/        ライブラリ。argparse も I/O ポリシーも持たない。入口は prolit/api.py
+  ├── chem/        RDKit / PDB / MOL2 / Open Babel / docking / 幾何
+  ├── tokenizers/  descriptor schema, VQ-VAE, vocab, loaders, PoseEncoder
+  ├── model/       VQ-VAE / CLM / MLM / scoring head / pose refiner
+  └── data/        descriptor cache, token stream, datasets
+pipelines/         コーパス構築 (corpora/) と学習 (train/) の CLI
+benchmarks/        論文の表ごとに 1 つ。common/ が共有レジストリと有意差検定
+scripts/           **ベンチが subprocess で叩く ProLIT 側の入口だけ**を置く
+jobs/              クラスタ投入ツール（lib.sh + submit.py。ジョブ本体は git 管理外）
+third_party/       ベースラインの submodule。patches/ に当てている修正
+```
 
-- **CrossDocked2020**: タンパク質–リガンドのクロスドッキング複合体データセット（主要な学習データ）
-- **PDBbind**: タンパク質–リガンド複合体データベース
-- 評価標的: SARS-CoV-2 メインプロテアーゼ、EGFR 等
+**規約（`tests/test_layering.py` が強制する）**:
 
-## Evaluation Metrics
-
-- 生成分子の有効性 (Validity)、新規性 (Novelty)、多様性 (Diversity)
-- ドッキングスコア
-- FEP（自由エネルギー摂動法）による結合親和性評価
-- MD シミュレーションとの RMSD 比較
-
-## Development Conventions
-
-- Config は dataclass で定義する（`src/config.py`）
-- モデルは `LightningModule` を継承して実装する
-- データは `LightningDataModule` を継承して実装する
-- Ruff の ALL ルール準拠（docstring 系 D, N812 は除外）
-- コードとコミットメッセージは英語で書く
-
-## Key References
-
-- ESM3: Meta の大規模タンパク質言語モデル（構造・配列・機能のマルチモーダルトークナイザ）
-- Mol-StrucTok: 分子の3次元構造を離散トークンにエンコードするトークナイザ
-- HierDiff (Qiang+ ICML2023): 2段階拡散モデルによる構造微調整
-- VQ-VAE (Van Den Oord+ NeurIPS2017): 離散潜在変数による再構成精度向上の検討
+- `prolit` は上位レイヤを一切知らない。import も subprocess も禁止。
+- `pipelines` / `benchmarks` / `scripts` は**兄弟**で、互いを import しない。
+  2 つが同じものを必要としたら、それは `prolit` に置くもの。
+  実際 `PoseEncoder` / `parse_mol2_multi` / `obabel_mol` / docking ヘルパは
+  この規則で降りてきた（eval スクリプトに住んでいて、corpus builder が import し、
+  ベンチが複製していた）。
+- 同レイヤ内の兄弟 import は**裸のモジュール名**で書く
+  (`from tokenize_biolip import ...`)。`pipelines.` / `scripts.` 接頭辞は
+  リポジトリルートが `sys.path` にある時しか解決せず、cwd 依存になる。
+- `scripts/` は 12 本を上限にテストで縛ってある。増やす前に、
+  再利用可能なら `prolit`、コーパス・学習なら `pipelines/` を検討する。
 
 ## Commands
 
 ```bash
-# Install dependencies
-uv sync
-
-# Run training
-uv run python train.py
-
-# Run linter
+uv sync --all-packages         # ライブラリ + workspace 内ベンチ
+uv run pytest                  # ライブラリ / pipelines / workspace 内ベンチ
 uv run ruff check .
-
-# Run formatter
-uv run ruff format .
-
-# Run tests
-uv run pytest
+uv run ty check src
 ```
+
+`benchmarks/recon-bench` だけは別環境（ESM3 が fork 版 transformers を要求するため）。
+`cd benchmarks/recon-bench && uv sync` で個別に。
+
+## Conventions
+
+- **学習・トークン化は `.venv/bin/python` を直叩き**。`uv run` は毎回 editable install を
+  解決し直すので遅く、ジョブ内では無意味。
+- **ジョブスクリプトは `jobs/submit.py` 経由で作る**。`source ~/.bashrc` と
+  `module load cuda` は**書かない**（0.3 秒で exit 0・無出力の無言死を招く。
+  torch は CUDA 同梱なのでロード不要）。`jobs/lib.sh` にこの経緯がある。
+- **git に載せるのはコードだけ**。重み・キャッシュ・トークン列・結果 dump・
+  ジョブスクリプト・`docs/` は全て `.gitignore`（ローカルには残す）。
+  数値の出所は `docs/results/`、調査ログは `docs/notes/` に、重みと同じ機械上で。
+- **サイト固有の絶対パスを書かない**。ルートは `__file__` から導出、外部バイナリ
+  (vina / obabel / prepare_receptor) は `prolit.external_tools` が `PATH` と
+  環境変数から実行時に解決する。
+- **乱数は `prolit.seeding` 経由で一本化**。CLI は `add_seed_argument(parser)` +
+  `seed_from_args(args)`、独立ストリームが要る所は `rng_for(seed, "名前")`。
+  裸の `np.random.default_rng()`（引数なし）は禁止で、`tests/test_seeding.py`
+  が検出する。学習の seed は config に載るので checkpoint が覚えている。
+- コードとコミットメッセージは英語。
+- トークン列のバイト表現を変える変更は**全 checkpoint を無効化する**。
+  `tests/test_token_stream.py` が既存実装との一致を固定しているので、
+  意図的に変える場合はそのテストごと更新する。

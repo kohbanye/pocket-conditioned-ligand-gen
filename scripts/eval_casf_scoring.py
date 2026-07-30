@@ -25,16 +25,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from src.config import (
+from prolit.config import (
     AtomVQVAETrainingConfig,
     ComplexMLMConfig,
     MLMTrainingConfig,
     PocketExtractionConfig,
 )
-from src.model.mlm_module import ComplexMLMModule
-from src.model.mlm_score import ligand_pll
-from src.model.vqvae_module import AtomVQVAEModule
-from src.tokenizers.lm_vocab import AtomLMVocab
+from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.mlm_score import ligand_pll
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -109,8 +110,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    from scripts.eval_casf_rescore import _PoseEncoder  # noqa: PLC0415
-    from src.tokenizers.ligand import parse_sdf  # noqa: PLC0415
+    # Sibling module; see the note in generate_ligands_for_target.py.
+
+    from prolit.tokenizers.ligand import parse_sdf  # noqa: PLC0415
 
     vq_cfg = AtomVQVAETrainingConfig()
     vq_cfg.atom.codebook_size = args.codebook_size
@@ -130,8 +132,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     mlm.eval().to(device)
     mask_id = mlm_cfg.model.mask_token_id
 
-    enc = _PoseEncoder(
-        module,
+    enc = PoseEncoder(
+        module.vqvae,
         norm["atom_mean"].numpy(),
         norm["atom_std"].numpy(),
         AtomLMVocab(codebook_size=args.codebook_size),
@@ -141,9 +143,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     rescorer = None
     if args.rescore_ckpt is not None:
-        from src.config import RescoreTrainingConfig  # noqa: PLC0415
-        from src.data.rescore_dataset import _ligand_mask  # noqa: PLC0415
-        from src.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
+        from prolit.config import RescoreTrainingConfig  # noqa: PLC0415
+        from prolit.data.rescore_dataset import ligand_mask  # noqa: PLC0415
+        from prolit.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
 
         rescorer = ComplexRescoreModule.load_from_checkpoint(
             args.rescore_ckpt,
@@ -183,7 +185,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
             head = float("nan")
             if rescorer is not None:
                 ids = torch.tensor([seq], device=device)
-                lig_mask = _ligand_mask(np.asarray(seq))
+                lig_mask = ligand_mask(np.asarray(seq))
                 with torch.no_grad():
                     raw = float(
                         rescorer(

@@ -1,31 +1,22 @@
 """Tests for GEOM ligand-only pretraining pieces.
 
-Covers the two correctness-critical pieces of the rotation-augmentation path:
+Covers ``random_rotation_matrix`` (a proper rotation: orthogonal, det +1), the
+molecule-level split helper, and the RDKit-mol extraction.
 
-1. ``random_rotation_matrix`` is a proper rotation (orthogonal, det +1).
-2. ``rotate_ligand_descriptor`` (the cheap augmentation primitive) is
-   *equivalent* to recomputing the descriptor in the rotated frame -- this is
-   what lets the tokenizer run RDKit once per conformer and synthesise K
-   orientations.
-
-Plus the molecule-level split helper and the RDKit-mol extraction.
+The other half of the rotation-augmentation contract -- that
+``rotate_atom_descriptor`` is *equivalent* to recomputing the descriptor in the
+rotated frame, which is what lets the tokenizer run RDKit once per conformer and
+synthesise K orientations -- lives in ``test_atom_descriptor.py``.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from src.data.geom import _rd_mol_to_atoms_bonds, assign_split
-from src.tokenizers.descriptor_schema import (
-    K_NEIGHBORS,
-    LIGAND_LAYOUT,
-    fields_by_name,
-)
-from src.tokenizers.geometry import (
+from prolit.data.geom import _rd_mol_to_atoms_bonds, assign_split
+from prolit.tokenizers.geometry import (
     random_rotation_matrix,
-    spherical_to_cartesian_np,
 )
-from src.tokenizers.ligand import LigandDescriptor, rotate_ligand_descriptor
 
 
 def _make_molecule() -> tuple[list, list]:
@@ -63,64 +54,6 @@ class TestRandomRotation:
         a = random_rotation_matrix(rng)
         b = random_rotation_matrix(rng)
         assert not np.allclose(a, b)
-
-
-class TestRotateDescriptorEquivalence:
-    """rotate_ligand_descriptor == recompute in the rotated frame."""
-
-    def test_equivalence(self) -> None:
-        atoms, bonds = _make_molecule()
-        centroid = _heavy_centroid(atoms)
-        rot = random_rotation_matrix(np.random.default_rng(7))
-        desc = LigandDescriptor()
-
-        base, _, _ = desc.compute(atoms, bonds, pocket_frame=(centroid, np.eye(3)))
-        direct, _, _ = desc.compute(atoms, bonds, pocket_frame=(centroid, rot))
-        helper = rotate_ligand_descriptor(base, rot)
-
-        f = fields_by_name(LIGAND_LAYOUT)
-
-        # Categorical / element slots are rotation-invariant -> identical.
-        for name in (
-            "element",
-            "charge",
-            "hybrid",
-            "aromatic",
-            "ring",
-            "numH",
-            "knn_elements",
-        ):
-            sl = slice(f[name].start, f[name].end)
-            assert np.array_equal(helper[:, sl], direct[:, sl]), name
-
-        # Compare orientation-dependent slots in Cartesian space (avoids angle
-        # wrap-around ambiguity at the poles).
-        def _coord_cart(arr: np.ndarray, start: int) -> np.ndarray:
-            return spherical_to_cartesian_np(arr[:, start : start + 4])
-
-        np.testing.assert_allclose(
-            _coord_cart(helper, f["coord"].start),
-            _coord_cart(direct, f["coord"].start),
-            atol=1e-4,
-        )
-        for k in range(K_NEIGHBORS):
-            s = f["knn_offsets"].start + 4 * k
-            np.testing.assert_allclose(
-                _coord_cart(helper, s), _coord_cart(direct, s), atol=1e-4
-            )
-
-    def test_radius_is_rotation_invariant(self) -> None:
-        atoms, bonds = _make_molecule()
-        centroid = _heavy_centroid(atoms)
-        rot = random_rotation_matrix(np.random.default_rng(3))
-        desc = LigandDescriptor()
-        base, _, _ = desc.compute(atoms, bonds, pocket_frame=(centroid, np.eye(3)))
-        direct, _, _ = desc.compute(atoms, bonds, pocket_frame=(centroid, rot))
-        f = fields_by_name(LIGAND_LAYOUT)
-        # coord r (column 0 of the coord slot) is invariant under rotation.
-        np.testing.assert_allclose(
-            base[:, f["coord"].start], direct[:, f["coord"].start], atol=1e-5
-        )
 
 
 class TestAssignSplit:

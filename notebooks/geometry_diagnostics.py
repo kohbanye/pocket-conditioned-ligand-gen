@@ -34,6 +34,7 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import os
     from pathlib import Path
 
     import marimo as mo
@@ -57,18 +58,20 @@ def _():
         "recon": ("#66a182", "VQ-recon (decoder only)"),
         "gen": ("#d1495b", "LM-gen"),
     }
-    return ARMS, Path, mo, np, plt
+    return ARMS, Path, mo, np, os, plt
 
 
 @app.cell
-def _(Path, np):
+def _(Path, np, os):
+    # Repository root, found from this file so the notebook runs from any
+    # checkout; PROLIT_ROOT overrides it.
+    _repo = Path(
+        os.environ.get("PROLIT_ROOT") or Path(__file__).resolve().parent.parent
+    )
     _cands = [
         Path.cwd() / "outputs/diagnostics/diag_data.npz",
         Path.cwd().parent / "outputs/diagnostics/diag_data.npz",
-        Path(
-            "/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen"
-            "/outputs/diagnostics/diag_data.npz"
-        ),
+        _repo / "outputs/diagnostics/diag_data.npz",
     ]
     DATA_PATH = next(p for p in _cands if p.exists())
     D = np.load(DATA_PATH, allow_pickle=True)

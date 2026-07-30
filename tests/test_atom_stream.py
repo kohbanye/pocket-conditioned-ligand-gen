@@ -7,13 +7,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from src.config import AtomVQVAEConfig
-from src.data.atom_descriptors import AtomShardedDataset
-from src.data.descriptors import collate_molecules
-from src.tokenizers.atom import LigandAtomDescriptor, ProteinAtomDescriptor
-from src.tokenizers.descriptor_schema import ATOM_DESCRIPTOR_DIM
-from src.tokenizers.protein import PocketAtomData
-from src.tokenizers.vqvae import TransformerVQVAE
+from prolit.config import AtomVQVAEConfig
+from prolit.data.atom_descriptors import AtomShardedDataset
+from prolit.data.descriptors import collate_molecules
+from prolit.tokenizers.atom import LigandAtomDescriptor, ProteinAtomDescriptor
+from prolit.tokenizers.descriptor_schema import ATOM_DESCRIPTOR_DIM
+from prolit.tokenizers.protein import PocketAtomData
+from prolit.tokenizers.vqvae import TransformerVQVAE
 
 if TYPE_CHECKING:
     from pathlib import Path

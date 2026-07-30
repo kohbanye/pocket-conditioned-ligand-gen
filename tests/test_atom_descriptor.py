@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.tokenizers.atom import (
+from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
     atom_descriptor_to_coords,
     rotate_atom_descriptor,
 )
-from src.tokenizers.descriptor_schema import (
+from prolit.tokenizers.descriptor_schema import (
     ATOM_DESCRIPTOR_DIM,
     ATOM_LAYOUT,
     BB_SC_BACKBONE_IDX,
@@ -22,8 +22,8 @@ from src.tokenizers.descriptor_schema import (
     SOURCE_PROTEIN_IDX,
     fields_by_name,
 )
-from src.tokenizers.geometry import random_rotation_matrix
-from src.tokenizers.protein import PocketAtomData
+from prolit.tokenizers.geometry import random_rotation_matrix
+from prolit.tokenizers.protein import PocketAtomData
 
 _F = fields_by_name(ATOM_LAYOUT)
 
