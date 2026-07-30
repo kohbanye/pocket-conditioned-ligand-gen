@@ -57,7 +57,7 @@ src/prolit/        ライブラリ（副作用なし・argparse なし）。入�
   └── data/        descriptor cache, token stream, datasets
 pipelines/         コーパス構築 (corpora/) と学習 (train/) の CLI
 benchmarks/        論文の表ごとに 1 つ。common/ が共有レジストリと有意差検定
-jobs/              TSUBAME 投入ツール + 実行済みジョブの archive
+jobs/              クラスタ投入ツール（lib.sh + submit.py。ジョブ本体は git 管理外）
 scripts/           評価・生成の入口
 third_party/       ベースラインの submodule。patches/ に当てている修正
 docs/results/      凍結した結果記録（数値の出所はここが正）
@@ -83,6 +83,11 @@ uv run ty check src
 - **ジョブスクリプトは `jobs/submit.py` 経由で作る**。`source ~/.bashrc` と
   `module load cuda` は**書かない**（0.3 秒で exit 0・無出力の無言死を招く。
   torch は CUDA 同梱なのでロード不要）。`jobs/lib.sh` にこの経緯がある。
+- **git に載せるのはコードだけ**。重み・キャッシュ・トークン列・結果 dump・
+  ジョブスクリプトは全て `.gitignore`。数値の結論は `docs/results/` に残す。
+- **サイト固有の絶対パスを書かない**。ルートは `__file__` から導出、外部バイナリ
+  (vina / obabel / prepare_receptor) は `prolit.external_tools` が `PATH` と
+  環境変数から実行時に解決する。
 - コードとコミットメッセージは英語。
 - トークン列のバイト表現を変える変更は**全 checkpoint を無効化する**。
   `tests/test_token_stream.py` が既存実装との一致を固定しているので、

@@ -20,13 +20,14 @@ import logging
 import tempfile
 from pathlib import Path
 
+from prolit.external_tools import tool_default
 from scripts.dock_vina import _parse_score, _run, _write_xyz
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-DEFAULT_VINA = "/home/5/uq02055/.local/bin/vina"
-DEFAULT_OBABEL = "/home/5/uq02055/usr/app/babel/bin/obabel"
+DEFAULT_VINA = tool_default("vina")
+DEFAULT_OBABEL = tool_default("obabel")
 _CFG: dict = {}
 
 

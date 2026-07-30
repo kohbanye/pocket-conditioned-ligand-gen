@@ -24,22 +24,22 @@ import json
 import logging
 import re
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
+
+from prolit.chem.pdb_io import infer_bonds, write_full_protein_pdb
+from prolit.external_tools import tool_default
+from prolit.tokenizers.ligand import parse_sdf
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
+# Repository root, used only for default data/output locations. ``prolit`` is
+# an installed package, so nothing needs to be put on sys.path.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
 
-from prolit.chem.pdb_io import infer_bonds, write_full_protein_pdb  # noqa: E402
-from prolit.tokenizers.ligand import parse_sdf  # noqa: E402
-
-DEFAULT_VINA = "/home/5/uq02055/.local/bin/vina"
-DEFAULT_OBABEL = "/home/5/uq02055/usr/app/babel/bin/obabel"
+DEFAULT_VINA = tool_default("vina")
+DEFAULT_OBABEL = tool_default("obabel")
 _SCORE_RE = re.compile(r"Estimated Free Energy of Binding\s*:\s*(-?\d+\.?\d*)")
 
 

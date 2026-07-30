@@ -59,35 +59,34 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from prolit.chem.pdb_io import infer_bonds  # noqa: E402
-from prolit.config import (  # noqa: E402
+from prolit.chem.pdb_io import infer_bonds
+from prolit.config import (
     PocketExtractionConfig,
 )
-from prolit.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
-from prolit.tokenizers.ligand import parse_sdf  # noqa: E402
-from prolit.tokenizers.lm_vocab import (  # noqa: E402
+from prolit.tokenizers.atom import ProteinAtomDescriptor
+from prolit.tokenizers.ligand import parse_sdf
+from prolit.tokenizers.lm_vocab import (
     L_CLOSE_ID,
     PAD_ID,
     AtomLMVocab,
 )
-from scripts.generate_ligands_3d import (  # noqa: E402
+from scripts.generate_ligands_3d import (
     _decode_ligand_atom,
     _pocket_codes_atom,
     load_atom_lm,
     load_atom_norm_stats,
     load_atom_vqvae,
 )
+
+# Repository root, used only for default data/output locations. ``prolit`` is
+# an installed package, so nothing needs to be put on sys.path.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)

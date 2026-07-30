@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 
@@ -26,7 +27,10 @@ import numpy as np
 CASF = Path("data/casf2016")
 PRED = Path("outputs/boltz_casf/predict")
 GEN = Path(
-    "/gs/bs/tga-ohuelab/sakano/git/baselines/casf_work/scoring_power_genscore.csv"
+    os.environ.get(
+        "PROLIT_BASELINES_DIR", "../baselines"
+    )
+    + "/casf_work/scoring_power_genscore.csv"
 )
 OURS = [
     "affinity_power_lf",

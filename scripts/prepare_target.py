@@ -34,12 +34,14 @@ from pathlib import Path
 
 import numpy as np
 
+from prolit.external_tools import tool_default
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 # System tools (overridable via CLI). These live outside the uv venv.
-DEFAULT_OBABEL = "/home/5/uq02055/usr/app/babel/bin/obabel"
-DEFAULT_PREPARE_RECEPTOR = "/home/5/uq02055/usr/app/ADFRsuite/bin/prepare_receptor"
+DEFAULT_OBABEL = tool_default("obabel")
+DEFAULT_PREPARE_RECEPTOR = tool_default("prepare_receptor")
 
 # Standard amino-acid residue names kept in the receptor (drop everything else
 # that arrives as ATOM, e.g. modified residues we cannot prep cleanly).

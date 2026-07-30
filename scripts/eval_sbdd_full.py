@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -37,20 +36,17 @@ import pandas as pd
 import pyarrow.parquet as pq
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from prolit.config import (  # noqa: E402
+from prolit.config import (
     PocketExtractionConfig,
 )
-from prolit.tokenizers.atom import ProteinAtomDescriptor  # noqa: E402
-from prolit.tokenizers.lm_vocab import (  # noqa: E402
+from prolit.external_tools import tool_default
+from prolit.tokenizers.atom import ProteinAtomDescriptor
+from prolit.tokenizers.lm_vocab import (
     L_CLOSE_ID,
     PAD_ID,
     AtomLMVocab,
 )
-from scripts.dock_vina import (  # noqa: E402
+from scripts.dock_vina import (
     DEFAULT_OBABEL,
     DEFAULT_VINA,
     _heavy_rmsd,
@@ -59,8 +55,8 @@ from scripts.dock_vina import (  # noqa: E402
     _run,
     _write_xyz,
 )
-from scripts.eval_posebusters import _reconstruct  # noqa: E402
-from scripts.generate_ligands_3d import (  # noqa: E402
+from scripts.eval_posebusters import _reconstruct
+from scripts.generate_ligands_3d import (
     _decode_ligand_atom,
     _pocket_codes_atom,
     _read_mol_from_tar,
@@ -69,10 +65,14 @@ from scripts.generate_ligands_3d import (  # noqa: E402
     load_atom_vqvae,
 )
 
+# Repository root, used only for default data/output locations. ``prolit`` is
+# an installed package, so nothing needs to be put on sys.path.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_PREPARE_RECEPTOR = "/home/5/uq02055/usr/app/ADFRsuite/bin/prepare_receptor"
+DEFAULT_PREPARE_RECEPTOR = tool_default("prepare_receptor")
 PB_CHECKS = [
     "bond_lengths",
     "bond_angles",

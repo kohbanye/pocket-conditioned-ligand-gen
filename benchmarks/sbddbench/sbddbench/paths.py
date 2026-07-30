@@ -40,28 +40,16 @@ RESULTS_DIR = Path(os.environ.get("SBDD_RESULTS_DIR", REPO_ROOT / "results"))
 
 # --- system tools (live outside any venv) ------------------------------------
 # AutoDock Vina + Open Babel power docking and ligand prep; ADFRsuite's
-# prepare_receptor builds receptor pdbqt. Resolved from PATH, then known
-# install locations on this machine, overridable via env.
-def _tool(env: str, *candidates: str) -> str:
-    if env in os.environ:
-        return os.environ[env]
-    name = candidates[0].rsplit("/", 1)[-1]
-    found = shutil.which(name)
-    if found:
-        return found
-    for c in candidates:
-        if Path(c).exists():
-            return c
-    return name  # last resort: hope it is on PATH at call time
+# prepare_receptor builds the receptor pdbqt. None is a Python package, so where
+# they live is a property of the machine: the env var wins, then PATH, then the
+# bare name so the failure surfaces at call time with the command in it.
+def _tool(env: str, name: str) -> str:
+    return os.environ.get(env) or shutil.which(name) or name
 
 
-VINA = _tool("SBDD_VINA", "/home/5/uq02055/.local/bin/vina", "vina")
-OBABEL = _tool("SBDD_OBABEL", "/home/5/uq02055/usr/app/babel/bin/obabel", "obabel")
-PREPARE_RECEPTOR = _tool(
-    "SBDD_PREPARE_RECEPTOR",
-    "/home/5/uq02055/usr/app/ADFRsuite/bin/prepare_receptor",
-    "prepare_receptor",
-)
+VINA = _tool("SBDD_VINA", "vina")
+OBABEL = _tool("SBDD_OBABEL", "obabel")
+PREPARE_RECEPTOR = _tool("SBDD_PREPARE_RECEPTOR", "prepare_receptor")
 
 # ============================================================================
 # Per-model generation environments + checkpoints.
@@ -70,16 +58,10 @@ PREPARE_RECEPTOR = _tool(
 # any of them with the matching env var.
 # ============================================================================
 
-# --- pocket-conditioned-ligand-gen (Ours) ------------------------------------
-# Source is the submodule, but the trained weights + descriptor cache (the
-# normalization stats) live in a separate working copy and are symlinked into
-# weights/ and data/. Generation runs in that working copy's uv venv.
-OWN_MODEL_WORKDIR = Path(
-    os.environ.get(
-        "SBDD_OWN_WORKDIR",
-        "/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen",
-    )
-)
+# --- ProLIT (Ours) -----------------------------------------------------------
+# ProLIT lives in this monorepo. Its trained weights and descriptor caches are
+# not in git; they are symlinked into weights/ and data/ by fetch_weights.py.
+OWN_MODEL_WORKDIR = Path(os.environ.get("SBDD_OWN_WORKDIR", MONOREPO_ROOT))
 OWN_PYTHON = os.environ.get(
     "SBDD_OWN_PYTHON", str(OWN_MODEL_WORKDIR / ".venv" / "bin" / "python")
 )

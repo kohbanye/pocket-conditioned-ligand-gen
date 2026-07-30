@@ -47,6 +47,7 @@ from pipelines.corpora.tokenize_biolip import (
 from pipelines.corpora.tokenize_decoys import _cd_test_pdbs, _RmsdWriter
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.descriptors import collate_molecules
+from prolit.external_tools import tool_default
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
@@ -305,9 +306,9 @@ def main() -> None:  # noqa: C901, PLR0915
     parser.add_argument("--val-frac", type=float, default=0.03)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=90)
-    parser.add_argument("--vina", type=str, default="/home/5/uq02055/.local/bin/vina")
+    parser.add_argument("--vina", type=str, default=tool_default("vina"))
     parser.add_argument(
-        "--obabel", type=str, default="/home/5/uq02055/usr/app/babel/bin/obabel"
+        "--obabel", type=str, default=tool_default("obabel")
     )
     parser.add_argument("--tmp-dir", type=str, default=str(Path.home() / "tmpdir"))
     args = parser.parse_args()

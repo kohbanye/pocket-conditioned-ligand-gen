@@ -23,7 +23,7 @@ Paper: *Learning the Language of the Binding Interface* (AAAI 2027 submission).
 src/prolit/        the library — tokenizer, models, datasets. Start at prolit/api.py.
 pipelines/         corpus construction and training (CLIs)
 benchmarks/        one per paper table; see benchmarks/README.md
-jobs/              TSUBAME submission tooling + the archive of jobs already run
+jobs/              cluster job submission (the scripts themselves stay local)
 scripts/           evaluation and generation entry points
 third_party/       baseline sources (submodules); patches/ holds our edits to them
 docs/              frozen result records and dated investigation notes
@@ -31,10 +31,15 @@ notebooks/         marimo notebooks that produce the paper's figures
 ```
 
 Only code is tracked. Trained weights, descriptor caches, token streams,
-per-sample dumps and rendered figures are all git-ignored — they are outputs of
-the pipelines above, and they stay on whatever machine produced them. What the
-runs *concluded* is written down in `docs/results/`, which is the authority when
-a number is in question.
+per-sample dumps, rendered figures and cluster job scripts are all git-ignored —
+they are either outputs of the pipelines above or properties of one machine, and
+they stay where they were produced. What the runs *concluded* is written down in
+`docs/results/`, which is the authority when a number is in question.
+
+Nothing tracked here hardcodes a path on our cluster. Roots are derived from the
+file's own location, external binaries (AutoDock Vina, Open Babel, ADFRsuite's
+`prepare_receptor`) are resolved from `PATH` at call time, and every default can
+be overridden with an environment variable.
 
 ## Setup
 
@@ -86,8 +91,9 @@ python pipelines/train/head.py     # a pose-rescoring or affinity head
 python pipelines/train/refiner.py  # the pose refiner
 ```
 
-On TSUBAME, wrap these with `jobs/submit.py` rather than hand-writing a job
-script — it emits the prologue that avoids a known silent-failure mode.
+These are plain CLIs — run them however your site expects. On a scheduler,
+`jobs/submit.py` renders the boilerplate around one, and prints the `qsub` line
+rather than submitting it. See `jobs/README.md`.
 
 ## Development
 

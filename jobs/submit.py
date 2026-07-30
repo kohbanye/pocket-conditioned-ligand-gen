@@ -16,6 +16,7 @@ long it takes should be stated and agreed before it enters the queue.
 from __future__ import annotations
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -83,7 +84,7 @@ def build(  # noqa: PLR0913
         name=name,
         array=f"#$ -t {array}\n" if array else "",
         description=description,
-        lib=JOBS_DIR / "lib.sh",
+        lib='$(dirname "$0")/../lib.sh',
         env=env_lines + ("\n" if env_lines else ""),
         commands=body,
     )
@@ -112,7 +113,9 @@ def main() -> None:
         help="extra environment variable (repeatable)",
     )
     parser.add_argument(
-        "--group", default="tga-ohuelab", help="billing group for qsub -g"
+        "--group",
+        default=os.environ.get("PROLIT_QSUB_GROUP", ""),
+        help="billing group for qsub -g (default: $PROLIT_QSUB_GROUP)",
     )
     parser.add_argument(
         "--submit",
@@ -158,7 +161,7 @@ def main() -> None:
         f"  {args.resource} for up to {args.hours} h "
         f"-> at most {cost:.2f} node-hours of billing"
     )
-    qsub = ["qsub", "-g", args.group, str(rel)]
+    qsub = ["qsub", *(["-g", args.group] if args.group else []), str(rel)]
     print("  " + " ".join(qsub))
 
     if args.submit:

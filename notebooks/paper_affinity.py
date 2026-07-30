@@ -25,6 +25,8 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+
+    import os
     from pathlib import Path
 
     import marimo as mo
@@ -33,12 +35,17 @@ def _():
     import pandas as pd
     from scipy.stats import pearsonr, spearmanr
 
-    return Path, mo, np, pd, pearsonr, plt, spearmanr
+    return Path, mo, np, os, pd, pearsonr, plt, spearmanr
 
 
 @app.cell
-def _(Path):
-    REPO = Path("/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen")
+def _(Path, os):
+    # The repository root, found from this file so the notebook runs from any
+    # checkout. PROLIT_ROOT overrides it.
+    REPO = Path(
+        os.environ.get("PROLIT_ROOT")
+        or Path(__file__).resolve().parent.parent
+    )
     CASF = REPO / "outputs" / "casf"
     BASE = REPO.parent / "baselines" / "casf_work"
     return BASE, CASF

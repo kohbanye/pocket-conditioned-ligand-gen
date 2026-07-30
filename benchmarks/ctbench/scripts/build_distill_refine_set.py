@@ -35,7 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
-SOURCE_REPO = Path("/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen")
+SOURCE_REPO = Path(__file__).resolve().parents[3]
 SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbddbench"
 sys.path.insert(0, str(SOURCE_REPO))
 

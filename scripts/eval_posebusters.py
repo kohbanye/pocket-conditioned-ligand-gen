@@ -16,18 +16,19 @@ on the raw arrays already in ``eval_data.npz`` -- no GPU / regeneration. Run::
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
+from prolit.external_tools import tool_default
+
 _REAL = {"C", "N", "O", "S", "P", "F", "Cl", "Br", "I", "B", "Si", "H"}
 
 
 def _obabel() -> str:
-    return shutil.which("obabel") or "/home/5/uq02055/usr/app/babel/bin/obabel"
+    return tool_default("obabel")
 
 
 def _reconstruct(coords_list: list, elements_list: list) -> dict[int, object]:

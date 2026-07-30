@@ -25,6 +25,7 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+    import os
     from collections import Counter
     from pathlib import Path
 
@@ -45,19 +46,19 @@ def _():
         }
     )
     GEN_C, GT_C = "#d1495b", "#3a7ca5"  # generated / ground-truth colors
-    return Counter, GEN_C, GT_C, Path, mo, np, plt
+    return Counter, GEN_C, GT_C, Path, mo, np, os, plt
 
 
 @app.cell
-def _(Path, np):
+def _(Path, np, os):
     # Locate and load the eval dump (run from repo root or notebooks/).
+    # Repository root, found from this file so the notebook runs from any
+    # checkout; PROLIT_ROOT overrides it.
+    _repo = Path(os.environ.get("PROLIT_ROOT") or Path(__file__).resolve().parent.parent)
     _cands = [
         Path.cwd() / "outputs/gen_eval/eval_data.npz",
         Path.cwd().parent / "outputs/gen_eval/eval_data.npz",
-        Path(
-            "/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen"
-            "/outputs/gen_eval/eval_data.npz"
-        ),
+        _repo / "outputs/gen_eval/eval_data.npz",
     ]
     DATA_PATH = next(p for p in _cands if p.exists())
     D = np.load(DATA_PATH, allow_pickle=True)

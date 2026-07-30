@@ -95,10 +95,7 @@ RECEPTOR_CACHE = Path(
 # Used to perceive ligand bond orders when converting CASP ligand PDBs to SDF.
 # RDKit's PDB reader does not perceive bond orders at all (every bond comes back
 # SINGLE), which silently breaks any chemistry-aware metric downstream.
-OBABEL = os.environ.get(
-    "PLBENCH_OBABEL",
-    shutil.which("obabel") or "/home/5/uq02055/usr/app/babel/bin/obabel",
-)
+OBABEL = os.environ.get("PLBENCH_OBABEL") or shutil.which("obabel") or "obabel"
 
 # --- ESM3 --------------------------------------------------------------------
 # Structure encoder/decoder weights are fetched from HuggingFace

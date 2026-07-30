@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
@@ -85,7 +86,10 @@ def main() -> None:  # noqa: PLR0915
     p.add_argument("--ckpt", type=Path, required=True)
     p.add_argument("--norm-stats", type=Path, required=True)
     p.add_argument(
-        "--pdbbind-dir", type=Path, default=Path("/gs/bs/tga-ohuelab/ysato/data/P-L")
+        "--pdbbind-dir",
+        type=Path,
+        default=Path(os.environ.get("PDBBIND_DIR", "data/pdbbind")),
+        help="PDBbind v2020 root (refined + general). Or set PDBBIND_DIR.",
     )
     p.add_argument("--casf-pdbs", type=Path, default=Path("data/casf2016_pdbs.txt"))
     p.add_argument(

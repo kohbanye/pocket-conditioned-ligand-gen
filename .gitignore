@@ -232,6 +232,15 @@ wget-log
 # one-off baseline reruns.
 /results*/
 benchmarks/*/results*/
+
+# Cluster job scripts: what to run is in pipelines/, how to submit it is
+# site-specific. jobs/submit.py generates them; the generated and previously-run
+# ones stay local.
+jobs/generated/
+jobs/archive/
+**/scripts/jobs/
+**/scripts/job_*.sh
+scripts/run_*.sh
 /logs/
 *.out
 *.err

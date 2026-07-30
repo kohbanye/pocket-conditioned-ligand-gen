@@ -16,18 +16,19 @@ appends ``openbabel`` to the ``methods`` list.
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
+from prolit.external_tools import tool_default
+
 _REAL = {"C", "N", "O", "S", "P", "F", "Cl", "Br", "I", "B", "Si", "H"}
 
 
 def _obabel() -> str:
-    found = shutil.which("obabel") or "/home/5/uq02055/usr/app/babel/bin/obabel"
+    found = tool_default("obabel")
     if not Path(found).exists():
         msg = "obabel CLI not found"
         raise FileNotFoundError(msg)

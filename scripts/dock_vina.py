@@ -41,11 +41,13 @@ import tempfile
 from multiprocessing import Pool
 from pathlib import Path
 
+from prolit.external_tools import tool_default
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
-DEFAULT_VINA = "/home/5/uq02055/.local/bin/vina"
-DEFAULT_OBABEL = "/home/5/uq02055/usr/app/babel/bin/obabel"
+DEFAULT_VINA = tool_default("vina")
+DEFAULT_OBABEL = tool_default("obabel")
 
 _SCORE_RE = re.compile(
     r"Estimated Free Energy of Binding\s*:\s*(-?\d+\.?\d*)", re.IGNORECASE

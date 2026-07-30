@@ -16,6 +16,7 @@ Every external checkpoint path is overridable via the env vars in
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -27,7 +28,8 @@ from sbddbench import paths  # noqa: E402
 
 # Known local copies on this machine (best-effort; overridden by --*-src).
 LOCAL_DIFFSBDD_CKPT = Path(
-    "/gs/bs/tga-ohuelab/sakano/git/DiffSBDD/checkpoints/crossdocked_fullatom_cond.ckpt"
+    os.environ.get("SBDD_DIFFSBDD_CKPT_SRC", "")
+    or str(paths.WEIGHTS_DIR / "diffsbdd" / "crossdocked_fullatom_cond.ckpt")
 )
 
 # Upstream sources (for the printed instructions).

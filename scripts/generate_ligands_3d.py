@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import logging
-import sys
 import tarfile
 from pathlib import Path
 
@@ -32,44 +31,44 @@ import numpy as np
 import pyarrow.parquet as pq
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from prolit.chem.pdb_io import (  # noqa: E402
+from prolit.chem.pdb_io import (
     infer_bonds,
     write_full_protein_pdb,
 )
-from prolit.config import (  # noqa: E402
+from prolit.config import (
     AtomVQVAETrainingConfig,
     LMTrainingConfig,
     PocketExtractionConfig,
 )
-from prolit.model.lm_module import LigandLMModule  # noqa: E402
-from prolit.model.vqvae_module import AtomVQVAEModule  # noqa: E402
-from prolit.tokenizers.atom import (  # noqa: E402
+from prolit.model.lm_module import LigandLMModule
+from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.atom import (
     ProteinAtomDescriptor,
     precompute_receptor_atom_features,
 )
-from prolit.tokenizers.descriptor_schema import (  # noqa: E402
+from prolit.tokenizers.descriptor_schema import (
     ATOM_LAYOUT,
     LIGAND_ELEMENT_VOCAB,
     fields_by_name,
 )
-from prolit.tokenizers.geometry import spherical_to_cartesian_np  # noqa: E402
-from prolit.tokenizers.ligand import (  # noqa: E402
+from prolit.tokenizers.geometry import spherical_to_cartesian_np
+from prolit.tokenizers.ligand import (
     parse_sdf_text,
 )
-from prolit.tokenizers.lm_vocab import (  # noqa: E402
+from prolit.tokenizers.lm_vocab import (
     L_CLOSE_ID,
     PAD_ID,
     AtomLMVocab,
 )
-from prolit.tokenizers.protein import (  # noqa: E402
+from prolit.tokenizers.protein import (
     compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates,
 )
+
+# Repository root, used only for default data/output locations. ``prolit`` is
+# an installed package, so nothing needs to be put on sys.path.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)

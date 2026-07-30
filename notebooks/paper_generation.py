@@ -24,6 +24,8 @@ app = marimo.App(width="medium")
 
 @app.cell
 def _():
+
+    import os
     from pathlib import Path
 
     import marimo as mo
@@ -32,13 +34,18 @@ def _():
     import pandas as pd
     from scipy import stats
 
-    return Path, mo, np, pd, plt, stats
+    return Path, mo, np, os, pd, plt, stats
 
 
 @app.cell
-def _(Path):
+def _(Path, os):
     # Project-internal analysis notebook: absolute repo root is reliable here.
-    REPO = Path("/gs/bs/tga-ohuelab/sakano/git/pocket-conditioned-ligand-gen")
+    # The repository root, found from this file so the notebook runs from any
+    # checkout. PROLIT_ROOT overrides it.
+    REPO = Path(
+        os.environ.get("PROLIT_ROOT")
+        or Path(__file__).resolve().parent.parent
+    )
     GEN = REPO / "outputs" / "generation"
     return (GEN,)
 
