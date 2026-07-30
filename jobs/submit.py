@@ -140,6 +140,15 @@ def main() -> None:
             parser.error(f"--env expects K=V, got {item!r}")
         env[key] = value
 
+    # The submitter cannot know the run directory -- without --run-name it is
+    # the W&B run id, decided at startup -- so it passes what it knows through
+    # the environment and the run folds it into its own run.json.
+    env = {
+        "PROLIT_JOB_NAME": args.name,
+        "PROLIT_JOB_RESOURCE": args.resource,
+        "PROLIT_JOB_HOURS": str(args.hours),
+        **env,
+    }
     script = build(
         name=args.name,
         resource=args.resource,

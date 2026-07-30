@@ -31,6 +31,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import ComplexMLMConfig, RescoreTrainingConfig
 from prolit.data.rescore_dataset import RescoreDataModule
 from prolit.model.rescore_module import ComplexRescoreModule
+from prolit.provenance import RecordProvenance
 from prolit.seeding import add_seed_argument, seed_from_args
 
 logging.basicConfig(level=logging.INFO)
@@ -207,6 +208,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         else None
     )
     callbacks: list = [
+        # Writes run.json beside the checkpoints: command, git SHA, seed.
+        RecordProvenance(seed=args.seed),
         ModelCheckpoint(
             dirpath=ckpt_dir,
             monitor="val/loss",

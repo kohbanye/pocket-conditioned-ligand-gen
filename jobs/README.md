@@ -24,6 +24,26 @@ and how long it may run should be agreed before it enters the queue.
 
 Set `PROLIT_QSUB_GROUP` if your scheduler needs `qsub -g`.
 
+## Provenance
+
+Job scripts are not tracked, so nothing in git says how a checkpoint was
+produced. The run records that itself: every training run writes `run.json` into
+its checkpoint directory with the command, the git SHA and whether the tree was
+dirty, the seed, and — when it came from here — the job name, resource and id
+that `submit.py` passes through the environment.
+
+Git has the code, the run directory has the weights and the command that made
+them; together they reproduce the number. Delete the run and its provenance goes
+with it, which is right: they are the same thing.
+
+```sh
+cat pocket-ligand-lm/<run>/checkpoints/run.json
+```
+
+`dirty: true` is the field to look at first — it means the code that produced
+those weights was never committed, so the run cannot be reproduced from git
+alone.
+
 ## Portability
 
 `lib.sh` derives the repository root from its own location, so a generated

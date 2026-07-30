@@ -37,6 +37,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import LMTrainingConfig
 from prolit.data.lm_dataset import LMTokenDataModule
 from prolit.model.lm_module import LigandLMModule
+from prolit.provenance import RecordProvenance
 from prolit.seeding import add_seed_argument, seed_from_args
 
 logging.basicConfig(level=logging.INFO)
@@ -116,6 +117,8 @@ def main() -> None:  # noqa: C901
         else None
     )
     callbacks: list = [
+        # Writes run.json beside the checkpoints: command, git SHA, seed.
+        RecordProvenance(seed=args.seed),
         ModelCheckpoint(
             dirpath=ckpt_dir,
             monitor="val/loss",
