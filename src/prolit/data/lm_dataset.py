@@ -28,6 +28,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
+from prolit.seeding import DEFAULT_SEED, torch_generator, worker_init_fn
 from prolit.tokenizers.lm_vocab import L_OPEN_ID, PAD_ID
 
 if TYPE_CHECKING:
@@ -144,6 +145,7 @@ class LMTokenDataModule(L.LightningDataModule):
     def __init__(self, config: LMTrainingConfig) -> None:
         super().__init__()
         self.config = config
+        self._seed = getattr(config, "seed", DEFAULT_SEED)
         self.token_dir = Path(config.token_dir)
         self.meta: dict | None = None
         self._datasets: dict[str, PackedTokenDataset] = {}
@@ -173,6 +175,10 @@ class LMTokenDataModule(L.LightningDataModule):
             persistent_workers=nw > 0,
             pin_memory=True,
             drop_last=shuffle,
+            # Reproducible shuffle order, and NumPy/random streams per
+            # worker (torch seeds only its own RNG in workers).
+            generator=torch_generator(self._seed, "lm-shuffle"),
+            worker_init_fn=worker_init_fn,
             collate_fn=collate_blocks,
         )
 

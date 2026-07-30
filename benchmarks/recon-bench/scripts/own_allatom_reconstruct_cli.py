@@ -40,6 +40,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from prolit.seeding import add_seed_argument, seed_from_args
 
 
 def load_own(workdir: Path):
@@ -432,7 +433,9 @@ def main() -> None:
         "while the GPU is occupied -- reconstruction is small enough that this "
         "is slow but workable.",
     )
+    add_seed_argument(p)
     args = p.parse_args()
+    seed_from_args(args)
 
     import torch
 

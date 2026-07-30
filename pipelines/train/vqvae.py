@@ -25,6 +25,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
 from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 
 logging.basicConfig(level=logging.INFO)
 
@@ -95,9 +96,15 @@ def main() -> None:
         "modality (protein-only / ligand-only) on the SAME complexes. "
         "Single-modality runs write their own normalization_stats_<modality>.pt.",
     )
+    add_seed_argument(parser)
     args = parser.parse_args()
+    seed_from_args(args)
 
     config = AtomVQVAETrainingConfig()
+
+    # Recorded in the checkpoint's hparams, so a run remembers its seed.
+
+    config.seed = args.seed
     data_config = CrossDockedConfig()
     if args.codebook_size is not None:
         config.atom.codebook_size = args.codebook_size
@@ -138,6 +145,7 @@ def main() -> None:
         else None
     )
     trainer = L.Trainer(
+        deterministic=args.deterministic,
         max_epochs=config.max_epochs,
         accelerator="auto",
         devices=args.devices if args.devices is not None else "auto",

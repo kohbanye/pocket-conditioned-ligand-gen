@@ -107,6 +107,10 @@ uv run ty check src
 - **サイト固有の絶対パスを書かない**。ルートは `__file__` から導出、外部バイナリ
   (vina / obabel / prepare_receptor) は `prolit.external_tools` が `PATH` と
   環境変数から実行時に解決する。
+- **乱数は `prolit.seeding` 経由で一本化**。CLI は `add_seed_argument(parser)` +
+  `seed_from_args(args)`、独立ストリームが要る所は `rng_for(seed, "名前")`。
+  裸の `np.random.default_rng()`（引数なし）は禁止で、`tests/test_seeding.py`
+  が検出する。学習の seed は config に載るので checkpoint が覚えている。
 - コードとコミットメッセージは英語。
 - トークン列のバイト表現を変える変更は**全 checkpoint を無効化する**。
   `tests/test_token_stream.py` が既存実装との一致を固定しているので、

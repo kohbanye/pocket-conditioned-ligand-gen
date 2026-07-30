@@ -80,6 +80,7 @@ from prolit.chem.pdb_io import infer_bonds
 from prolit.config import (
     PocketExtractionConfig,
 )
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import ProteinAtomDescriptor
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.lm_vocab import (
@@ -337,7 +338,7 @@ def main() -> None:  # noqa: C901, PLR0915
         "kind of size conditioning TargetDiff/DiffSBDD apply by sampling N from a "
         "pocket-conditioned distribution. 0 disables it (unconstrained length).",
     )
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     parser.add_argument(
         "--refine-ckpt",
         type=str,
@@ -370,8 +371,7 @@ def main() -> None:  # noqa: C901, PLR0915
         help="All-atom normalization stats (.pt with atom_mean/atom_std).",
     )
     args = parser.parse_args()
-
-    torch.manual_seed(args.seed)
+    seed_from_args(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

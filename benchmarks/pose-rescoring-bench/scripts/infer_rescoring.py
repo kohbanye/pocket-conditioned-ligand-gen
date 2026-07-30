@@ -14,6 +14,8 @@ import argparse
 import logging
 from pathlib import Path
 
+from prolit.seeding import add_seed_argument, seed_from_args
+
 from pose_rescoring_bench.config import EvalConfig
 from pose_rescoring_bench.inference import rescoring
 from pose_rescoring_bench.io_dumps import write_pose_scores
@@ -28,7 +30,9 @@ def main() -> None:
     parser.add_argument("--variant", default="joint")
     parser.add_argument("--results", type=Path, default=Path("results"))
     parser.add_argument("--max-targets", type=int, default=None)
+    add_seed_argument(parser)
     args = parser.parse_args()
+    seed_from_args(args)
 
     variant = get(args.variant)
     rescoring_ckpts = variant.rescoring

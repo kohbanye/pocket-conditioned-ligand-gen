@@ -18,6 +18,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset, Sampler
 
+from prolit.seeding import DEFAULT_SEED, torch_generator, worker_init_fn
 from prolit.tokenizers.lm_vocab import L_CLOSE_ID, L_OPEN_ID, NUM_SPECIAL, PAD_ID
 
 if TYPE_CHECKING:
@@ -241,6 +242,7 @@ class RescoreDataModule(L.LightningDataModule):
     def __init__(self, config: RescoreTrainingConfig) -> None:
         super().__init__()
         self.config = config
+        self._seed = getattr(config, "seed", DEFAULT_SEED)
         self.token_dir = Path(config.token_dir)
         self._datasets: dict[str, RescoreDataset] = {}
         self._samplers: dict[str, GroupBatchSampler] = {}
@@ -287,6 +289,10 @@ class RescoreDataModule(L.LightningDataModule):
             batch_size=self.config.micro_batch_size,
             shuffle=shuffle,
             drop_last=shuffle,
+            # Reproducible shuffle order, and NumPy/random streams per
+            # worker (torch seeds only its own RNG in workers).
+            generator=torch_generator(self._seed, "rescore-shuffle"),
+            worker_init_fn=worker_init_fn,
             **common,
         )
 

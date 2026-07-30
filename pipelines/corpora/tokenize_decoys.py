@@ -43,6 +43,7 @@ from tokenize_biolip import (
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
 from prolit.tokenizers.lm_vocab import AtomLMVocab
@@ -301,7 +302,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     parser.add_argument("--min-heavy", type=int, default=6)
     parser.add_argument("--max-heavy", type=int, default=50)
     parser.add_argument("--val-frac", type=float, default=0.03)
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     parser.add_argument(
         "--n-conformer-decoys",
         type=int,
@@ -332,6 +333,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         "concatenate onto an existing canonical corpus.",
     )
     args = parser.parse_args()
+    seed_from_args(args)
 
     from rdkit import RDLogger  # noqa: PLC0415
 

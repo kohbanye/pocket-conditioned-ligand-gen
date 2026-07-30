@@ -57,6 +57,7 @@ from prolit.model.pose_refiner import (
     ligand_feats_from_heads,
     pocket_feats_from_descriptor,
 )
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
@@ -276,8 +277,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser.add_argument("--min-heavy", type=int, default=6)
     parser.add_argument("--max-heavy", type=int, default=50)
     parser.add_argument("--val-frac", type=float, default=0.03)
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     args = parser.parse_args()
+    seed_from_args(args)
 
     from rdkit import RDLogger  # noqa: PLC0415
 

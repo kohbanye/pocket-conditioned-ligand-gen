@@ -52,6 +52,7 @@ from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.descriptors import collate_molecules
 from prolit.external_tools import tool_default
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
@@ -307,7 +308,7 @@ def main() -> None:  # noqa: C901, PLR0915
     parser.add_argument("--min-heavy", type=int, default=8)
     parser.add_argument("--max-heavy", type=int, default=45)
     parser.add_argument("--val-frac", type=float, default=0.03)
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     parser.add_argument("--workers", type=int, default=90)
     parser.add_argument("--vina", type=str, default=tool_default("vina"))
     parser.add_argument(
@@ -315,6 +316,7 @@ def main() -> None:  # noqa: C901, PLR0915
     )
     parser.add_argument("--tmp-dir", type=str, default=str(Path.home() / "tmpdir"))
     args = parser.parse_args()
+    seed_from_args(args)
 
     from rdkit import RDLogger  # noqa: PLC0415
 

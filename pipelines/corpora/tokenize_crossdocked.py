@@ -33,6 +33,7 @@ from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import rotate_atom_descriptor
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.lm_vocab import AtomLMVocab
@@ -197,7 +198,7 @@ def main() -> None:  # noqa: PLR0915
     )
     parser.add_argument("--num-rotations", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     parser.add_argument(
         "--pocket-split",
         action="store_true",
@@ -230,6 +231,7 @@ def main() -> None:  # noqa: PLR0915
         "--splits", type=str, nargs="+", default=["train", "val", "test"]
     )
     args = parser.parse_args()
+    seed_from_args(args)
 
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size

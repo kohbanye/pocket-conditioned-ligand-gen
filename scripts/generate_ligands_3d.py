@@ -41,6 +41,7 @@ from prolit.config import (
 from prolit.data.descriptors import read_mol_from_tar
 from prolit.model.lm_module import LigandLMModule
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     ProteinAtomDescriptor,
     precompute_receptor_atom_features,
@@ -251,7 +252,7 @@ def main() -> None:  # noqa: PLR0915, C901
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--max-new-tokens", type=int, default=160)
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument(
         "--separate-protein-ckpt",
@@ -275,8 +276,7 @@ def main() -> None:  # noqa: PLR0915, C901
         help="All-atom normalization stats (.pt with atom_mean/atom_std).",
     )
     args = parser.parse_args()
-
-    torch.manual_seed(args.seed)
+    seed_from_args(args)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

@@ -36,6 +36,7 @@ from prolit.data.geom import (
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import LigandAtomDescriptor, rotate_atom_descriptor
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.lm_vocab import AtomLMVocab
@@ -94,7 +95,7 @@ def main() -> None:  # noqa: C901, PLR0915
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument("--val-frac", type=float, default=0.005)
     parser.add_argument("--test-frac", type=float, default=0.005)
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--max-mols", type=int, default=None, help="Debug subset.")
     parser.add_argument(
@@ -113,6 +114,7 @@ def main() -> None:  # noqa: C901, PLR0915
         "--splits", type=str, nargs="+", default=["train", "val", "test"]
     )
     args = parser.parse_args()
+    seed_from_args(args)
 
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -39,6 +39,7 @@ from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
@@ -279,9 +280,10 @@ def main() -> None:  # noqa: PLR0915, C901
     parser.add_argument("--mw-max", type=float, default=600.0)
     parser.add_argument("--min-heavy", type=int, default=6)
     parser.add_argument("--max-heavy", type=int, default=60)
-    parser.add_argument("--seed", type=int, default=0)
+    add_seed_argument(parser, default=0)
     parser.add_argument("--max-zips", type=int, default=None, help="Debug subset.")
     args = parser.parse_args()
+    seed_from_args(args)
 
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

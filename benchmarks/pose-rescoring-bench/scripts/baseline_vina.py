@@ -23,6 +23,7 @@ from pathlib import Path
 from prolit.chem.docking import parse_score, run, write_xyz
 from prolit.chem.mol2 import parse_mol2_multi
 from prolit.external_tools import tool_default
+from prolit.seeding import seed_from_args
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -144,6 +145,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         "--dump-scores", type=Path, default=None, help="Per-pose Vina scores CSV."
     )
     args = parser.parse_args()
+    seed_from_args(args)
 
     from rdkit import Chem, RDLogger  # noqa: PLC0415
 

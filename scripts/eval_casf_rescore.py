@@ -40,6 +40,7 @@ from prolit.config import (
 from prolit.model.mlm_module import ComplexMLMModule
 from prolit.model.mlm_score import ligand_pll
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.lm_vocab import AtomLMVocab
 from prolit.tokenizers.pose_encoder import PoseEncoder
@@ -133,7 +134,9 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         default=None,
         help="Write per-pose (rmsd, head, pll) scores here for offline sweeps.",
     )
+    add_seed_argument(parser)
     args = parser.parse_args()
+    seed_from_args(args)
 
     from rdkit import RDLogger  # noqa: PLC0415
 

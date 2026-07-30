@@ -111,6 +111,26 @@ These are plain CLIs — run them however your site expects. On a scheduler,
 `jobs/submit.py` renders the boilerplate around one, and prints the `qsub` line
 rather than submitting it. See `jobs/README.md`.
 
+## Reproducibility
+
+Every entry point that draws random numbers takes `--seed` (default 0) and
+`--deterministic`, and applies both before doing anything:
+
+```sh
+python pipelines/train/clm.py --seed 7
+python scripts/generate_ligands_for_target.py --seed 7 ...
+```
+
+`--seed` makes a run repeatable on the same machine and library versions.
+`--deterministic` additionally asks torch and cuDNN for deterministic kernels —
+slower, and it raises on operations that have no deterministic implementation.
+
+Everything goes through `prolit.seeding`: it seeds Python, NumPy and torch
+(CPU + CUDA), gives DataLoader workers their own NumPy streams (torch seeds only
+its own RNG in workers), and hands independent named streams to components that
+need them, so two of them never draw from the same sequence. A training run
+records its seed in the checkpoint's hyperparameters.
+
 ## Development
 
 ```sh

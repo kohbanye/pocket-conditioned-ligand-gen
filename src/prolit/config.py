@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from prolit.seeding import DEFAULT_SEED
 from prolit.tokenizers.descriptor_schema import ATOM_DESCRIPTOR_DIM
 
 
@@ -112,6 +113,13 @@ class AtomVQVAETrainingConfig:
     atom: AtomVQVAEConfig = field(default_factory=AtomVQVAEConfig)
     pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)
 
+    # Seed for this run, recorded so a checkpoint remembers what it was trained
+    # with. Safe to add: a dataclass field with a default is also a class
+    # attribute, so checkpoints pickled before it existed still read
+    # ``cfg.seed`` and get this default. A field *without* a default would not
+    # have been.
+    seed: int = DEFAULT_SEED
+
 
 # ---------------------------------------------------------------------------
 # Autoregressive LM over VQ-VAE tokens (项目(2))
@@ -190,6 +198,13 @@ class LMTrainingConfig:
     precision: str = "bf16-mixed"
 
     model: LigandLMConfig = field(default_factory=LigandLMConfig)
+
+    # Seed for this run, recorded so a checkpoint remembers what it was trained
+    # with. Safe to add: a dataclass field with a default is also a class
+    # attribute, so checkpoints pickled before it existed still read
+    # ``cfg.seed`` and get this default. A field *without* a default would not
+    # have been.
+    seed: int = DEFAULT_SEED
 
 
 @dataclass
@@ -279,6 +294,13 @@ class MLMTrainingConfig:
     precision: str = "bf16-mixed"
 
     model: ComplexMLMConfig = field(default_factory=ComplexMLMConfig)
+
+    # Seed for this run, recorded so a checkpoint remembers what it was trained
+    # with. Safe to add: a dataclass field with a default is also a class
+    # attribute, so checkpoints pickled before it existed still read
+    # ``cfg.seed`` and get this default. A field *without* a default would not
+    # have been.
+    seed: int = DEFAULT_SEED
 
 
 @dataclass
@@ -377,6 +399,13 @@ class RescoreTrainingConfig:
     precision: str = "bf16-mixed"
 
     model: ComplexMLMConfig = field(default_factory=ComplexMLMConfig)
+
+    # Seed for this run, recorded so a checkpoint remembers what it was trained
+    # with. Safe to add: a dataclass field with a default is also a class
+    # attribute, so checkpoints pickled before it existed still read
+    # ``cfg.seed`` and get this default. A field *without* a default would not
+    # have been.
+    seed: int = DEFAULT_SEED
 
 
 @dataclass
@@ -481,3 +510,10 @@ class PoseRefineTrainingConfig:
     precision: str = "32-true"  # e3nn tensor products are unstable in bf16
 
     model: PoseRefinerConfig = field(default_factory=PoseRefinerConfig)
+
+    # Seed for this run, recorded so a checkpoint remembers what it was trained
+    # with. Safe to add: a dataclass field with a default is also a class
+    # attribute, so checkpoints pickled before it existed still read
+    # ``cfg.seed`` and get this default. A field *without* a default would not
+    # have been.
+    seed: int = DEFAULT_SEED

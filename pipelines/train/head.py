@@ -31,6 +31,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import ComplexMLMConfig, RescoreTrainingConfig
 from prolit.data.rescore_dataset import RescoreDataModule
 from prolit.model.rescore_module import ComplexRescoreModule
+from prolit.seeding import add_seed_argument, seed_from_args
 
 logging.basicConfig(level=logging.INFO)
 
@@ -137,11 +138,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Train on at most this many docs (corpus-size ablation).",
     )
     parser.add_argument("--fast-dev-run", action="store_true")
+    add_seed_argument(parser)
     args = parser.parse_args()
+    seed_from_args(args)
 
     config = RescoreTrainingConfig(
         model=ComplexMLMConfig(atom_codebook_size=args.atom_codebook_size)
     )
+    # Recorded in the checkpoint's hparams, so a run remembers its seed.
+    config.seed = args.seed
     if args.token_dir is not None:
         config.token_dir = args.token_dir
     if args.max_epochs is not None:
@@ -223,6 +228,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     module = ComplexRescoreModule(config, mlm_state=mlm_state)
 
     trainer = L.Trainer(
+        deterministic=args.deterministic,
         max_epochs=config.max_epochs,
         accelerator="auto",
         devices="auto",

@@ -34,6 +34,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
 from prolit.model.pose_refiner import NUM_FEATURE_FIELDS
+from prolit.seeding import DEFAULT_SEED, rng_for, torch_generator, worker_init_fn
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -54,12 +55,16 @@ class PoseRefineDataset(Dataset):
         rigid_trans: float = 0.0,
         rigid_rot_deg: float = 0.0,
         rigid_prob: float = 1.0,
+        seed: int = DEFAULT_SEED,
     ) -> None:
         self.jitter_sigma = jitter_sigma
         self.rigid_trans = rigid_trans
         self.rigid_rot_deg = rigid_rot_deg
         self.rigid_prob = rigid_prob
-        self._rng = np.random.default_rng()
+        # Named stream so the jitter is reproducible and does not correlate
+        # with anything else seeded from the same run seed.
+        self.seed = seed
+        self._rng = rng_for(seed, f"pose-refine-jitter:{split}")
         d = Path(data_dir)
         self.lig_x1 = np.memmap(
             d / f"{split}.lig_x1", dtype=np.float32, mode="r"
@@ -298,6 +303,7 @@ class PoseRefineDataModule(L.LightningDataModule):
     def __init__(self, config: PoseRefineTrainingConfig) -> None:
         super().__init__()
         self.config = config
+        self._seed = getattr(config, "seed", DEFAULT_SEED)
         self.data_dir = Path(config.data_dir)
         self._datasets: dict[str, PoseRefineDataset] = {}
 
@@ -313,6 +319,7 @@ class PoseRefineDataModule(L.LightningDataModule):
                     rigid_trans=self.config.online_rigid_trans if train else 0.0,
                     rigid_rot_deg=self.config.online_rigid_rot_deg if train else 0.0,
                     rigid_prob=self.config.online_rigid_prob,
+                    seed=self._seed,
                 )
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:
@@ -323,6 +330,10 @@ class PoseRefineDataModule(L.LightningDataModule):
             batch_size=self.config.micro_batch_size,
             shuffle=shuffle,
             drop_last=shuffle,
+            # Reproducible shuffle order, and NumPy/random streams per
+            # worker (torch seeds only its own RNG in workers).
+            generator=torch_generator(self._seed, "pose-refine-shuffle"),
+            worker_init_fn=worker_init_fn,
             num_workers=nw,
             persistent_workers=nw > 0,
             pin_memory=True,

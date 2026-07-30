@@ -44,6 +44,7 @@ from tokenize_decoys import _cd_test_pdbs, _RmsdWriter
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
 from prolit.tokenizers.lm_vocab import AtomLMVocab
 from prolit.tokenizers.pose_encoder import PoseEncoder
@@ -144,8 +145,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     p.add_argument("--pk-min", type=float, default=2.0)
     p.add_argument("--pk-max", type=float, default=13.0)
     p.add_argument("--val-frac", type=float, default=0.05)
-    p.add_argument("--seed", type=int, default=0)
+    add_seed_argument(p, default=0)
     args = p.parse_args()
+    seed_from_args(args)
 
     from rdkit import RDLogger  # noqa: PLC0415
 

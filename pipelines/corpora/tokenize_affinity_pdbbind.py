@@ -44,6 +44,7 @@ from tokenize_decoys import _RmsdWriter
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.lm_vocab import AtomLMVocab
 from prolit.tokenizers.pose_encoder import PoseEncoder
@@ -110,8 +111,9 @@ def main() -> None:  # noqa: PLR0915
         "the data; IC50 is PDBbind-curated so it is kept by default.",
     )
     p.add_argument("--val-frac", type=float, default=0.05)
-    p.add_argument("--seed", type=int, default=0)
+    add_seed_argument(p, default=0)
     args = p.parse_args()
+    seed_from_args(args)
 
     from rdkit import RDLogger  # noqa: PLC0415
 

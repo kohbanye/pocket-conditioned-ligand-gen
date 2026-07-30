@@ -31,6 +31,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import PoseRefinerConfig, PoseRefineTrainingConfig
 from prolit.data.pose_refine_dataset import PoseRefineDataModule
 from prolit.model.pose_refiner import PoseRefinerModule
+from prolit.seeding import add_seed_argument, seed_from_args
 
 logging.basicConfig(level=logging.INFO)
 
@@ -68,7 +69,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         "resuming an interrupted run.",
     )
     parser.add_argument("--fast-dev-run", action="store_true")
+    add_seed_argument(parser)
     args = parser.parse_args()
+    seed_from_args(args)
 
     model = PoseRefinerConfig()
     if args.hidden_dim is not None:
@@ -91,6 +94,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         model.bridge_sigma = args.bridge_sigma
 
     config = PoseRefineTrainingConfig(model=model)
+    # Recorded in the checkpoint's hparams, so a run remembers its seed.
+    config.seed = args.seed
     if args.data_dir is not None:
         config.data_dir = Path(args.data_dir)
     if args.max_epochs is not None:
@@ -151,6 +156,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         )
 
     trainer = L.Trainer(
+        deterministic=args.deterministic,
         max_epochs=config.max_epochs,
         accelerator="auto",
         devices="auto",

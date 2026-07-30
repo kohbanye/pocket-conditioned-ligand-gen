@@ -56,6 +56,7 @@ from prolit.chem.docking import (
     write_xyz as _write_xyz,
 )
 from prolit.external_tools import tool_default
+from prolit.seeding import seed_from_args
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -160,6 +161,7 @@ def main() -> None:
         or str(Path.home() / "tmpdir"),
     )
     args = parser.parse_args()
+    seed_from_args(args)
 
     import json  # noqa: PLC0415
 

@@ -15,6 +15,8 @@ import argparse
 import logging
 from pathlib import Path
 
+from prolit.seeding import add_seed_argument, seed_from_args
+
 from pose_rescoring_bench.config import EvalConfig
 from pose_rescoring_bench.inference import generation
 from pose_rescoring_bench.variants import get
@@ -38,7 +40,9 @@ def main() -> None:
         default=None,
         help="Extra args passed to the generator.",
     )
+    add_seed_argument(parser)
     args = parser.parse_args()
+    seed_from_args(args)
 
     variant = get(args.variant)
     gen = variant.generation

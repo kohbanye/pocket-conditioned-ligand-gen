@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from prolit.seeding import add_seed_argument, seed_from_args
 from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem
 from scipy.optimize import minimize
@@ -323,7 +324,9 @@ def main() -> None:
     ap.add_argument("--multi-start", type=int, default=1)
     ap.add_argument("--start-trans", type=float, default=1.0)
     ap.add_argument("--start-rot", type=float, default=15.0)
+    add_seed_argument(ap)
     args = ap.parse_args()
+    seed_from_args(args)
 
     index = json.loads(args.index.read_text())
     targets = index["targets"] if isinstance(index, dict) and "targets" in index else index
@@ -367,6 +370,7 @@ def main() -> None:
                     w_internal=args.w_internal,
                     internal_path=args.internal_path,
                     w_att=args.w_att,
+                    seed=args.seed,
                     att_sigma=args.att_sigma,
                     multi_start=args.multi_start,
                     start_trans=args.start_trans,

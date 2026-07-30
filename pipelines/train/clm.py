@@ -37,6 +37,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import LMTrainingConfig
 from prolit.data.lm_dataset import LMTokenDataModule
 from prolit.model.lm_module import LigandLMModule
+from prolit.seeding import add_seed_argument, seed_from_args
 
 logging.basicConfig(level=logging.INFO)
 
@@ -79,9 +80,15 @@ def main() -> None:  # noqa: C901
         "run). Loads weights only -- a fresh optimizer + LR schedule, NOT a "
         "training resume. The model config (vocab/dims) must match.",
     )
+    add_seed_argument(parser)
     args = parser.parse_args()
+    seed_from_args(args)
 
     config = LMTrainingConfig()
+
+    # Recorded in the checkpoint's hparams, so a run remembers its seed.
+
+    config.seed = args.seed
     if args.token_dir is not None:
         config.token_dir = args.token_dir
     if args.max_epochs is not None:
@@ -143,6 +150,7 @@ def main() -> None:  # noqa: C901
         )
 
     trainer = L.Trainer(
+        deterministic=args.deterministic,
         max_epochs=config.max_epochs,
         accelerator="auto",
         devices="auto",

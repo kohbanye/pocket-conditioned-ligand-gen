@@ -29,6 +29,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
+from prolit.seeding import DEFAULT_SEED, derive_seed, torch_generator, worker_init_fn
 from prolit.tokenizers.lm_vocab import L_CLOSE_ID, L_OPEN_ID, NUM_SPECIAL, PAD_ID
 
 if TYPE_CHECKING:
@@ -52,8 +53,16 @@ class MLMTokenDataset(Dataset):
         mask_replace_prob: float = 0.8,
         mask_random_prob: float = 0.1,
         ligand_only_masking: bool = False,
+        seed: int = DEFAULT_SEED,
     ) -> None:
         self.block_size = block_size
+        self.seed = seed
+        # Masking is *dynamic*: the same document is masked differently each
+        # epoch, which is the point of BERT-style pretraining. Folding the epoch
+        # into the per-item seed keeps that while making the whole schedule
+        # reproducible -- an unseeded generator gave dynamism but no
+        # reproducibility, and a seed without the epoch would give the reverse.
+        self.epoch = 0
         self.base_vocab_size = base_vocab_size
         self.mask_token_id = mask_token_id
         self.mask_prob = mask_prob
@@ -85,8 +94,14 @@ class MLMTokenDataset(Dataset):
         in_span[start:end] = True
         return np.flatnonzero(is_code & in_span)
 
+    def set_epoch(self, epoch: int) -> None:
+        """Advance the masking schedule (see the note in ``__init__``)."""
+        self.epoch = epoch
+
     def __getitem__(self, idx: int) -> dict[str, Tensor]:
-        rng = np.random.default_rng()
+        rng = np.random.default_rng(
+            derive_seed(self.seed, f"mlm-mask:{self.epoch}:{idx}")
+        )
         s = int(self.doc_offsets[idx])
         e = int(self.doc_offsets[idx + 1])
         e = min(e, s + self.block_size)
@@ -148,6 +163,7 @@ class MLMTokenDataModule(L.LightningDataModule):
     def __init__(self, config: MLMTrainingConfig) -> None:
         super().__init__()
         self.config = config
+        self._seed = getattr(config, "seed", DEFAULT_SEED)
         self.token_dir = Path(config.token_dir)
         self._datasets: dict[str, MLMTokenDataset] = {}
 
@@ -167,6 +183,7 @@ class MLMTokenDataModule(L.LightningDataModule):
                     mask_replace_prob=self.config.mask_replace_prob,
                     mask_random_prob=self.config.mask_random_prob,
                     ligand_only_masking=self.config.ligand_only_masking,
+                    seed=self._seed,
                 )
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:
@@ -179,6 +196,10 @@ class MLMTokenDataModule(L.LightningDataModule):
             persistent_workers=nw > 0,
             pin_memory=True,
             drop_last=shuffle,
+            # Reproducible shuffle order, and NumPy/random streams per
+            # worker (torch seeds only its own RNG in workers).
+            generator=torch_generator(self._seed, "mlm-shuffle"),
+            worker_init_fn=worker_init_fn,
             collate_fn=collate_mlm,
         )
 
