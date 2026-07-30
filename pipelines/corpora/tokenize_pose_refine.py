@@ -75,7 +75,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # sbdd-bench evaluation targets (kept out of training, like CASF).
-SBDD_BENCH_PDBS = frozenset({"1iep", "2ity", "3pbl"})
+SBDD_PDBS = frozenset({"1iep", "2ity", "3pbl"})
 
 
 # ---------------------------------------------------------------------------
@@ -291,7 +291,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     sites = _parse_biolip_txt(args.biolip_dir / "BioLiP.txt.gz")
     ccd_smiles = _load_ccd_smiles(args.biolip_dir / "ligand.tsv.gz")
-    excluded = _cd_test_pdbs(args.cd_manifest) | set(SBDD_BENCH_PDBS)
+    excluded = _cd_test_pdbs(args.cd_manifest) | set(SBDD_PDBS)
     if args.casf_pdbs.exists():
         excluded |= {p.lower() for p in args.casf_pdbs.read_text().split() if p.strip()}
     rng = np.random.default_rng(args.seed)

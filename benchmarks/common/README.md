@@ -10,5 +10,5 @@ The parts the three benchmarks must not disagree about.
   not significant goes through this.
 
 Kept dependency-light on purpose (numpy / pandas / scipy, no torch, no RDKit):
-`plbench` cannot share the main environment, so anything heavy here would have
+`recon-bench` cannot share the main environment, so anything heavy here would have
 to be installed twice.

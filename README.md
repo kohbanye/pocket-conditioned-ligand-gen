@@ -49,7 +49,7 @@ sh scripts/apply_patches.sh     # required local edits to third_party/
 uv sync --all-packages          # library + in-workspace benchmarks
 ```
 
-`benchmarks/plbench` has its own environment on purpose — it runs ESM3
+`benchmarks/recon-bench` has its own environment on purpose — it runs ESM3
 in-process, and ESM3 pins a fork of `transformers` that would downgrade the one
 the language models need. See `benchmarks/README.md`.
 

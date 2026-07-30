@@ -16,11 +16,11 @@ Interface*) が唯一の正。ここに載る構成だけを本流とし、そ�
 
 | 論文の表 | 内容 | 対応リポジトリ | 状態 |
 |---|---|---|---|
-| Table 1 `tab:recon-compare` | CASP16 303 複合体の再構成。vs ESM3 / FoldToken4 / Token-Mol / Bio2Token + separate ablation | `../protein-ligand-3d-reconstruction-bench` | **現役**。未コミット 50 件 (`bio2token.py`, `own_allatom.py`, `confseq.py`, `pb.py`) が論文の行そのもの |
-| Table 2 `tab:docking` | CASF-2016 docking power。vs Vina / DeepRMSD(+Vina) / GenScore / RTMScore + separate ablation | `../complex-tokenizer-bench` (+ `../baselines`) | 現役。最新かつ設計が一番きれい |
-| Table 3 `tab:gen` | 3 ターゲット生成。vs DiffSBDD / TargetDiff + separate ablation | `../sbdd-bench` + ctbench | **進行中**。`\TODO{}` が残り、`ctb_gen_tr` (job 8295960) が実行中 |
+| Table 1 `tab:recon-compare` | CASP16 303 複合体の再構成。vs ESM3 / FoldToken4 / Token-Mol / Bio2Token + separate ablation | `../prolit-recon-bench` | **現役**。未コミット 50 件 (`bio2token.py`, `own_allatom.py`, `confseq.py`, `pb.py`) が論文の行そのもの |
+| Table 2 `tab:docking` | CASF-2016 docking power。vs Vina / DeepRMSD(+Vina) / GenScore / RTMScore + separate ablation | `../prolit-pose-rescoring-bench` (+ `../baselines`) | 現役。最新かつ設計が一番きれい |
+| Table 3 `tab:gen` | 3 ターゲット生成。vs DiffSBDD / TargetDiff + separate ablation | `../sbdd-bench` + pose_rescoring_bench | **進行中**。`\TODO{}` が残り、`ctb_gen_tr` (job 8295960) が実行中 |
 
-> **`protein-ligand-3d-reconstruction-bench` は「もう使っていない」わけではない** —
+> **`prolit-recon-bench` は「もう使っていない」わけではない** —
 > 論文 Table 1 の実体です。ここが今回いちばん重要な認識のズレでした。
 >
 > `affinity-prediction-bench` は別プロジェクトとして対象外 (ユーザ確認済み)。
@@ -35,8 +35,8 @@ Interface*) が唯一の正。ここに載る構成だけを本流とし、そ�
 2. **`scripts/` が実験の履歴書になっている** — `.py` 62 本 + job script **129 本**。`job_tok_decoys_{v2,v8,v8rot,v10,big,huge}.sh` のように 1 アーム 1 ファイル。
 3. **トークナイザが 3 世代同居** — ①legacy 2-codebook (残基レベル protein spherical + ligand descriptor, `3dvcbp0h`) ②split-codebook (共有 encoder + 2 book, `ix6q6po0`) ③all-atom joint + separate。**論文に載るのは③だけ**。①②の分岐が 8 スクリプト・56 箇所の CLI フラグに残存。
 4. **tokenize スクリプトの重複** — `_Encoder` クラス (`_norm`/`add`/`_encode`/`flush`/`flush_all`) が `tokenize_{plinder_protein,biolip,dataset_atom,geom_atom}.py` に 4 回コピーされている。計 ~2,300 行。
-5. **評価コードが 3 箇所に散在** — 本リポジトリの `scripts/eval_*.py` / ctbench / sbddbench。Vina 呼び出しと PoseBusters がそれぞれに存在。
-6. **循環 submodule** — `sbdd-bench` と `plbench` がそれぞれ `third_party/pocket-conditioned-ligand-gen` として**本リポジトリ自身**を submodule に持っている。
+5. **評価コードが 3 箇所に散在** — 本リポジトリの `scripts/eval_*.py` / pose_rescoring_bench / sbdd_bench。Vina 呼び出しと PoseBusters がそれぞれに存在。
+6. **循環 submodule** — `sbdd-bench` と `recon_bench` がそれぞれ `third_party/pocket-conditioned-ligand-gen` として**本リポジトリ自身**を submodule に持っている。
 7. **`src` がパッケージ名になっていない** — ベンチ側が `from src.config import …` で参照し、さらに **private を掴んでいる** (`src.data.rescore_dataset._ligand_mask`, `src.tokenizers.protein._compute_canonical_frame`)。公開 API が未定義。
 8. **`src/config.py` が 600 行 15 dataclass の一枚岩**。CLAUDE.md は Hydra を謳うが実際には未使用 (全 CLI が argparse)。
 9. **衛生** — `ruff check` で 52 errors。`pytest --collect-only` に 130 秒 (import 時に torch/rdkit/e3nn を総なめ)。依存はフラット 1 リスト (ベンチ用の posebusters/prolif と学習用が同居)。
@@ -91,13 +91,13 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 ├── benchmarks/
 │   ├── common/                          # docking(Vina) / posebusters / molio / stats / dumps / report / plotting
 │   ├── variants.py                      # ★ joint | separate | separate_4096 のレジストリ
-│   ├── reconstruction/                  # 論文 Table 1   <- plbench
+│   ├── reconstruction/                  # 論文 Table 1   <- recon_bench
 │   │   ├── adapters/{prolit,esm3,foldtoken,token_mol,bio2token}.py
 │   │   └── metrics.py  run.py
-│   ├── rescoring/                       # 論文 Table 2   <- ctbench + baselines
+│   ├── rescoring/                       # 論文 Table 2   <- pose_rescoring_bench + baselines
 │   │   ├── adapters/{prolit,rtmscore,genscore,vina,deeprmsd}.py
 │   │   └── metrics.py  run.py
-│   ├── generation/                      # 論文 Table 3   <- sbdd-bench + ctbench
+│   ├── generation/                      # 論文 Table 3   <- sbdd-bench + pose_rescoring_bench
 │   │   ├── adapters/{prolit,diffsbdd,targetdiff,diffgui}.py
 │   │   └── metrics.py  run.py
 │   └── affinity/                        # 論文外。動くので残すが paper-critical ではない旨を README に明記
@@ -122,7 +122,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
    だけなので、そこを `common/` に集め、adapter はタスク配下に置くのが正しい粒度。
 
 2. **`configs/` (Hydra yaml ツリー) をやめ、`benchmarks/variants.py` の dataclass レジストリにする。**
-   ctbench に既に実装済みで機能している (`joint` / `joint_nocasf` / `separate` / `separate_4096`)。
+   pose_rescoring_bench に既に実装済みで機能している (`joint` / `joint_nocasf` / `separate` / `separate_4096`)。
    バリアントは 3〜4 個で固定、値は checkpoint パスと codebook サイズだけ。yaml 階層を挟むと
    「どの ckpt がどのアームか」が追いにくくなるだけです。**Hydra は依存から外す** (現状も未使用)。
 
@@ -154,7 +154,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
    これがあればベンチ側が `_ligand_mask` のような private を掴む必要がなくなります。
 
 8. **`results/{manifests,summaries}` → `results/<task>/<variant>/…` + `tables/` + `figures/`。**
-   ctbench の per-sample dump 規約 (`io_dumps.py`) と、その数値を検証する再現テスト
+   pose_rescoring_bench の per-sample dump 規約 (`io_dumps.py`) と、その数値を検証する再現テスト
    (`test_reproduce_*.py`) が既にこの形。壊さずに引き継ぐ。
 
 ---
@@ -168,12 +168,12 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 - stale worktree `.claude/worktrees/idempotent-watching-shore` と対応ブランチを削除 (main にマージ済みを確認)。
 - `.gitignore` に `/logs/`, `/runs/`, `pocket-ligand-*/` を追加。
 - **各ベンチの未コミット作業を保全** (Phase 1 の前提):
-  - plbench `20f277c` — all-atom アーム 9 種 (joint / separate / separate4096 / binning /
+  - recon_bench `20f277c` — all-atom アーム 9 種 (joint / separate / separate4096 / binning /
     localframe_{1,1.5,2,3}tok / oracle) + Bio2Token・ConfSeq アダプタ + lDDT-PLI/Contact-F1/
     PoseBusters + 全アームの結果 parquet。**論文 Table 1 の実体**。third_party に
     bio2token・ConfSeq を submodule 登録。
   - sbdd-bench `c14dad3` — DiffGui のパッチを `patches/` へ (上記訂正)。
-  - ctbench `b1ed47c` — tp1000 生成スイープ 4 アーム。
+  - pose_rescoring_bench `b1ed47c` — tp1000 生成スイープ 4 アーム。
 - **基準値** (この数値を Phase 2〜5 の回帰判定に使う):
 
   | 項目 | 値 |
@@ -186,7 +186,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 ### Phase 1 — モノレポ統合 ✅ 完了 (2026-07-30)
 作業ブランチ `refactor/monorepo`。
 
-- 3 ベンチを **履歴ごと** `benchmarks/{plbench,sbddbench,ctbench}/` へ取り込み
+- 3 ベンチを **履歴ごと** `benchmarks/{recon_bench,sbdd_bench,pose_rescoring_bench}/` へ取り込み
   (`git subtree` は未インストールだったので `merge -s ours --allow-unrelated-histories`
   + `read-tree --prefix` の等価手順)。各ベンチの元コミットが祖先として辿れることを確認済み。
 - **`third_party/` をトップレベルに統合** — 8 本 (bio2token / ConfSeq / DiffGui / DiffSBDD /
@@ -195,19 +195,19 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
   死んでいた。**自己 submodule 2 本は削除**し、両ベンチの `paths.py` に `MONOREPO_ROOT` を
   導入して `THIRD_PARTY` / `OWN_MODEL_REPO` を張り替え。
 - `patches/` と `scripts/apply_patches.sh` をルートへ (submodule の隣が正しい位置)。
-- **依存は uv workspace 化** (member = sbddbench + ctbench、lock 1 本)。ctbench は
+- **依存は uv workspace 化** (member = sbdd_bench + pose_rescoring_bench、lock 1 本)。pose_rescoring_bench は
   `sys.path` 注入をやめてモデルライブラリを workspace パッケージとして依存。
-- **plbench だけ workspace から除外**。ESM3 を in-process で動かす都合上
+- **recon_bench だけ workspace から除外**。ESM3 を in-process で動かす都合上
   fork 版 transformers (`Biohub/transformers@ef32577`) を要求し、workspace は 1 パッケージ
-  1 バージョンなので**モデル側の transformers 5.x を巻き戻してしまう**。plbench は
+  1 バージョンなので**モデル側の transformers 5.x を巻き戻してしまう**。recon_bench は
   FoldToken / Bio2Token 用の専用 venv と同じ扱いで単独プロジェクトのまま。
 - 副産物のバグ修正 2 件:
   - ルートの `[tool.setuptools.packages.find]` が無制限で `data/` `outputs/` `wandb/` を
-    走査していた (ctbench が「インストールが固まる」と回避策を書いていた真因) → `include = ["src*"]`。
+    走査していた (pose_rescoring_bench が「インストールが固まる」と回避策を書いていた真因) → `include = ["src*"]`。
   - `posebusters` が `scripts/eval_posebusters.py` から使われているのに未宣言だった → 依存に追加。
     ついでに transformers 5.9.0 → 5.14.1。
 
-**回帰確認**: モデル側 66 tests **全 pass**。ctbench は **26 passed / 2 failed** で
+**回帰確認**: モデル側 66 tests **全 pass**。pose_rescoring_bench は **26 passed / 2 failed** で
 統合前と同一 — 2 件は `test_reproduce_generation.py` が **DiffGui を含む旧 3 ベースライン表**を
 検証したままの既存不具合 (論文 Table 3 は DiffSBDD / TargetDiff の 2 本に変更済み)。
 統合起因ではないことを元リポジトリで実行して確認済み。**Table 3 確定時に Phase 5 で修正する**。
@@ -242,7 +242,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 - **公開 API を定義**: `prolit/api.py` (32 シンボル) + `prolit/tokenizers/loaders.py`。
   checkpoint→モデルの変換が eval スクリプトとベンチで二重実装され設定が食い違っていたのを
   1 か所に集約。private 参照は `ligand_mask` / `compute_canonical_frame` として公開名に昇格。
-- ctbench の `ensure_source_repo_importable()` は削除（workspace 依存になったので不要）。
+- pose_rescoring_bench の `ensure_source_repo_importable()` は削除（workspace 依存になったので不要）。
 - ⚠️ **想定外の落とし穴（重要）**: Lightning は config **dataclass インスタンスをそのまま
   pickle** して checkpoint に埋める。pickle はクラスをモジュールパスで記録するので、
   リネームにより既存 checkpoint 全部（＝論文の全数値の出所）が
@@ -260,11 +260,11 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
   テストに入れる** (トークン列が変わると全 checkpoint が無効になるため、ここは慎重に)。
 
 ### Phase 5 — benchmarks 統合 ✅ 完了 (2026-07-30)
-- ctbench の `metrics/` `stats.py` `report.py` `io_dumps.py` `plotting.py` → `benchmarks/common/`。
-- sbddbench の `docking.py` `pose.py` `chem.py` `diversity.py` `molio.py` → `benchmarks/common/`
+- pose_rescoring_bench の `metrics/` `stats.py` `report.py` `io_dumps.py` `plotting.py` → `benchmarks/common/`。
+- sbdd_bench の `docking.py` `pose.py` `chem.py` `diversity.py` `molio.py` → `benchmarks/common/`
   (Vina と PoseBusters は generation と reconstruction の両方で使う)。
 - 各タスクに `run.py`: `--variant joint|separate|separate_4096 --method prolit|rtmscore|…`。
-- **ctbench の再現テスト (`test_reproduce_*.py`) は必ず残す** — 論文の数値が動いていないことの
+- **pose_rescoring_bench の再現テスト (`test_reproduce_*.py`) は必ず残す** — 論文の数値が動いていないことの
   唯一の自動チェックです。
 
 ### Phase 6 — jobs/ ✅ 完了 (2026-07-30)
@@ -289,7 +289,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
   **Phase 3 (rename) と Phase 5 (benchmarks 統合) は、生成 ablation が終わってからが安全**。
   Phase 0 / 1 / 2 / 6 / 7 は先行して構いません。
 - checkpoint パス (`pocket-ligand-*/…`) は `docs/results/best_allatom_configs.md` と
-  `ctbench/variants.py` が実パス文字列で参照している。`runs/` へ移すなら両者を同時更新する
+  `pose_rescoring_bench/variants.py` が実パス文字列で参照している。`runs/` へ移すなら両者を同時更新する
   (移さずルート据え置きのままでも構わない — 論文の再現性記録としては据え置きの方が安全)。
 - トークン列のバイト表現を変える変更 (Phase 4) は、全 checkpoint を無効化しうる。
   既存 cache との一致テストを先に置いてから着手する。
@@ -314,7 +314,7 @@ prolit/                                  # = 現 pocket-conditioned-ligand-gen
 
 1. **`patches/` は必要だった**（当初「不要」と判断→撤回）。DiffGui に未コミットの
    改変が submodule 内にあり、clone し直すと消える状態だった。
-2. **plbench を uv workspace から除外**。ESM3 の fork 版 transformers が
+2. **recon_bench を uv workspace から除外**。ESM3 の fork 版 transformers が
    モデル側の transformers 5.x を巻き戻すため。
 3. **tokenize の単一 CLI 化はしない**。共有されていたのは flush ループだけで、
    それは `prolit.data.token_stream` に抽出済み。残りは source 固有。

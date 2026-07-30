@@ -1,0 +1,73 @@
+[project]
+name = "prolit-recon-bench"
+version = "0.1.0"
+description = "Benchmark of 3D structure reconstruction for protein/ligand discrete tokenizers (ESM3, FoldToken, pocket-ligand VQ-VAE)."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+# Core stays light: metrics, structure I/O, result aggregation, the notebook,
+# and the orchestration that drives FoldToken / the own model as subprocesses
+# (each runs in its own heavier env). Only ESM3 runs in-process — its deps live
+# in the optional `esm3` group so `uv sync` is fast and never blocked on the
+# forked-transformers git build that ESM3 pulls in.
+dependencies = [
+    # Core scientific stack
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.13",
+    "tqdm>=4.67",
+    # Structure / chemistry I/O
+    "biotite>=1.0.0",
+    "biopython>=1.84",
+    "rdkit>=2024.3.1",
+    "posebusters>=0.3",        # chemical-validity checks on reconstructed ligands
+    "pyarrow>=18.0.0",         # read the own model's parquet shards
+    "huggingface-hub>=0.25",
+    # Visualization / notebook
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+    "py3dmol>=2.4",
+    "marimo>=0.23",
+    "prolit-bench-common",
+]
+
+[tool.uv.sources]
+# Outside the workspace (see the root pyproject), so this is a plain path dep.
+prolit-bench-common = { path = "../common", editable = true }
+# ESM3 lives in this repo as a git submodule; install it editable from there so
+# the pinned commit and the importable package always match.
+esm = { path = "../../third_party/esm", editable = true }
+
+[dependency-groups]
+# In-process ESM3 reconstruction. Install with: uv sync --group esm3
+esm3 = [
+    "esm",
+    "torch>=2.4",
+]
+dev = [
+    "ruff>=0.6",
+    "pytest>=8.0",
+    "nbformat>=5.10.4",
+    "nbconvert>=7.17.1",
+    "playwright>=1.60.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["recon_bench*"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+# Keep the bench lint-light; it wraps research code with heterogeneous styles.
+target-version = "py312"
+extend-exclude = ["third_party"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# marimo cells: the trailing expression is the rendered output; imports live
+# inside cell functions.
+"notebooks/*.py" = ["B018", "B007", "E402", "F401"]

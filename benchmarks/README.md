@@ -7,33 +7,33 @@ and its own execution environment — but they must agree on what a tokenizer ar
 
 | directory | paper table | question | baselines |
 |---|---|---|---|
-| `plbench/` | Table 1 | how faithfully does a tokenizer reconstruct a complex? | ESM3, FoldToken4, Token-Mol, Bio2Token, ConfSeq |
-| `ctbench/` | Table 2 | how well do ProLIT tokens rank binding poses? (+ affinity, + the ablation across all three tasks) | RTMScore, GenScore, AutoDock Vina, DeepRMSD, Boltz-2 |
-| `sbddbench/` | Table 3 | how good are ligands generated for a pocket? | DiffSBDD, TargetDiff, DiffGui |
+| `recon-bench/` | Table 1 | how faithfully does a tokenizer reconstruct a complex? | ESM3, FoldToken4, Token-Mol, Bio2Token, ConfSeq |
+| `pose-rescoring-bench/` | Table 2 | how well do ProLIT tokens rank binding poses? (+ affinity, + the ablation across all three tasks) | RTMScore, GenScore, AutoDock Vina, DeepRMSD, Boltz-2 |
+| `sbdd-bench/` | Table 3 | how good are ligands generated for a pocket? | DiffSBDD, TargetDiff, DiffGui |
 | `common/` | — | the shared arm registry and significance tests | — |
 
 ## Environments
 
-`common`, `ctbench` and `sbddbench` are members of the root uv workspace and
+`common`, `pose-rescoring-bench` and `sbdd-bench` are members of the root uv workspace and
 share the repository's `.venv`.
 
-**`plbench` is not**, and this is deliberate: it runs ESM3 in-process, and ESM3
+**`recon-bench` is not**, and this is deliberate: it runs ESM3 in-process, and ESM3
 pins a fork of `transformers` that would replace the `transformers` 5.x the
 ProLIT language models are built on. A uv workspace resolves one version per
-package, so membership would silently downgrade the model library. `plbench`
+package, so membership would silently downgrade the model library. `recon-bench`
 keeps its own project and lockfile:
 
 ```sh
-cd benchmarks/plbench && uv sync            # its own .venv
+cd benchmarks/recon-bench && uv sync            # its own .venv
 ```
 
 Its FoldToken and Bio2Token adapters go further still and run in dedicated
 venvs (`.venv-foldtoken`, `.venv-bio2token`) as subprocesses, because those
 pin exact CUDA-coupled torch builds.
 
-The generative baselines under `sbddbench` are the same story in conda form:
+The generative baselines under `sbdd-bench` are the same story in conda form:
 each generates in its own environment and writes a plain `generated.sdf`, which
-the benchmark environment then scores. See `sbddbench/README.md`.
+the benchmark environment then scores. See `sbdd_bench/README.md`.
 
 ## The arm registry
 
@@ -47,8 +47,8 @@ real discrepancy between the tables that is recorded rather than hidden, and
 
 ```sh
 uv run pytest benchmarks                    # metric, stats and reproduction tests
-uv run python benchmarks/ctbench/scripts/make_tables.py
-uv run python benchmarks/ctbench/scripts/make_figures.py
+uv run python benchmarks/pose-rescoring-bench/scripts/make_tables.py
+uv run python benchmarks/pose-rescoring-bench/scripts/make_figures.py
 ```
 
 `results/` is git-ignored: only code is tracked, and anything a run reproduces
@@ -59,4 +59,4 @@ themselves are recorded in `docs/results/`.
 
 One test is an expected failure rather than a skip: no TargetDiff dump anywhere
 reproduces the generation table's -4.76 (see
-`ctbench/tests/test_reproduce_generation.py`).
+`pose_rescoring_bench/tests/test_reproduce_generation.py`).

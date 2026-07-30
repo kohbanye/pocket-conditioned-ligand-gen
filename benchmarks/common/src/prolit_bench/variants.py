@@ -1,11 +1,13 @@
 """The single source of truth for which weights each tokenizer arm means.
 
 Three benchmarks report on the same arms in three different paper tables. Until
-this module existed they each resolved arms independently -- ``ctbench`` from a
-hand-written registry, ``plbench`` from an ``ARMS`` dict inside its adapter --
+this module existed they each resolved arms independently -- ``pose_rescoring_bench``
+from a
+hand-written registry, ``recon_bench`` from an ``ARMS`` dict inside its adapter --
 and the two had drifted apart in a way no test could see: for the
-separately-trained VQ-VAEs, ``ctbench`` pinned each run's ``last.ckpt`` while
-``plbench`` picked the run's lowest-``val/atom_coord`` checkpoint. Those are not
+separately-trained VQ-VAEs, ``pose_rescoring_bench`` pinned each run's ``last.ckpt``
+while
+``recon_bench`` picked the run's lowest-``val/atom_coord`` checkpoint. Those are not
 the same weights (the separate runs' best epochs are 95-98, not 99), so the
 reconstruction table and the rescoring/generation tables were describing
 slightly different models under one name.
@@ -180,9 +182,9 @@ def get(name: str) -> Arm:
 #: These differ for the separate arms, which is the inconsistency described at
 #: the top of this module. Change one only together with re-running its table.
 PUBLISHED_POLICY: dict[str, SelectPolicy] = {
-    "reconstruction": "best",  # plbench, paper Table 1
-    "rescoring": "last",  # ctbench, paper Table 2
-    "generation": "last",  # ctbench + sbddbench, paper Table 3
+    "reconstruction": "best",  # recon_bench, paper Table 1
+    "rescoring": "last",  # pose_rescoring_bench, paper Table 2
+    "generation": "last",  # pose_rescoring_bench + sbdd_bench, paper Table 3
 }
 
 

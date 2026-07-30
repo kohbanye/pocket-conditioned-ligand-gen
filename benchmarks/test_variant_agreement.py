@@ -13,11 +13,11 @@ from pathlib import Path
 
 import pytest
 
-# plbench is outside the workspace, so it is not installed into this
+# recon_bench is outside the workspace, so it is not installed into this
 # environment; add it to the path so its arm table can be compared here.
 BENCHMARKS = Path(__file__).resolve().parent
-if str(BENCHMARKS / "plbench") not in sys.path:
-    sys.path.insert(0, str(BENCHMARKS / "plbench"))
+if str(BENCHMARKS / "recon-bench") not in sys.path:
+    sys.path.insert(0, str(BENCHMARKS / "recon-bench"))
 
 from prolit_bench import variants  # noqa: E402
 
@@ -31,15 +31,15 @@ needs_weights = pytest.mark.skipif(
 )
 
 
-def _plbench_arms() -> dict:
-    """plbench's own arm table, keyed by the shared registry's names."""
-    plbench_arms = pytest.importorskip(
-        "plbench.adapters.own_allatom", reason="plbench not importable here"
+def _recon_bench_arms() -> dict:
+    """recon_bench's own arm table, keyed by the shared registry's names."""
+    recon_bench_arms = pytest.importorskip(
+        "recon_bench.adapters.own_allatom", reason="recon_bench not importable here"
     ).ARMS
     return {
         variants.ALIASES.get(name, name): arm
-        for name, arm in plbench_arms.items()
-        # plbench also carries binning / ligand-own-frame arms, which are
+        for name, arm in recon_bench_arms.items()
+        # recon_bench also carries binning / ligand-own-frame arms, which are
         # reconstruction-only and have no rescoring or generation counterpart.
         if variants.ALIASES.get(name, name) in variants.REGISTRY
     }
@@ -57,9 +57,9 @@ def _tail(path: Path) -> tuple[str, ...]:
 
 
 @pytest.mark.parametrize("name", ARM_NAMES)
-def test_plbench_arm_identity_matches_registry(name: str) -> None:
+def test_recon_bench_arm_identity_matches_registry(name: str) -> None:
     """Run names and normalization statistics must be identical."""
-    theirs = _plbench_arms()[name]
+    theirs = _recon_bench_arms()[name]
     ours = variants.get(name)
     assert theirs.protein_run == ours.protein_run
     assert theirs.ligand_run == ours.ligand_run
@@ -68,18 +68,19 @@ def test_plbench_arm_identity_matches_registry(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", ARM_NAMES)
-def test_ctbench_arm_codebook_size_matches_registry(name: str) -> None:
-    """ctbench states the COMBINED code space; it must follow from the arm."""
-    ctbench_variants = pytest.importorskip(
-        "ctbench.variants", reason="ctbench not importable here"
+def test_pose_rescoring_bench_arm_codebook_size_matches_registry(name: str) -> None:
+    """The bench states the COMBINED code space; it must follow from the arm."""
+    rescoring_variants = pytest.importorskip(
+        "pose_rescoring_bench.variants",
+        reason="pose-rescoring-bench not importable here",
     )
-    variant = ctbench_variants.get(name)
+    variant = rescoring_variants.get(name)
     ours = variants.get(name)
     for task in (variant.rescoring, variant.affinity):
         if task is None:
             continue
         assert task.codebook_size == ours.combined_codebook_size, (
-            f"{name}: ctbench {task.codebook_size} vs registry "
+            f"{name}: pose_rescoring_bench {task.codebook_size} vs registry "
             f"{ours.combined_codebook_size}"
         )
 

@@ -73,8 +73,8 @@ uv run ruff check .
 uv run ty check src
 ```
 
-`benchmarks/plbench` だけは別環境（ESM3 が fork 版 transformers を要求するため）。
-`cd benchmarks/plbench && uv sync` で個別に。
+`benchmarks/recon-bench` だけは別環境（ESM3 が fork 版 transformers を要求するため）。
+`cd benchmarks/recon-bench && uv sync` で個別に。
 
 ## Conventions
 

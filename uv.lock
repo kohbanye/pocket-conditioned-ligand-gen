@@ -8,10 +8,10 @@ resolution-markers = [
 
 [manifest]
 members = [
-    "complex-tokenizer-bench",
     "pocket-conditioned-ligand-gen",
     "prolit-bench-common",
-    "sbdd-bench",
+    "prolit-pose-rescoring-bench",
+    "prolit-sbdd-bench",
 ]
 
 [[package]]
@@ -259,63 +259,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/4c/13/7d740c5849255756bc17888787313b61fd38a0a8304fc4f073dfc46122aa/comm-0.2.3.tar.gz", hash = "sha256:2dc8048c10962d55d7ad693be1e7045d891b7ce8d999c97963a5e3e99c055971", size = 6319, upload-time = "2025-07-25T14:02:04.452Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/60/97/891a0971e1e4a8c5d2b20bbe0e524dc04548d2307fee33cdeba148fd4fc7/comm-0.2.3-py3-none-any.whl", hash = "sha256:c615d91d75f7f04f095b30d1c1711babd43bdc6419c1be9886a85f2f4e489417", size = 7294, upload-time = "2025-07-25T14:02:02.896Z" },
-]
-
-[[package]]
-name = "complex-tokenizer-bench"
-version = "0.1.0"
-source = { editable = "benchmarks/ctbench" }
-dependencies = [
-    { name = "ipykernel" },
-    { name = "lightning" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "pocket-conditioned-ligand-gen" },
-    { name = "prolit-bench-common" },
-    { name = "pyarrow" },
-    { name = "pytest" },
-    { name = "rdkit" },
-    { name = "scikit-learn" },
-    { name = "scipy" },
-    { name = "seaborn" },
-    { name = "torch" },
-    { name = "torchmetrics" },
-    { name = "tqdm" },
-    { name = "wandb" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "ipykernel", specifier = ">=7.1.0" },
-    { name = "lightning", specifier = ">=2.5.6" },
-    { name = "matplotlib", specifier = ">=3.10.7" },
-    { name = "numpy", specifier = ">=2.3.5" },
-    { name = "pandas", specifier = ">=2.3.3" },
-    { name = "pocket-conditioned-ligand-gen", editable = "." },
-    { name = "prolit-bench-common", editable = "benchmarks/common" },
-    { name = "pyarrow", specifier = ">=18.0.0" },
-    { name = "pytest", specifier = ">=9.0.1" },
-    { name = "rdkit" },
-    { name = "scikit-learn", specifier = ">=1.7.2" },
-    { name = "scipy", specifier = ">=1.14" },
-    { name = "seaborn", specifier = ">=0.13.2" },
-    { name = "torch", specifier = ">=2.9.1" },
-    { name = "torchmetrics", specifier = ">=1.8.2" },
-    { name = "tqdm", specifier = ">=4.67.1" },
-    { name = "wandb", specifier = ">=0.23.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "ruff", specifier = ">=0.14.6" },
-    { name = "ty", specifier = ">=0.0.1a28" },
 ]
 
 [[package]]
@@ -1679,6 +1622,122 @@ dev = [
 ]
 
 [[package]]
+name = "prolit-pose-rescoring-bench"
+version = "0.1.0"
+source = { editable = "benchmarks/pose-rescoring-bench" }
+dependencies = [
+    { name = "ipykernel" },
+    { name = "lightning" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pocket-conditioned-ligand-gen" },
+    { name = "prolit-bench-common" },
+    { name = "pyarrow" },
+    { name = "pytest" },
+    { name = "rdkit" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "seaborn" },
+    { name = "torch" },
+    { name = "torchmetrics" },
+    { name = "tqdm" },
+    { name = "wandb" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ipykernel", specifier = ">=7.1.0" },
+    { name = "lightning", specifier = ">=2.5.6" },
+    { name = "matplotlib", specifier = ">=3.10.7" },
+    { name = "numpy", specifier = ">=2.3.5" },
+    { name = "pandas", specifier = ">=2.3.3" },
+    { name = "pocket-conditioned-ligand-gen", editable = "." },
+    { name = "prolit-bench-common", editable = "benchmarks/common" },
+    { name = "pyarrow", specifier = ">=18.0.0" },
+    { name = "pytest", specifier = ">=9.0.1" },
+    { name = "rdkit" },
+    { name = "scikit-learn", specifier = ">=1.7.2" },
+    { name = "scipy", specifier = ">=1.14" },
+    { name = "seaborn", specifier = ">=0.13.2" },
+    { name = "torch", specifier = ">=2.9.1" },
+    { name = "torchmetrics", specifier = ">=1.8.2" },
+    { name = "tqdm", specifier = ">=4.67.1" },
+    { name = "wandb", specifier = ">=0.23.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "ruff", specifier = ">=0.14.6" },
+    { name = "ty", specifier = ">=0.0.1a28" },
+]
+
+[[package]]
+name = "prolit-sbdd-bench"
+version = "0.1.0"
+source = { editable = "benchmarks/sbdd-bench" }
+dependencies = [
+    { name = "biopython" },
+    { name = "marimo" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "posebusters" },
+    { name = "prolit-bench-common" },
+    { name = "py3dmol" },
+    { name = "pyarrow" },
+    { name = "pyyaml" },
+    { name = "rdkit" },
+    { name = "scipy" },
+    { name = "seaborn" },
+    { name = "tqdm" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+interactions = [
+    { name = "mdanalysis" },
+    { name = "prolif" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "biopython", specifier = ">=1.84" },
+    { name = "marimo", specifier = ">=0.23" },
+    { name = "matplotlib", specifier = ">=3.9" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "pandas", specifier = ">=2.2" },
+    { name = "posebusters", specifier = ">=0.3.1" },
+    { name = "prolit-bench-common", editable = "benchmarks/common" },
+    { name = "py3dmol", specifier = ">=2.4" },
+    { name = "pyarrow", specifier = ">=18.0.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rdkit", specifier = ">=2024.3.1" },
+    { name = "scipy", specifier = ">=1.13" },
+    { name = "seaborn", specifier = ">=0.13" },
+    { name = "tqdm", specifier = ">=4.67" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+interactions = [
+    { name = "mdanalysis", specifier = ">=2.7" },
+    { name = "prolif", specifier = ">=2.0" },
+]
+
+[[package]]
 name = "prompt-toolkit"
 version = "3.0.53"
 source = { registry = "https://pypi.org/simple" }
@@ -2128,65 +2187,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/8e/3f/73ccf82579412b4a71c4ca673f10b5f1f888d7cf5af7fe24f27d30307be4/safetensors-0.8.0-cp310-abi3-win32.whl", hash = "sha256:2ddf52eac562eda224f99acfa7889d02968c1fd59a5b011ae7d8137c37e9c02d", size = 342401, upload-time = "2026-06-09T07:52:28.895Z" },
     { url = "https://files.pythonhosted.org/packages/1b/6d/3fba214c1e5e0f69991677ec3bc17023f0421776975e1de0c682dca475e2/safetensors-0.8.0-cp310-abi3-win_amd64.whl", hash = "sha256:096ec1a98435df7beb08853bb5aa9081a84f23d0adc67ed1a0a10550f608373f", size = 355540, upload-time = "2026-06-09T07:52:27.832Z" },
     { url = "https://files.pythonhosted.org/packages/8d/fc/7eedc3510d97878876e32774eebbeb61c43f148a96e915c84229a3e967aa/safetensors-0.8.0-cp310-abi3-win_arm64.whl", hash = "sha256:f7838e5135a406ad3e02efdcb8cf2e5397d368b0154537c4fec682dbc544d452", size = 340500, upload-time = "2026-06-09T07:52:26.745Z" },
-]
-
-[[package]]
-name = "sbdd-bench"
-version = "0.1.0"
-source = { editable = "benchmarks/sbddbench" }
-dependencies = [
-    { name = "biopython" },
-    { name = "marimo" },
-    { name = "matplotlib" },
-    { name = "numpy" },
-    { name = "pandas" },
-    { name = "posebusters" },
-    { name = "prolit-bench-common" },
-    { name = "py3dmol" },
-    { name = "pyarrow" },
-    { name = "pyyaml" },
-    { name = "rdkit" },
-    { name = "scipy" },
-    { name = "seaborn" },
-    { name = "tqdm" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-interactions = [
-    { name = "mdanalysis" },
-    { name = "prolif" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "biopython", specifier = ">=1.84" },
-    { name = "marimo", specifier = ">=0.23" },
-    { name = "matplotlib", specifier = ">=3.9" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "pandas", specifier = ">=2.2" },
-    { name = "posebusters", specifier = ">=0.3.1" },
-    { name = "prolit-bench-common", editable = "benchmarks/common" },
-    { name = "py3dmol", specifier = ">=2.4" },
-    { name = "pyarrow", specifier = ">=18.0.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rdkit", specifier = ">=2024.3.1" },
-    { name = "scipy", specifier = ">=1.13" },
-    { name = "seaborn", specifier = ">=0.13" },
-    { name = "tqdm", specifier = ">=4.67" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "ruff", specifier = ">=0.6" },
-]
-interactions = [
-    { name = "mdanalysis", specifier = ">=2.7" },
-    { name = "prolif", specifier = ">=2.0" },
 ]
 
 [[package]]

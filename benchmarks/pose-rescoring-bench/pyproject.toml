@@ -1,0 +1,57 @@
+[project]
+name = "prolit-pose-rescoring-bench"
+version = "0.1.0"
+description = "Evaluation & ablation benchmark for the protein-ligand complex tokenizer."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "ipykernel>=7.1.0",
+    "lightning>=2.5.6",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.5",
+    "pandas>=2.3.3",
+    "pyarrow>=18.0.0",
+    "pytest>=9.0.1",
+    "rdkit",
+    "scikit-learn>=1.7.2",
+    "scipy>=1.14",
+    "seaborn>=0.13.2",
+    "torch>=2.9.1",
+    "torchmetrics>=1.8.2",
+    "tqdm>=4.67.1",
+    "wandb>=0.23.0",
+    # The model library this bench evaluates. It is a workspace member now, so
+    # its own transitive deps (biopython, e3nn, transformers, ...) come with it
+    # and `import prolit.*` resolves without the sys.path shim in
+    # pose_rescoring_bench/inference/__init__.py::ensure_source_repo_importable.
+    "pocket-conditioned-ligand-gen",
+    "prolit-bench-common",
+]
+
+[tool.uv.sources]
+pocket-conditioned-ligand-gen = { workspace = true }
+prolit-bench-common = { workspace = true }
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["pose_rescoring_bench*"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["D", "N812", "COM812"]
+
+[tool.ruff.lint.per-file-ignores]
+# Entry points, not packages: invoked by path, and they report progress on stdout.
+"scripts/*.py" = ["INP001", "T201", "E501"]
+"tests/*.py" = ["S101", "PLR2004", "INP001"]
+# Inference drivers print per-variant progress through long qsub runs.
+"pose_rescoring_bench/inference/*.py" = ["T201"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14.6",
+    "ty>=0.0.1a28",
+]

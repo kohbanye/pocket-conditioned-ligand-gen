@@ -43,22 +43,22 @@ where = ["src"]
 # Benchmarks that share this environment: they keep their own dependency lists
 # but resolve into one lockfile together with the model library they evaluate.
 #
-# benchmarks/plbench is deliberately NOT a member. It runs ESM3 in-process, and
+# benchmarks/recon-bench is deliberately NOT a member. It runs ESM3 in-process, and
 # ESM3 depends on a fork of transformers (Biohub/transformers @ ef32577) that
 # would replace the transformers 5.x the ProLIT language models are built on --
 # a workspace resolves one version per package, so membership would silently
-# downgrade the model library. plbench stays a standalone uv project with its
+# downgrade the model library. recon_bench stays a standalone uv project with its
 # own venv, which is already the pattern its FoldToken and Bio2Token adapters
 # use (.venv-foldtoken / .venv-bio2token, driven as subprocesses).
-members = ["benchmarks/common", "benchmarks/sbddbench", "benchmarks/ctbench"]
-exclude = ["benchmarks/plbench"]
+members = ["benchmarks/common", "benchmarks/sbdd-bench", "benchmarks/pose-rescoring-bench"]
+exclude = ["benchmarks/recon-bench"]
 
 [tool.pytest.ini_options]
 # One command covers the library, the pipelines and every in-workspace
-# benchmark. benchmarks/plbench is excluded: it has its own environment (ESM3
+# benchmark. benchmarks/recon-bench is excluded: it has its own environment (ESM3
 # pins a conflicting transformers), so run it with its own interpreter.
 testpaths = ["tests", "benchmarks"]
-norecursedirs = ["third_party", "benchmarks/plbench", ".venv", "data", "outputs"]
+norecursedirs = ["third_party", "benchmarks/recon-bench", ".venv", "data", "outputs"]
 
 [tool.ruff]
 extend-exclude = ["third_party", "benchmarks/*/third_party"]
