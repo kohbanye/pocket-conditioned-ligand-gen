@@ -26,9 +26,14 @@ from ctbench.aggregate import generation_pairwise, generation_table
 _CTBENCH = Path(__file__).resolve().parent.parent / "results" / "generation"
 _SBDD = Path(__file__).resolve().parents[2] / "sbddbench" / "results"
 
+# Result dumps are not tracked in git -- only code is. These tests verify the
+# analysis layer against locally produced dumps, and skip without them.
 pytestmark = pytest.mark.skipif(
-    not (_CTBENCH / "joint").exists(),
-    reason="generation dumps not seeded",
+    not all(
+        p.exists()
+        for p in (_CTBENCH / "joint", _SBDD / "diffgui", _SBDD / "partial")
+    ),
+    reason="generation dumps not present locally (results/ is git-ignored)",
 )
 
 #: The generation arm the paper reports: temperature 0.85, refiner on.

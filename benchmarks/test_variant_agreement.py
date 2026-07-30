@@ -23,6 +23,13 @@ from prolit_bench import variants  # noqa: E402
 
 ARM_NAMES = ["joint", "separate", "separate_4096"]
 
+#: Trained weights are not in git. The identity checks below are pure metadata
+#: and always run; only the two that resolve an arm to a file need them present.
+needs_weights = pytest.mark.skipif(
+    not variants.VQ_RUNS_DIR.exists(),
+    reason="no local training runs (weights are not tracked in git)",
+)
+
 
 def _plbench_arms() -> dict:
     """plbench's own arm table, keyed by the shared registry's names."""
@@ -38,6 +45,17 @@ def _plbench_arms() -> dict:
     }
 
 
+def _tail(path: Path) -> tuple[str, ...]:
+    """The part of a cache path after the repository root it was resolved from.
+
+    Comparing absolute paths would only prove the two packages were loaded from
+    the same checkout; comparing the tail proves they name the same file, which
+    is the thing that has to agree.
+    """
+    parts = Path(path).resolve().parts
+    return parts[parts.index("data") :] if "data" in parts else parts
+
+
 @pytest.mark.parametrize("name", ARM_NAMES)
 def test_plbench_arm_identity_matches_registry(name: str) -> None:
     """Run names and normalization statistics must be identical."""
@@ -45,8 +63,8 @@ def test_plbench_arm_identity_matches_registry(name: str) -> None:
     ours = variants.get(name)
     assert theirs.protein_run == ours.protein_run
     assert theirs.ligand_run == ours.ligand_run
-    assert Path(theirs.protein_norm) == ours.protein_norm
-    assert Path(theirs.ligand_norm) == ours.ligand_norm
+    assert _tail(theirs.protein_norm) == _tail(ours.protein_norm)
+    assert _tail(theirs.ligand_norm) == _tail(ours.ligand_norm)
 
 
 @pytest.mark.parametrize("name", ARM_NAMES)
@@ -66,6 +84,7 @@ def test_ctbench_arm_codebook_size_matches_registry(name: str) -> None:
         )
 
 
+@needs_weights
 @pytest.mark.parametrize("name", ARM_NAMES)
 def test_selection_policies_are_recorded_not_guessed(name: str) -> None:
     """Every task's published policy resolves to a file that exists."""
@@ -75,6 +94,7 @@ def test_selection_policies_are_recorded_not_guessed(name: str) -> None:
             assert path.exists(), f"{name}/{policy}: missing {key} -> {path}"
 
 
+@needs_weights
 def test_known_policy_divergence_is_reported() -> None:
     """Document, as an assertion, where the two policies actually differ.
 

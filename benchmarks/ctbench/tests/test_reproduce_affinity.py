@@ -25,7 +25,11 @@ _LF5 = (
     "meanmax_kdki.csv",
 )
 
-pytestmark = pytest.mark.skipif(not _JOINT.exists(), reason="affinity dumps not seeded")
+# Result dumps are not tracked in git -- only code is.
+pytestmark = pytest.mark.skipif(
+    not _JOINT.exists(),
+    reason="affinity dumps not present locally (results/ is git-ignored)",
+)
 
 
 def _lf5_ensemble() -> pd.DataFrame:

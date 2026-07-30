@@ -18,11 +18,6 @@ __pycache__/
 # Reconstruction outputs (PDBs, intermediate tensors).
 /outputs/
 # Aggregated result tables are small enough to keep; ignore only bulky dumps.
-/results/**/*.pdb
-/results/**/*.npz
-/results/**/*.pdf
-/results/**/*.html
-/results/_*
 
 # Notebook render artifacts
 notebooks/*.html

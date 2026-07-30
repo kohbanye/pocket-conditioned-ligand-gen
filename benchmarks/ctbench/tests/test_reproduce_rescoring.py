@@ -15,9 +15,10 @@ from ctbench.metrics import rescoring as R
 
 _RESULTS = Path(__file__).resolve().parent.parent / "results" / "rescoring"
 
+# Result dumps are not tracked in git -- only code is.
 pytestmark = pytest.mark.skipif(
     not (_RESULTS / "joint").exists(),
-    reason="pose dumps not seeded",
+    reason="pose dumps not present locally (results/ is git-ignored)",
 )
 
 _DP = 0.3  # docking-power tolerance (pt); table rounded to 0.1

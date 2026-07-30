@@ -223,14 +223,18 @@ wget-log
 /pocket-ligand-refine/
 /runs/
 
-# TSUBAME job logs and generated artifacts
+# Results and artifacts. Only code is tracked: anything a run reproduces --
+# per-sample dumps, summary tables, figures, notebook exports -- stays local.
+# The numbers themselves are recorded in docs/results/.
+results/
 /logs/
 *.out
 *.err
 outputs/
 .codex
 
-# Rendered notebook exports
+# Notebook exports (the .py source is tracked; the rendered PDF/HTML is not)
+notebooks/*.pdf
 notebooks/*.html
 
 # SGE/TSUBAME job stdout/stderr (name.e<jobid> / name.o<jobid>[.<taskid>])

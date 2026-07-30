@@ -19,10 +19,6 @@ __pycache__/
 # Per-model generated molecules + docking dumps.
 /outputs/
 # Aggregated result tables are small enough to keep; ignore only bulky dumps.
-/results/**/*.sdf
-/results/**/*.npz
-/results/**/*.pdb
-/results/**/*.pdbqt
 /results/**/*.pdf
 /results/**/*.html
 /results/_*

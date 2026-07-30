@@ -30,6 +30,12 @@ docs/              frozen result records and dated investigation notes
 notebooks/         marimo notebooks that produce the paper's figures
 ```
 
+Only code is tracked. Trained weights, descriptor caches, token streams,
+per-sample dumps and rendered figures are all git-ignored — they are outputs of
+the pipelines above, and they stay on whatever machine produced them. What the
+runs *concluded* is written down in `docs/results/`, which is the authority when
+a number is in question.
+
 ## Setup
 
 ```sh

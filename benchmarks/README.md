@@ -51,7 +51,12 @@ uv run python benchmarks/ctbench/scripts/make_tables.py
 uv run python benchmarks/ctbench/scripts/make_figures.py
 ```
 
-The reproduction tests assert that the analysis layer still produces the
-published numbers from the committed per-sample dumps. One is an expected
-failure: no committed TargetDiff dump reproduces the generation table's -4.76
-(see `ctbench/tests/test_reproduce_generation.py`).
+`results/` is git-ignored: only code is tracked, and anything a run reproduces
+stays local. The reproduction tests assert that the analysis layer still
+produces the published numbers from whatever dumps are present, and skip when
+they are not — so a fresh clone runs green with them skipped. The numbers
+themselves are recorded in `docs/results/`.
+
+One test is an expected failure rather than a skip: no TargetDiff dump anywhere
+reproduces the generation table's -4.76 (see
+`ctbench/tests/test_reproduce_generation.py`).
