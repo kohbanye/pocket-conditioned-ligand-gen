@@ -35,12 +35,26 @@ import argparse
 import csv
 import logging
 import os
-import re
 import subprocess
 import tempfile
 from multiprocessing import Pool
 from pathlib import Path
 
+from prolit.chem.docking import (
+    heavy_rmsd as _heavy_rmsd,
+)
+from prolit.chem.docking import (
+    parse_score as _parse_score,
+)
+from prolit.chem.docking import (
+    read_pdbqt_heavy as _read_pdbqt_heavy,
+)
+from prolit.chem.docking import (
+    run as _run,
+)
+from prolit.chem.docking import (
+    write_xyz as _write_xyz,
+)
 from prolit.external_tools import tool_default
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -49,10 +63,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_VINA = tool_default("vina")
 DEFAULT_OBABEL = tool_default("obabel")
 
-_SCORE_RE = re.compile(
-    r"Estimated Free Energy of Binding\s*:\s*(-?\d+\.?\d*)", re.IGNORECASE
-)
-
 # Worker globals (set by _init_worker; avoids pickling per task).
 _CFG: dict = {}
 
@@ -60,51 +70,6 @@ _CFG: dict = {}
 def _init_worker(cfg: dict) -> None:
     global _CFG  # noqa: PLW0603
     _CFG = cfg
-
-
-def _write_xyz(path: Path, elements: list[str], coords: list[list[float]]) -> None:
-    lines = [str(len(elements)), "generated"]
-    lines += [
-        f"{el} {x:.4f} {y:.4f} {z:.4f}"
-        for el, (x, y, z) in zip(elements, coords, strict=True)
-    ]
-    path.write_text("\n".join(lines) + "\n")
-
-
-def _read_pdbqt_heavy(path: Path) -> list[tuple[float, float, float]]:
-    """Heavy-atom coordinates from a pdbqt (AutoDock H types start with 'H')."""
-    out: list[tuple[float, float, float]] = []
-    for ln in path.read_text().splitlines():
-        if not ln.startswith(("ATOM", "HETATM")):
-            continue
-        atype = ln[77:79].strip() or ln.split()[-1]
-        if atype.upper().startswith("H"):
-            continue
-        out.append((float(ln[30:38]), float(ln[38:46]), float(ln[46:54])))
-    return out
-
-
-def _heavy_rmsd(
-    a: list[tuple[float, float, float]], b: list[tuple[float, float, float]]
-) -> float | None:
-    if not a or len(a) != len(b):
-        return None
-    sq = sum(
-        (ax - bx) ** 2 + (ay - by) ** 2 + (az - bz) ** 2
-        for (ax, ay, az), (bx, by, bz) in zip(a, b, strict=True)
-    )
-    return (sq / len(a)) ** 0.5
-
-
-def _run(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603
-        cmd, capture_output=True, text=True, check=False, timeout=timeout
-    )
-
-
-def _parse_score(stdout: str) -> float | None:
-    m = _SCORE_RE.search(stdout)
-    return float(m.group(1)) if m else None
 
 
 def dock_one(record: dict) -> dict:

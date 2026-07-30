@@ -65,6 +65,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
+# Sibling module, imported by bare name: Python puts the script's own
+# directory on sys.path[0], so this resolves no matter where it is run from
+# (a ``scripts.`` prefix would need the repository root on the path).
+from generate_ligands_3d import (
+    _decode_ligand_atom,
+    _pocket_codes_atom,
+    load_atom_lm,
+    load_atom_norm_stats,
+    load_atom_vqvae,
+)
+
 from prolit.chem.pdb_io import infer_bonds
 from prolit.config import (
     PocketExtractionConfig,
@@ -75,13 +86,6 @@ from prolit.tokenizers.lm_vocab import (
     L_CLOSE_ID,
     PAD_ID,
     AtomLMVocab,
-)
-from scripts.generate_ligands_3d import (
-    _decode_ligand_atom,
-    _pocket_codes_atom,
-    load_atom_lm,
-    load_atom_norm_stats,
-    load_atom_vqvae,
 )
 
 # Repository root, used only for default data/output locations. ``prolit`` is

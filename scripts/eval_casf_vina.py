@@ -20,8 +20,8 @@ import logging
 import tempfile
 from pathlib import Path
 
+from prolit.chem.docking import parse_score, run, write_xyz
 from prolit.external_tools import tool_default
-from scripts.dock_vina import _parse_score, _run, _write_xyz
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -73,8 +73,8 @@ def _score_pose(rec: dict) -> dict:
     with tempfile.TemporaryDirectory(dir=cfg["tmp_dir"]) as td:
         xyz = Path(td) / "lig.xyz"
         pdbqt = Path(td) / "lig.pdbqt"
-        _write_xyz(xyz, els, coords)
-        _run(
+        write_xyz(xyz, els, coords)
+        run(
             [
                 cfg["obabel"],
                 str(xyz),
@@ -90,7 +90,7 @@ def _score_pose(rec: dict) -> dict:
         if not pdbqt.exists() or "ATOM" not in pdbqt.read_text()[:99999]:
             return out
         try:
-            r = _run(
+            r = run(
                 [
                     cfg["vina"],
                     "--receptor",
@@ -105,7 +105,7 @@ def _score_pose(rec: dict) -> dict:
                     *box,
                 ]
             )
-            out["score"] = _parse_score(r.stdout)
+            out["score"] = parse_score(r.stdout)
         except Exception:  # noqa: BLE001
             return out
     return out
@@ -117,7 +117,7 @@ def _prep_receptor(protein_pdb: Path, out_pdbqt: Path, obabel: str) -> bool:
     # Plain rigid-receptor pdbqt. Do NOT add "-p 7.4 --partialcharge gasteiger":
     # protonating a whole protein makes obabel emit "0 molecules converted" for
     # ~29% of CASF proteins. Vina assigns its own receptor terms anyway.
-    _run([obabel, str(protein_pdb), "-O", str(out_pdbqt), "-xr"], timeout=300)
+    run([obabel, str(protein_pdb), "-O", str(out_pdbqt), "-xr"], timeout=300)
     return out_pdbqt.exists() and out_pdbqt.stat().st_size > 0
 
 
@@ -150,7 +150,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     Path(args.tmp_dir).mkdir(parents=True, exist_ok=True)
     args.rec_dir.mkdir(parents=True, exist_ok=True)
 
-    from scripts.eval_casf_rescore import _parse_mol2_multi  # noqa: PLC0415
+    # Sibling module; see the note in generate_ligands_for_target.py.
+    from eval_casf_rescore import _parse_mol2_multi  # noqa: PLC0415
 
     targets = sorted(
         p.name for p in (args.casf_dir / "coreset").iterdir() if p.is_dir()

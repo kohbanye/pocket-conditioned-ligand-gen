@@ -109,8 +109,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Sibling module; see the note in generate_ligands_for_target.py.
+    from eval_casf_rescore import _PoseEncoder  # noqa: PLC0415
+
     from prolit.tokenizers.ligand import parse_sdf  # noqa: PLC0415
-    from scripts.eval_casf_rescore import _PoseEncoder  # noqa: PLC0415
 
     vq_cfg = AtomVQVAETrainingConfig()
     vq_cfg.atom.codebook_size = args.codebook_size
