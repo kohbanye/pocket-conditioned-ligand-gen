@@ -18,7 +18,6 @@ from prolit.model.mlm_score import ligand_pll
 from prolit.tokenizers.ligand import parse_sdf
 
 from pose_rescoring_bench.inference.encode import (
-    ComplexEncoder,
     load_mlm,
     load_rescorer,
     load_tokenizer,
@@ -29,6 +28,8 @@ from pose_rescoring_bench.inference.encode import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from prolit.api import PoseEncoder
 
     from pose_rescoring_bench.config import AffinityConfig, PathsConfig
     from pose_rescoring_bench.variants import AffinityCkpts
@@ -107,7 +108,7 @@ def _score_complex(  # noqa: PLR0913
     tid: str,
     casf: Path,
     labels: dict[str, tuple[float, str]],
-    enc: ComplexEncoder,
+    enc: PoseEncoder,
     mlm: Any,  # noqa: ANN401  (source-repo model)
     mask_id: int,
     rescorer: Any,  # noqa: ANN401  (source-repo head)

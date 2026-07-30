@@ -28,30 +28,25 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
+import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-SBDD_BENCH = REPO_ROOT / "benchmarks" / "sbdd-bench"
-CTBENCH = Path(__file__).resolve().parents[1]
-# ``prolit`` is installed; this is only so the sibling script in this directory
-# can be imported as ``scripts.build_distill_refine_set``.
-sys.path.insert(0, str(CTBENCH))
-
-import torch  # noqa: E402
-from prolit.model.pose_refiner import (  # noqa: E402
-    PoseRefinerModule,
-    refine_ligand_canonical,
-)
-from rdkit import Chem, RDLogger  # noqa: E402
-from scipy.optimize import minimize  # noqa: E402
-
-from scripts.build_distill_refine_set import (  # noqa: E402
+# Sibling module in this directory; Python puts it on sys.path[0].
+from build_distill_refine_set import (
     ligand_feats_from_mol,
     pocket_context,
 )
+from prolit.model.pose_refiner import (
+    PoseRefinerModule,
+    refine_ligand_canonical,
+)
+from rdkit import Chem, RDLogger
+from scipy.optimize import minimize
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SBDD_BENCH = REPO_ROOT / "benchmarks" / "sbdd-bench"
 
 RDLogger.DisableLog("rdApp.*")
 

@@ -19,17 +19,14 @@ import argparse
 import contextlib
 import json
 import shutil
-import sys
 from pathlib import Path
 
 import pyarrow.parquet as pq
+from prolit.data.descriptors import read_mol_from_tar
+from rdkit import Chem, RDLogger
 
 SOURCE_REPO = Path(__file__).resolve().parents[3]
 SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbdd-bench"
-sys.path.insert(0, str(SOURCE_REPO))
-
-from rdkit import Chem, RDLogger  # noqa: E402
-from scripts.generate_ligands_3d import _read_mol_from_tar  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -108,7 +105,7 @@ def main() -> None:
         rec_src = hub / "receptors" / tid / str(row["receptor_pdb"])
         if not rec_src.exists():
             continue
-        mol = _read_mol_from_tar(hub / "repo", int(row["shard_idx"]), int(row["pair_idx"]))
+        mol = read_mol_from_tar(hub / "repo", int(row["shard_idx"]), int(row["pair_idx"]))
         if mol is None:
             continue
         tdir = args.out_dir / tid

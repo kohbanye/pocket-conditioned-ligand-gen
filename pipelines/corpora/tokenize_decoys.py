@@ -31,18 +31,22 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pipelines.corpora.tokenize_biolip import (
+# Sibling modules in this directory, imported by bare name: Python puts a
+# script's own directory on sys.path[0], so this resolves from any cwd.
+from tokenize_biolip import (
     _bucket_code,
     _cd_test_pdbs,
     _load_ccd_smiles,
     _parse_biolip_txt,
     _read_needed,
 )
+
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
 from prolit.tokenizers.lm_vocab import AtomLMVocab
-from scripts.eval_casf_rescore import _PoseEncoder, _random_rotation
+from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -340,9 +344,9 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     if args.separate_protein_ckpt is not None:
         # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
         # unified into one code space. Feed RAW descriptors (identity external
-        # norm) via _PoseEncoder -- SeparateVQVAE normalizes per modality
+        # norm) via PoseEncoder -- SeparateVQVAE normalizes per modality
         # internally. Combined single-range AtomLMVocab over 2*codebook_size
-        # codes. _PoseEncoder encodes pocket + ligand in separate (single-
+        # codes. PoseEncoder encodes pocket + ligand in separate (single-
         # modality) encode_batch calls, which SeparateVQVAE requires.
         from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
             ATOM_DESCRIPTOR_DIM,
@@ -370,8 +374,8 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         mean = norm["atom_mean"].numpy()
         std = norm["atom_std"].numpy()
         vocab = AtomLMVocab(codebook_size=args.codebook_size)
-    enc = _PoseEncoder(
-        module,
+    enc = PoseEncoder(
+        module.vqvae,
         mean,
         std,
         vocab,
@@ -428,7 +432,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         needed_rec = {f"{p}{rc}.pdb" for p, rc, _c, _l, _s in site_list}
         needed_lig = {f"{p}_{cc}_{lc}_{s}.pdb" for p, _rc, cc, lc, s in site_list}
         # _read_needed uses a module-global biolip dir; set it once.
-        import pipelines.corpora.tokenize_biolip as tb  # noqa: PLC0415
+        import tokenize_biolip as tb  # noqa: PLC0415
 
         tb._w_biolip_dir = args.biolip_dir  # noqa: SLF001
         receptors = _read_needed("receptor", code, needed_rec)
@@ -512,7 +516,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                 descs = enc.ligand_descs(mols, frame)
                 for r in range(args.num_rot):
                     canon = r == 0 and not args.skip_canonical
-                    rot = None if canon else _random_rotation(rng)
+                    rot = None if canon else random_rotation_matrix(rng)
                     pc = p_codes if rot is None else enc.pocket_codes_rotated(rot)
                     seqs = enc.seqs_from_descs(pc, descs, rotation=rot)
                     if seqs[0] is None:

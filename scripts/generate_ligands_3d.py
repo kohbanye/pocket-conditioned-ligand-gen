@@ -22,9 +22,7 @@ Run on a GPU node::
 from __future__ import annotations
 
 import argparse
-import gzip
 import logging
-import tarfile
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +38,7 @@ from prolit.config import (
     LMTrainingConfig,
     PocketExtractionConfig,
 )
+from prolit.data.descriptors import read_mol_from_tar
 from prolit.model.lm_module import LigandLMModule
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.atom import (
@@ -52,9 +51,6 @@ from prolit.tokenizers.descriptor_schema import (
     fields_by_name,
 )
 from prolit.tokenizers.geometry import spherical_to_cartesian_np
-from prolit.tokenizers.ligand import (
-    parse_sdf_text,
-)
 from prolit.tokenizers.lm_vocab import (
     L_CLOSE_ID,
     PAD_ID,
@@ -72,30 +68,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
-
-
-def _read_mol_from_tar(repo_dir: Path, shard_idx: int, pair_idx: int) -> dict | None:
-    """Read one ligand SDF straight from its packed tar shard (no extraction)."""
-    tar_path = repo_dir / "ligands" / f"{int(shard_idx):06d}.tar"
-    if not tar_path.exists():
-        return None
-    member = f"{int(pair_idx):07d}.sdf.gz"
-    with tarfile.open(tar_path, "r") as tf:
-        try:
-            info = tf.getmember(member)
-        except KeyError:
-            info = next(
-                (m for m in tf.getmembers() if m.name.rsplit("/", 1)[-1] == member),
-                None,
-            )
-        if info is None:
-            return None
-        fileobj = tf.extractfile(info)
-        if fileobj is None:
-            return None
-        text = gzip.decompress(fileobj.read()).decode("utf-8", "replace")
-    mols = parse_sdf_text(text)
-    return mols[0] if mols else None
 
 
 # ---------------------------------------------------------------------------
@@ -413,7 +385,7 @@ def main() -> None:  # noqa: PLR0915, C901
         rec_path = receptor_dir / f"{row['complex_dir']}/{row['receptor_pdb']}"
         if not rec_path.exists():
             continue
-        mol = _read_mol_from_tar(repo_dir, int(row["shard_idx"]), int(row["pair_idx"]))
+        mol = read_mol_from_tar(repo_dir, int(row["shard_idx"]), int(row["pair_idx"]))
         if mol is None:
             continue
         try:

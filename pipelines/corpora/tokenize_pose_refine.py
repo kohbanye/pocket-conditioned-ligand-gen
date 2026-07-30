@@ -40,14 +40,17 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pipelines.corpora.tokenize_biolip import (
+# Sibling modules in this directory, imported by bare name: Python puts a
+# script's own directory on sys.path[0], so this resolves from any cwd.
+from tokenize_biolip import (
     _bucket_code,
     _cd_test_pdbs,
     _load_ccd_smiles,
     _parse_biolip_txt,
     _read_needed,
 )
-from pipelines.corpora.tokenize_decoys import _perturb
+from tokenize_decoys import _perturb
+
 from prolit.model.pose_refiner import (
     FEATURE_FIELDS,
     LIG_CHEM_HEADS,
@@ -324,9 +327,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     for s in uniq:
         by_bucket.setdefault(_bucket_code(s[0]), []).append(s)
 
+    import tokenize_biolip as tb  # noqa: PLC0415
     from tqdm import tqdm  # noqa: PLC0415
-
-    import pipelines.corpora.tokenize_biolip as tb  # noqa: PLC0415
 
     n_ok = 0
     for code in tqdm(sorted(by_bucket), desc="buckets"):

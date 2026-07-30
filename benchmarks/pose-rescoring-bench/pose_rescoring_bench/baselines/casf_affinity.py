@@ -8,12 +8,9 @@ them under the same protocol (GPU + the backend's env).
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pandas as pd
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def collect_genscore(baselines_repo: Path) -> pd.DataFrame:
@@ -53,6 +50,6 @@ def rerun_genscore_scoring(
 
 def rerun_boltz_casf(source_repo: Path, extra_args: list[str] | None = None) -> None:
     """Re-run Boltz-2 affinity on CASF via the source repo's script (subprocess)."""
-    script = source_repo / "scripts" / "eval_boltz_casf.py"
+    script = Path(__file__).resolve().parents[2] / "scripts" / "baseline_boltz2.py"
     cmd = ["python", str(script), *(extra_args or [])]
     subprocess.run(cmd, check=True, cwd=str(source_repo))  # noqa: S603

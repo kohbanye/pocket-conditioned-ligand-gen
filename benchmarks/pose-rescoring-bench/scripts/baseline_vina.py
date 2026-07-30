@@ -9,7 +9,7 @@ rescorer, for an apples-to-apples comparison.
 Receptors are converted to pdbqt once with OpenBabel; poses are scored in
 parallel. Run on a many-core CPU node (~28k poses)::
 
-    uv run python scripts/eval_casf_vina.py --workers 40 \
+    uv run python benchmarks/pose-rescoring-bench/scripts/baseline_vina.py --workers 40 \
         --out-csv outputs/casf/vina.csv
 """
 
@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 
 from prolit.chem.docking import parse_score, run, write_xyz
+from prolit.chem.mol2 import parse_mol2_multi
 from prolit.external_tools import tool_default
 
 logging.basicConfig(level=logging.INFO)
@@ -150,9 +151,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     Path(args.tmp_dir).mkdir(parents=True, exist_ok=True)
     args.rec_dir.mkdir(parents=True, exist_ok=True)
 
-    # Sibling module; see the note in generate_ligands_for_target.py.
-    from eval_casf_rescore import _parse_mol2_multi  # noqa: PLC0415
-
     targets = sorted(
         p.name for p in (args.casf_dir / "coreset").iterdir() if p.is_dir()
     )
@@ -195,8 +193,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                     "receptor": str(rec_pdbqt),
                 }
             )
-        # decoys: _parse_mol2_multi returns each pose's atoms directly.
-        for name, d in _parse_mol2_multi(decoys.read_text()):
+        # decoys: parse_mol2_multi returns each pose's atoms directly.
+        for name, d in parse_mol2_multi(decoys.read_text()):
             if name not in rmsd:
                 continue
             els = [a[0] for a in d["atoms"]]

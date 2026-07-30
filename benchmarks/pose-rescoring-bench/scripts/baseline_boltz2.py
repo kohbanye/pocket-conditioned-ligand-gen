@@ -11,7 +11,7 @@ alongside GenScore, our best ensemble, and Vina, with paired significance tests.
 
 Run (CPU, after the array job finishes)::
 
-    uv run python scripts/eval_boltz_casf.py
+    uv run python benchmarks/pose-rescoring-bench/scripts/baseline_boltz2.py
 """
 
 from __future__ import annotations

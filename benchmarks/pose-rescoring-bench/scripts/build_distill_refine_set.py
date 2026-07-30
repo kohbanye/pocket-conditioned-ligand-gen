@@ -30,36 +30,33 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
-
-SOURCE_REPO = Path(__file__).resolve().parents[3]
-SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbdd-bench"
-sys.path.insert(0, str(SOURCE_REPO))
-
-from prolit.config import PocketExtractionConfig  # noqa: E402
-from prolit.model.pose_refiner import (  # noqa: E402
+from prolit.config import PocketExtractionConfig
+from prolit.model.pose_refiner import (
     ligand_feats_from_heads,
     pocket_feats_from_descriptor,
 )
-from prolit.tokenizers.atom import (  # noqa: E402
+from prolit.tokenizers.atom import (
     ProteinAtomDescriptor,
     precompute_receptor_atom_features_from_text,
 )
-from prolit.tokenizers.descriptor_schema import (  # noqa: E402
+from prolit.tokenizers.descriptor_schema import (
     LIGAND_CHARGE_TO_IDX,
     LIGAND_ELEMENT_TO_IDX,
     LIGAND_HYBRID_VOCAB,
     LIGAND_OTHER_IDX,
     LIGAND_RING_NONE_IDX,
 )
-from prolit.tokenizers.protein import (  # noqa: E402
+from prolit.tokenizers.protein import (
     extract_pocket_atoms_from_candidates,
     precompute_pocket_atom_candidates_from_text,
 )
-from rdkit import Chem, RDLogger  # noqa: E402
+from rdkit import Chem, RDLogger
+
+SOURCE_REPO = Path(__file__).resolve().parents[3]
+SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbdd-bench"
 
 RDLogger.DisableLog("rdApp.*")
 

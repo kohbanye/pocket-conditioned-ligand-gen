@@ -42,16 +42,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
+from prolit.chem.obabel import obabel_mol
+from rdkit import Chem, RDLogger
 
 SBDD_BENCH = Path(__file__).resolve().parents[2] / "sbdd-bench"
-sys.path.insert(0, str(SBDD_BENCH))
-
-from rdkit import Chem, RDLogger  # noqa: E402
-from sbdd_bench.molio import obabel_mol  # noqa: E402
 
 RDLogger.DisableLog("rdApp.*")
 

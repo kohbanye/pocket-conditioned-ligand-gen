@@ -35,6 +35,7 @@ coordinates rather than an error.
 
 from __future__ import annotations
 
+from prolit.chem.mol2 import mol_to_dict, parse_mol2_multi
 from prolit.chem.pdb_io import (
     infer_bonds,
     write_full_protein_pdb,
@@ -72,6 +73,7 @@ from prolit.tokenizers.loaders import (
     load_separate_tokenizer,
     load_tokenizer,
 )
+from prolit.tokenizers.pose_encoder import PoseEncoder
 from prolit.tokenizers.protein import (
     PocketAtomData,
     compute_canonical_frame,
@@ -89,6 +91,7 @@ __all__ = [
     "AtomLMVocab",
     "LigandAtomDescriptor",
     "PocketAtomData",
+    "PoseEncoder",
     "ProteinAtomDescriptor",
     "atom_descriptor_to_coords",
     "compute_canonical_frame",
@@ -103,7 +106,9 @@ __all__ = [
     "load_scoring_head",
     "load_separate_tokenizer",
     "load_tokenizer",
+    "mol_to_dict",
     "parse_ligand_pdb_text",
+    "parse_mol2_multi",
     "parse_sdf",
     "parse_sdf_text",
     "precompute_pocket_atom_candidates",

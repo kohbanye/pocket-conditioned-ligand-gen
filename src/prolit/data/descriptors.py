@@ -15,7 +15,9 @@ are forced to mean=0, std=1 so values pass through unchanged.
 
 from __future__ import annotations
 
+import gzip
 import logging
+import tarfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -27,6 +29,8 @@ import numpy as np  # noqa: TC002
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
+
+from prolit.tokenizers.ligand import parse_sdf_text
 
 if TYPE_CHECKING:
     from prolit.config import (
@@ -351,4 +355,34 @@ def collate_molecules(batch: list[Tensor]) -> tuple[Tensor, Tensor]:
 __all__ = [
     "MoleculeDataset",
     "collate_molecules",
+    "read_mol_from_tar",
 ]
+
+
+def read_mol_from_tar(repo_dir: Path, shard_idx: int, pair_idx: int) -> dict | None:
+    """Read one ligand SDF straight from its packed tar shard.
+
+    The CrossDocked ligands are kept as gzipped SDFs inside per-shard tars and
+    are never expanded: several million small files would exhaust the shared
+    filesystem's inodes. Reading a member in place is the only supported access.
+    """
+    tar_path = repo_dir / "ligands" / f"{int(shard_idx):06d}.tar"
+    if not tar_path.exists():
+        return None
+    member = f"{int(pair_idx):07d}.sdf.gz"
+    with tarfile.open(tar_path, "r") as tf:
+        try:
+            info = tf.getmember(member)
+        except KeyError:
+            info = next(
+                (m for m in tf.getmembers() if m.name.rsplit("/", 1)[-1] == member),
+                None,
+            )
+        if info is None:
+            return None
+        fileobj = tf.extractfile(info)
+        if fileobj is None:
+            return None
+        text = gzip.decompress(fileobj.read()).decode("utf-8", "replace")
+    mols = parse_sdf_text(text)
+    return mols[0] if mols else None

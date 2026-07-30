@@ -23,11 +23,26 @@ Paper: *Learning the Language of the Binding Interface* (AAAI 2027 submission).
 src/prolit/        the library — tokenizer, models, datasets. Start at prolit/api.py.
 pipelines/         corpus construction and training (CLIs)
 benchmarks/        one per paper table; see benchmarks/README.md
+scripts/           the ProLIT entry points the benchmarks drive as subprocesses
 jobs/              cluster job submission (the scripts themselves stay local)
-scripts/           evaluation and generation entry points
 third_party/       baseline sources (submodules); patches/ holds our edits to them
 notebooks/         marimo notebooks that produce the paper's figures
 ```
+
+Dependencies only point one way:
+
+```
+pipelines/  ─┐
+benchmarks/ ─┼──>  src/prolit/
+scripts/    ─┘
+```
+
+`prolit` knows nothing about the layers above it, and those three are siblings
+that never import each other — when two of them need the same thing, it belongs
+in `prolit`. `tests/test_layering.py` enforces this, including the subprocess
+edges and a cap on how many entry points `scripts/` may hold; it exists because
+those edges are invisible in review, and every case it checks was a real
+violation before it was written.
 
 Only code is tracked. Trained weights, descriptor caches, token streams,
 per-sample dumps, rendered figures and cluster job scripts are all git-ignored —

@@ -39,12 +39,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pipelines.corpora.tokenize_biolip import (
+# Sibling modules in this directory, imported by bare name: Python puts a
+# script's own directory on sys.path[0], so this resolves from any cwd.
+from tokenize_biolip import (
     _bucket_code,
     _load_ccd_smiles,
     _parse_biolip_txt,
 )
-from pipelines.corpora.tokenize_decoys import _cd_test_pdbs, _RmsdWriter
+from tokenize_decoys import _cd_test_pdbs, _RmsdWriter
+
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.descriptors import collate_molecules
 from prolit.external_tools import tool_default

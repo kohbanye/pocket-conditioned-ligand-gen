@@ -38,11 +38,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pipelines.corpora.tokenize_decoys import _RmsdWriter
+# Sibling modules in this directory, imported by bare name: Python puts a
+# script's own directory on sys.path[0], so this resolves from any cwd.
+from tokenize_decoys import _RmsdWriter
+
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -115,7 +119,6 @@ def main() -> None:  # noqa: PLR0915
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    from scripts.eval_casf_rescore import _PoseEncoder  # noqa: PLC0415
 
     cfg = AtomVQVAETrainingConfig()
     cfg.atom.codebook_size = args.codebook_size
@@ -125,8 +128,8 @@ def main() -> None:  # noqa: PLR0915
     module.eval().to(device)
     norm = torch.load(args.norm_stats, weights_only=False)
     module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
-    enc = _PoseEncoder(
-        module,
+    enc = PoseEncoder(
+        module.vqvae,
         norm["atom_mean"].numpy(),
         norm["atom_std"].numpy(),
         AtomLMVocab(codebook_size=args.codebook_size),

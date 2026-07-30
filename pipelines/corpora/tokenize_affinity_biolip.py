@@ -33,16 +33,20 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pipelines.corpora.tokenize_biolip import (
+# Sibling modules in this directory, imported by bare name: Python puts a
+# script's own directory on sys.path[0], so this resolves from any cwd.
+from tokenize_biolip import (
     _bucket_code,
     _load_ccd_smiles,
     _read_needed,
 )
-from pipelines.corpora.tokenize_decoys import _cd_test_pdbs, _RmsdWriter
+from tokenize_decoys import _cd_test_pdbs, _RmsdWriter
+
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -149,16 +153,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    from scripts.eval_casf_rescore import _PoseEncoder  # noqa: PLC0415
 
     cfg = AtomVQVAETrainingConfig()
     cfg.atom.codebook_size = args.codebook_size
     if args.separate_protein_ckpt is not None:
         # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
         # unified into one code space. Feed RAW descriptors (identity external
-        # norm) via _PoseEncoder -- SeparateVQVAE normalizes per modality
+        # norm) via PoseEncoder -- SeparateVQVAE normalizes per modality
         # internally. Combined single-range AtomLMVocab over 2*codebook_size
-        # codes. _PoseEncoder encodes pocket + ligand in separate (single-
+        # codes. PoseEncoder encodes pocket + ligand in separate (single-
         # modality) encode_batch calls, which SeparateVQVAE requires.
         from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
             ATOM_DESCRIPTOR_DIM,
@@ -186,8 +189,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         mean = norm["atom_mean"].numpy()
         std = norm["atom_std"].numpy()
         vocab = AtomLMVocab(codebook_size=args.codebook_size)
-    enc = _PoseEncoder(
-        module,
+    enc = PoseEncoder(
+        module.vqvae,
         mean,
         std,
         vocab,
@@ -257,7 +260,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     for s in sites:
         by_bucket.setdefault(_bucket_code(s[0]), []).append(s)
 
-    import pipelines.corpora.tokenize_biolip as tb  # noqa: PLC0415
+    import tokenize_biolip as tb  # noqa: PLC0415
 
     tb._w_biolip_dir = args.biolip_dir  # noqa: SLF001
 

@@ -47,20 +47,40 @@ protein 原子と ligand 原子は**同じ codebook**から引く。片方が空
 - Notebooks は **marimo** (`.py` 形式)
 - Lint: Ruff (`select = ["ALL"]`, ignore `D`, `N812`, `COM812`) / 型: ty / テスト: pytest
 
-## Structure
+## Structure とレイヤ規約
 
 ```
-src/prolit/        ライブラリ（副作用なし・argparse なし）。入口は prolit/api.py
-  ├── chem/        RDKit / PDB / 幾何（モダリティ非依存）
-  ├── tokenizers/  descriptor schema, VQ-VAE, vocab, checkpoint loaders
+                  pipelines/  ─┐
+                  benchmarks/ ─┼──→  src/prolit/   （下向きのみ）
+                  scripts/    ─┘
+```
+
+```
+src/prolit/        ライブラリ。argparse も I/O ポリシーも持たない。入口は prolit/api.py
+  ├── chem/        RDKit / PDB / MOL2 / Open Babel / docking / 幾何
+  ├── tokenizers/  descriptor schema, VQ-VAE, vocab, loaders, PoseEncoder
   ├── model/       VQ-VAE / CLM / MLM / scoring head / pose refiner
   └── data/        descriptor cache, token stream, datasets
 pipelines/         コーパス構築 (corpora/) と学習 (train/) の CLI
 benchmarks/        論文の表ごとに 1 つ。common/ が共有レジストリと有意差検定
+scripts/           **ベンチが subprocess で叩く ProLIT 側の入口だけ**を置く
 jobs/              クラスタ投入ツール（lib.sh + submit.py。ジョブ本体は git 管理外）
-scripts/           評価・生成の入口
 third_party/       ベースラインの submodule。patches/ に当てている修正
 ```
+
+**規約（`tests/test_layering.py` が強制する）**:
+
+- `prolit` は上位レイヤを一切知らない。import も subprocess も禁止。
+- `pipelines` / `benchmarks` / `scripts` は**兄弟**で、互いを import しない。
+  2 つが同じものを必要としたら、それは `prolit` に置くもの。
+  実際 `PoseEncoder` / `parse_mol2_multi` / `obabel_mol` / docking ヘルパは
+  この規則で降りてきた（eval スクリプトに住んでいて、corpus builder が import し、
+  ベンチが複製していた）。
+- 同レイヤ内の兄弟 import は**裸のモジュール名**で書く
+  (`from tokenize_biolip import ...`)。`pipelines.` / `scripts.` 接頭辞は
+  リポジトリルートが `sys.path` にある時しか解決せず、cwd 依存になる。
+- `scripts/` は 12 本を上限にテストで縛ってある。増やす前に、
+  再利用可能なら `prolit`、コーパス・学習なら `pipelines/` を検討する。
 
 ## Commands
 

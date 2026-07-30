@@ -1,9 +1,9 @@
 """Shared tokenizer/encoder loading + complex encoding (ported from the source repo).
 
-Ports the ``_PoseEncoder`` recipe from ``scripts/eval_casf_rescore.py`` so pose
-rescoring and affinity inference share one encode path that depends only on the
-source repo's stable library layer. The fixed-pocket trick (encode protein codes
-once per target, ligand codes per pose) is preserved.
+Model loading and the small conversions this benchmark needs on top of it. The
+fixed-pocket encoder itself is :class:`prolit.api.PoseEncoder` -- it used to be
+copied here, which meant two implementations of the recipe that produces the
+docking-power table.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+from prolit.chem.mol2 import mol_to_dict, parse_mol2_multi  # noqa: F401
 from prolit.config import (
     AtomVQVAETrainingConfig,
     ComplexMLMConfig,
@@ -20,22 +21,12 @@ from prolit.config import (
     PocketExtractionConfig,
     RescoreTrainingConfig,
 )
-from prolit.data.descriptors import collate_molecules
 from prolit.data.rescore_dataset import ligand_mask
 from prolit.model.mlm_module import ComplexMLMModule
 from prolit.model.rescore_module import ComplexRescoreModule
 from prolit.model.vqvae_module import AtomVQVAEModule
-from prolit.tokenizers.atom import (
-    LigandAtomDescriptor,
-    ProteinAtomDescriptor,
-    precompute_receptor_atom_features_from_text,
-)
 from prolit.tokenizers.lm_vocab import AtomLMVocab
-from prolit.tokenizers.protein import (
-    compute_canonical_frame,
-    extract_pocket_atoms_from_candidates,
-    precompute_pocket_atom_candidates_from_text,
-)
+from prolit.tokenizers.pose_encoder import PoseEncoder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,48 +34,6 @@ if TYPE_CHECKING:
 
     from pose_rescoring_bench.config import PathsConfig
     from pose_rescoring_bench.variants import AffinityCkpts, RescoringCkpts
-
-
-def mol_to_dict(mol: Any) -> dict | None:  # noqa: ANN401
-    """Convert an RDKit mol (with a conformer) to an ``atoms``/``bonds`` dict."""
-    from rdkit import Chem  # noqa: PLC0415
-
-    try:
-        conf = mol.GetConformer()
-    except ValueError:
-        return None
-    bt = {
-        Chem.BondType.SINGLE: 1,
-        Chem.BondType.DOUBLE: 2,
-        Chem.BondType.TRIPLE: 3,
-        Chem.BondType.AROMATIC: 4,
-    }
-    atoms = []
-    for i, a in enumerate(mol.GetAtoms()):
-        p = conf.GetAtomPosition(i)
-        atoms.append((a.GetSymbol(), p.x, p.y, p.z))
-    bonds = [
-        (b.GetBeginAtomIdx(), b.GetEndAtomIdx(), bt.get(b.GetBondType(), 1))
-        for b in mol.GetBonds()
-    ]
-    return {"atoms": atoms, "bonds": bonds}
-
-
-def parse_mol2_multi(text: str) -> list[tuple[str, dict]]:
-    """(pose_name, mol_dict) for each molecule in a multi-``@<TRIPOS>MOLECULE`` file."""
-    from rdkit import Chem  # noqa: PLC0415
-
-    out: list[tuple[str, dict]] = []
-    for chunk in text.split("@<TRIPOS>MOLECULE")[1:]:
-        block = "@<TRIPOS>MOLECULE" + chunk
-        name = next((ln.strip() for ln in chunk.splitlines() if ln.strip()), "")
-        mol = Chem.MolFromMol2Block(block, sanitize=False, removeHs=False)
-        if mol is None:
-            continue
-        d = mol_to_dict(mol)
-        if d is not None:
-            out.append((name, d))
-    return out
 
 
 def load_vqvae(
@@ -117,7 +66,7 @@ def load_separate_vqvae(  # noqa: PLR0913
     combined vocab (2x that) is passed separately to :func:`make_encoder`. Returns
     ``(sep, identity_mean, identity_std)`` with identity RAW-descriptor stats
     (``np.zeros(33)`` / ``np.ones(33)``): :class:`SeparateVQVAE` normalizes each
-    modality internally, so :class:`ComplexEncoder` must feed it RAW descriptors.
+    modality internally, so :class:`PoseEncoder` must feed it RAW descriptors.
     """
     from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
@@ -237,95 +186,6 @@ def sequence_ligand_mask(seq: Sequence[int]) -> np.ndarray:
     return ligand_mask(np.asarray(seq))
 
 
-class ComplexEncoder:
-    """Fixed-pocket encoder: protein codes once per target, ligand codes per pose."""
-
-    def __init__(  # noqa: PLR0913
-        self,
-        module: AtomVQVAEModule,
-        mean: np.ndarray,
-        std: np.ndarray,
-        vocab: AtomLMVocab,
-        device: torch.device,
-        pocket_cfg: PocketExtractionConfig,
-    ) -> None:
-        self.module = module
-        self.mean = mean
-        self.std = std
-        self.vocab = vocab
-        self.device = device
-        self.pocket_cfg = pocket_cfg
-        self.prot_desc = ProteinAtomDescriptor()
-        self.lig_desc = LigandAtomDescriptor()
-
-    def _encode(self, desc: np.ndarray) -> list[int]:
-        x, mask = collate_molecules(
-            [torch.from_numpy((desc - self.mean) / self.std).float()],
-        )
-        idx = self.module.vqvae.encode_batch(
-            x.to(self.device),
-            mask.to(self.device),
-        ).cpu()
-        return idx[0][mask[0]].tolist()
-
-    def setup_pocket(
-        self,
-        protein_text: str,
-        native_heavy: np.ndarray,
-    ) -> tuple[list[int], Any] | None:
-        """Extract the pocket around a reference ligand -> (protein_codes, frame)."""
-        precomp = precompute_pocket_atom_candidates_from_text(protein_text)
-        pocket = extract_pocket_atoms_from_candidates(
-            precomp,
-            native_heavy,
-            self.pocket_cfg,
-        )
-        if pocket is None or pocket.atom_coords.shape[0] == 0:
-            return None
-        feats = precompute_receptor_atom_features_from_text(protein_text)
-        frame = compute_canonical_frame(pocket.ca_coords.astype(np.float64))
-        prot_desc, _ = self.prot_desc.compute(pocket, feats, frame)
-        if prot_desc.shape[0] == 0:
-            return None
-        return self._encode(prot_desc), frame
-
-    def ligand_seq(
-        self,
-        p_codes: list[int],
-        mol: dict,
-        frame: Any,  # noqa: ANN401  (source-repo pocket frame)
-    ) -> list[int] | None:
-        """Assemble the ``<p>pocket</p><l>ligand</l>`` token sequence for one pose."""
-        lig_desc, _e, _m = self.lig_desc.compute(mol["atoms"], mol["bonds"], frame)
-        if lig_desc.shape[0] == 0:
-            return None
-        return self.vocab.build_sequence(p_codes, self._encode(lig_desc))
-
-    def ligand_seqs_batch(
-        self,
-        p_codes: list[int],
-        mols: list[dict],
-        frame: Any,  # noqa: ANN401  (source-repo pocket frame)
-    ) -> list[list[int] | None]:
-        """Encode many ligand poses in one VQ call (decoy-scoring fast path)."""
-        descs = [self.lig_desc.compute(m["atoms"], m["bonds"], frame)[0] for m in mols]
-        valid = [(i, d) for i, d in enumerate(descs) if d.shape[0] > 0]
-        out: list[list[int] | None] = [None] * len(mols)
-        if not valid:
-            return out
-        tensors = [
-            torch.from_numpy((d - self.mean) / self.std).float() for _, d in valid
-        ]
-        x, mask = collate_molecules(tensors)
-        idx = self.module.vqvae.encode_batch(
-            x.to(self.device),
-            mask.to(self.device),
-        ).cpu()
-        for k, (i, _) in enumerate(valid):
-            out[i] = self.vocab.build_sequence(p_codes, idx[k][mask[k]].tolist())
-        return out
-
-
 def make_encoder(  # noqa: PLR0913
     module: AtomVQVAEModule,
     mean: np.ndarray,
@@ -333,10 +193,10 @@ def make_encoder(  # noqa: PLR0913
     codebook_size: int,
     device: torch.device,
     max_residues: int,
-) -> ComplexEncoder:
-    """Construct a :class:`ComplexEncoder` with the standard vocab + pocket config."""
-    return ComplexEncoder(
-        module,
+) -> PoseEncoder:
+    """Construct a :class:`~prolit.api.PoseEncoder` with the standard vocab + config."""
+    return PoseEncoder(
+        module.vqvae,
         mean,
         std,
         AtomLMVocab(codebook_size=codebook_size),

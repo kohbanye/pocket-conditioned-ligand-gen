@@ -19,7 +19,6 @@ from prolit.model.mlm_score import ligand_pll
 from prolit.tokenizers.ligand import parse_sdf
 
 from pose_rescoring_bench.inference.encode import (
-    ComplexEncoder,
     load_mlm,
     load_rescorer,
     load_tokenizer,
@@ -31,6 +30,8 @@ from pose_rescoring_bench.inference.encode import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from prolit.api import PoseEncoder
 
     from pose_rescoring_bench.config import PathsConfig, RescoringConfig
     from pose_rescoring_bench.variants import RescoringCkpts
@@ -110,7 +111,7 @@ def score_casf(
 def _score_target(  # noqa: PLR0913
     tid: str,
     casf: Path,
-    enc: ComplexEncoder,
+    enc: PoseEncoder,
     mlm: Any,  # noqa: ANN401  (source-repo model)
     mask_id: int,
     rescorer: Any,  # noqa: ANN401  (source-repo head)
@@ -182,7 +183,7 @@ def _score_pose(  # noqa: PLR0913
     tid: str,
     p_codes: list[int],
     frame: Any,  # noqa: ANN401  (source-repo pocket frame)
-    enc: ComplexEncoder,
+    enc: PoseEncoder,
     mlm: Any,  # noqa: ANN401  (source-repo model)
     mask_id: int,
     rescorer: Any,  # noqa: ANN401  (source-repo head)
