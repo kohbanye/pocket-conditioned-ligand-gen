@@ -226,7 +226,12 @@ wget-log
 # Results and artifacts. Only code is tracked: anything a run reproduces --
 # per-sample dumps, summary tables, figures, notebook exports -- stays local.
 # The numbers themselves are recorded in docs/results/.
-results/
+# Scoped to where runs write, so docs/results/ (prose records of what the runs
+# concluded) stays tracked. ``results*`` rather than ``results`` because
+# sbdd-bench also writes results_td_a/, results_diffsbdd/ and friends for
+# one-off baseline reruns.
+/results*/
+benchmarks/*/results*/
 /logs/
 *.out
 *.err
