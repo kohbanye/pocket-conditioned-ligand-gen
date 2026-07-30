@@ -60,8 +60,6 @@ benchmarks/        論文の表ごとに 1 つ。common/ が共有レジスト�
 jobs/              クラスタ投入ツール（lib.sh + submit.py。ジョブ本体は git 管理外）
 scripts/           評価・生成の入口
 third_party/       ベースラインの submodule。patches/ に当てている修正
-docs/results/      凍結した結果記録（数値の出所はここが正）
-docs/notes/        日付つき調査ログ（当時の記録。現在の仕様ではない）
 ```
 
 ## Commands
@@ -84,7 +82,8 @@ uv run ty check src
   `module load cuda` は**書かない**（0.3 秒で exit 0・無出力の無言死を招く。
   torch は CUDA 同梱なのでロード不要）。`jobs/lib.sh` にこの経緯がある。
 - **git に載せるのはコードだけ**。重み・キャッシュ・トークン列・結果 dump・
-  ジョブスクリプトは全て `.gitignore`。数値の結論は `docs/results/` に残す。
+  ジョブスクリプト・`docs/` は全て `.gitignore`（ローカルには残す）。
+  数値の出所は `docs/results/`、調査ログは `docs/notes/` に、重みと同じ機械上で。
 - **サイト固有の絶対パスを書かない**。ルートは `__file__` から導出、外部バイナリ
   (vina / obabel / prepare_receptor) は `prolit.external_tools` が `PATH` と
   環境変数から実行時に解決する。

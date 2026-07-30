@@ -214,8 +214,8 @@ checkpoints/
 wget-log
 
 # Training run directories (checkpoints + wandb metadata). Their paths are quoted
-# verbatim in docs/results/ and benchmarks/variants.py, so they stay where they
-# are rather than moving under runs/.
+# verbatim in the shared arm registry, so they stay where they are rather than
+# moving under runs/.
 /pocket-ligand-vqvae/
 /pocket-ligand-lm/
 /pocket-ligand-mlm/
@@ -225,13 +225,14 @@ wget-log
 
 # Results and artifacts. Only code is tracked: anything a run reproduces --
 # per-sample dumps, summary tables, figures, notebook exports -- stays local.
-# The numbers themselves are recorded in docs/results/.
-# Scoped to where runs write, so docs/results/ (prose records of what the runs
-# concluded) stays tracked. ``results*`` rather than ``results`` because
-# sbdd-bench also writes results_td_a/, results_diffsbdd/ and friends for
-# one-off baseline reruns.
+# ``results*`` rather than ``results`` because sbdd-bench also writes
+# results_td_a/, results_diffsbdd/ and friends for one-off baseline reruns.
 /results*/
 benchmarks/*/results*/
+
+# Notes, frozen result records and figure sources. They describe artifacts that
+# are themselves local (weights, caches, dumps), so they live beside them.
+/docs/
 
 # Cluster job scripts: what to run is in pipelines/, how to submit it is
 # site-specific. jobs/submit.py generates them; the generated and previously-run

@@ -10,7 +10,7 @@
 # ///
 """Paper figure/table: all-atom pose rescoring (CASF-2016 docking power).
 
-Our model (see docs/results/best_allatom_configs.md):
+Our model (recorded in docs/results/best_allatom_configs.md, kept locally):
   MLM backbone j90rlrgm + RMSD-regression heads (v2 mean / v6 meanmax / v7 attn),
   optionally z-sum fused with the classical Vina score.
 Metric: docking power = fraction of targets whose top-scored decoy is within a

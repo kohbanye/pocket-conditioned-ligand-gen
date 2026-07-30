@@ -54,8 +54,9 @@ uv run python benchmarks/pose-rescoring-bench/scripts/make_figures.py
 `results/` is git-ignored: only code is tracked, and anything a run reproduces
 stays local. The reproduction tests assert that the analysis layer still
 produces the published numbers from whatever dumps are present, and skip when
-they are not — so a fresh clone runs green with them skipped. The numbers
-themselves are recorded in `docs/results/`.
+they are not — so a fresh clone runs green with them skipped. Which checkpoint
+produced which published number is recorded in `docs/results/`, which is
+untracked and lives beside the checkpoints.
 
 One test is an expected failure rather than a skip: no TargetDiff dump anywhere
 reproduces the generation table's -4.76 (see

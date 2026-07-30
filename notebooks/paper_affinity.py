@@ -10,7 +10,7 @@
 # ///
 """Paper figure/table: all-atom affinity head (CASF-2016 scoring & ranking power).
 
-Our model (see docs/results/best_allatom_configs.md):
+Our model (recorded in docs/results/best_allatom_configs.md, kept locally):
   leak-free MLM backbone wxlhgqx3 + pK-regression heads. Best number = a fixed
   5-head ensemble (no test-set selection). Scoring power = Pearson R of predicted
   vs experimental pKa over 285 complexes; ranking power = mean within-cluster

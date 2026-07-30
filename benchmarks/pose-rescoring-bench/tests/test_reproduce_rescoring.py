@@ -1,6 +1,6 @@
 """Reproduce the source repo's CASF pose docking-power table from copied dumps.
 
-Targets = ``docs/results/comparison_tables.md`` (decoys-only, shared 284-target set).
+Targets = the published docking-power table (decoys-only, shared 284-target set).
 Confirms orient/docking_power/ranking_rho/zsum reproduce every published row.
 """
 

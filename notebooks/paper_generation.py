@@ -11,7 +11,7 @@
 # ///
 """Paper figure/table: all-atom generation vs SBDD baselines (Vina & quality).
 
-Best all-atom generation config (see docs/results/best_allatom_configs.md):
+Best all-atom generation config (recorded in docs/results/best_allatom_configs.md, kept locally):
   placement LM p6lpk7br + refiner refine_atom_bond_v1 + sampling temperature 0.85.
 Targets 2ity/1iep/3pbl, 150 samples each. Baselines from sbdd-bench official run.
 """

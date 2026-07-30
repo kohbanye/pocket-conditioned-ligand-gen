@@ -26,15 +26,15 @@ benchmarks/        one per paper table; see benchmarks/README.md
 jobs/              cluster job submission (the scripts themselves stay local)
 scripts/           evaluation and generation entry points
 third_party/       baseline sources (submodules); patches/ holds our edits to them
-docs/              frozen result records and dated investigation notes
 notebooks/         marimo notebooks that produce the paper's figures
 ```
 
 Only code is tracked. Trained weights, descriptor caches, token streams,
 per-sample dumps, rendered figures and cluster job scripts are all git-ignored —
 they are either outputs of the pipelines above or properties of one machine, and
-they stay where they were produced. What the runs *concluded* is written down in
-`docs/results/`, which is the authority when a number is in question.
+they stay where they were produced. Notes and the frozen records of what each
+run concluded live beside them under `docs/`, also untracked — this repository
+carries the code that produces results, not the results or the writeups.
 
 Nothing tracked here hardcodes a path on our cluster. Roots are derived from the
 file's own location, external binaries (AutoDock Vina, Open Babel, ADFRsuite's
@@ -70,9 +70,10 @@ internal. A checkpoint and its `normalization_stats.pt` must always travel
 together — the wrong pairing produces plausible but mis-scaled coordinates
 rather than an error.
 
-Which checkpoints correspond to which paper numbers is recorded in
-`docs/results/best_allatom_configs.md`, and which weights each tokenizer arm
-means is defined once in `benchmarks/common/src/prolit_bench/variants.py`.
+Which weights each tokenizer arm means is defined once, in
+`benchmarks/common/src/prolit_bench/variants.py`. Which checkpoint produced
+which published number is recorded in `docs/results/` alongside the checkpoints
+themselves, on the machine that trained them.
 
 ## Training
 
