@@ -94,6 +94,13 @@ uv run ty check src
 `benchmarks/recon-bench` だけは別環境（ESM3 が fork 版 transformers を要求するため）。
 `cd benchmarks/recon-bench && uv sync` で個別に。
 
+この 3 つを CI（`.github/workflows/ci.yml`）が push / PR ごとに回す。
+インストールは `uv sync --all-packages --frozen` で、**`uv.lock` が
+`pyproject.toml` とずれていたら落ちる**（依存を足して lock し直さないと、
+CI とクラスタで別のバージョンが入り、数値が出るのはクラスタ側だけになる）。
+重みと結果 dump は git に無いので、表を再現するテストは CI では skip し、
+理由を出力する（`-ra`）。
+
 ## Conventions
 
 - **学習・トークン化は `.venv/bin/python` を直叩き**。`uv run` は毎回 editable install を

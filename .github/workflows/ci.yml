@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a branch makes the previous run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: lint, types, tests
+    runs-on: ubuntu-latest
+    # Cold cache installs torch and rdkit; warm it is about a minute.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --frozen installs the lockfile rather than re-resolving, and fails if
+      # uv.lock no longer matches pyproject.toml. That check is the point: a
+      # dependency added without re-locking would install one set of versions
+      # here and another on the cluster, and only the cluster's numbers get
+      # reported.
+      #
+      # --all-packages covers the workspace: the library, and the benchmarks
+      # that share its environment. benchmarks/recon-bench is deliberately not a
+      # member (ESM3 pins a fork of transformers that would downgrade the one
+      # the language models are built on -- see pyproject.toml), so it is not
+      # installed here. Its source is still linted, since ruff runs over the
+      # whole tree.
+      - name: Install
+        run: uv sync --all-packages --frozen
+
+      # Each check runs even if an earlier one failed, so one run reports every
+      # problem instead of revealing them one push at a time.
+      - name: Lint
+        if: ${{ !cancelled() }}
+        run: uv run --frozen ruff check .
+
+      - name: Types
+        if: ${{ !cancelled() }}
+        run: uv run --frozen ty check src
+
+      # -ra lists what was skipped and why. Weights, caches and result dumps are
+      # not in git by policy, so the tests that reproduce a published table skip
+      # here -- that is expected, but it should be stated rather than hidden
+      # behind a green tick.
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: uv run --frozen pytest -q -ra
