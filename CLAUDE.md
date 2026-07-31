@@ -13,9 +13,26 @@
 | 層 | 実体 |
 |---|---|
 | **トークナイザ (本流)** | joint all-atom VQ-VAE。33-D per-atom descriptor、単一 codebook 8192 (vocab 8199) |
-| **トークナイザ (ablation)** | separate = protein 専用 VQ + ligand 専用 VQ を 1 code space に連結 |
+| **トークナイザ (ablation)** | separate = protein 専用 VQ + ligand 専用 VQ (各 4096) を 1 code space に連結。joint と総 codebook サイズ・LM 語彙が一致 |
 | **ProLIT-MLM** | encoder-only 複合体 MLM (~99M)。pose rescoring / affinity head の backbone |
 | **ProLIT-CLM** | Qwen3 系 causal LM (~298M) + e3nn flow-matching pose refiner。生成 |
+
+**論文の名前がコードの名前**。新しく名前を付けるときはこの対応を崩さない:
+
+| 論文 | コード |
+|---|---|
+| ProLIT | `TransformerVQVAE` / arm `joint` |
+| ProLIT (separate tokenizers) | `SeparateVQVAE` / arm `separate` |
+| ProLIT-MLM | `ProLITMLM`, `ProLITMLMModule`, `ProLITMLMConfig` (`model/mlm.py`) |
+| ProLIT-CLM | `ProLITCLMModule`, `ProLITCLMConfig`, `CLMTrainingConfig` (`model/clm.py`) |
+| refiner | `PoseRefinerNet` / `PoseRefinerModule` |
+
+**config dataclass の改名は checkpoint を壊す。** Lightning は config の
+*インスタンス*を `hyper_parameters` に pickle し、pickle はクラスを
+(モジュールパス, クラス名) で記録する。改名するなら `prolit/config.py` の末尾に
+`旧名 = 新名` の別名を必ず残す（`tests/test_legacy_checkpoint_path.py` が固定）。
+`nn.Module` / `LightningModule` のクラス名とファイル名は pickle されないので安全。
+逆に**属性名**（`self.model` 等）は state_dict のキーなので変えてはいけない。
 
 ### トークン列
 
@@ -139,7 +156,7 @@ archive の 125 本のうち 22 本は `--pooling` の値しか違わなかっ�
 ```sh
 python jobs/submit.py --name aff --resource gpu_1 --hours 8 \
     --sweep pooling=mean,attn,meanmax -- \
-    pipelines/train/head.py --pooling '{pooling}'
+    pipelines/train/scoring_head.py --pooling '{pooling}'
 ```
 
 コマンド中の `{key}` が各値に置換され、点ごとに 1 本生成される

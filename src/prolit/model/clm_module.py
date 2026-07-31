@@ -9,13 +9,13 @@ import torch
 from torch import Tensor, nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
-from prolit.data.lm_dataset import PAD_SEGMENT
-from prolit.model.ligand_lm import build_qwen3_lm, count_parameters
+from prolit.data.clm_dataset import PAD_SEGMENT
+from prolit.model.clm import build_qwen3_lm, count_parameters
 
 if TYPE_CHECKING:
     from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
 
-    from prolit.config import LMTrainingConfig
+    from prolit.config import CLMTrainingConfig
 
 
 def build_block_diagonal_mask(segment_ids: Tensor, dtype: torch.dtype) -> Tensor:
@@ -44,12 +44,12 @@ def build_block_diagonal_mask(segment_ids: Tensor, dtype: torch.dtype) -> Tensor
     return mask
 
 
-class LigandLMModule(L.LightningModule):
+class ProLITCLMModule(L.LightningModule):
     """Trains a dense Qwen3 LM on packed VQ-VAE token blocks (loss on all tokens)."""
 
-    def __init__(self, config: LMTrainingConfig) -> None:
+    def __init__(self, config: CLMTrainingConfig) -> None:
         super().__init__()
-        self.config: LMTrainingConfig = config
+        self.config: CLMTrainingConfig = config
         self.save_hyperparameters()
         self.model = build_qwen3_lm(config.model)
         self._logged_param_count: bool = False
@@ -133,4 +133,4 @@ class LigandLMModule(L.LightningModule):
 
 
 # Re-export so callers can build masks without importing the dataset module.
-__all__ = ["PAD_SEGMENT", "LigandLMModule", "build_block_diagonal_mask"]
+__all__ = ["PAD_SEGMENT", "ProLITCLMModule", "build_block_diagonal_mask"]

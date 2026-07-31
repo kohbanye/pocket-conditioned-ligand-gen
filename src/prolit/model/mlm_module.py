@@ -1,9 +1,10 @@
 """LightningModule for from-scratch training of the complex-token MLM.
 
-Wraps the ESM masked-LM (:func:`prolit.model.complex_mlm.build_esm_mlm`) with a
+Wraps the ESM-style masked LM (:func:`prolit.model.mlm.build_prolit_mlm`) with a
 BERT-style masked-token objective. Loss and metrics are computed over the
 masked positions only (``labels != IGNORE_INDEX``); the rest of the sequence is
-context. The optimizer/schedule mirrors :class:`~prolit.model.lm_module.LigandLMModule`.
+context. The optimizer/schedule mirrors
+:class:`~prolit.model.clm_module.ProLITCLMModule`.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from torch import Tensor
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from prolit.data.mlm_dataset import IGNORE_INDEX
-from prolit.model.complex_mlm import build_complex_mlm, count_parameters
+from prolit.model.mlm import build_prolit_mlm, count_parameters
 
 if TYPE_CHECKING:
     from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
@@ -24,14 +25,14 @@ if TYPE_CHECKING:
     from prolit.config import MLMTrainingConfig
 
 
-class ComplexMLMModule(L.LightningModule):
+class ProLITMLMModule(L.LightningModule):
     """Trains a bidirectional ESM MLM on per-complex VQ-VAE token sequences."""
 
     def __init__(self, config: MLMTrainingConfig) -> None:
         super().__init__()
         self.config: MLMTrainingConfig = config
         self.save_hyperparameters()
-        self.model = build_complex_mlm(config.model)
+        self.model = build_prolit_mlm(config.model)
         self._logged_param_count: bool = False
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
@@ -108,4 +109,4 @@ class ComplexMLMModule(L.LightningModule):
         }
 
 
-__all__ = ["ComplexMLMModule"]
+__all__ = ["ProLITMLMModule"]

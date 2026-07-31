@@ -18,7 +18,7 @@ import torch
 
 from prolit.config import (
     AtomVQVAETrainingConfig,
-    LMTrainingConfig,
+    CLMTrainingConfig,
     MLMTrainingConfig,
     PoseRefineTrainingConfig,
     RescoreTrainingConfig,
@@ -135,7 +135,7 @@ def test_training_configs_record_their_seed() -> None:
     """The seed belongs in the checkpoint, so a run can say what produced it."""
     for cls in (
         AtomVQVAETrainingConfig,
-        LMTrainingConfig,
+        CLMTrainingConfig,
         MLMTrainingConfig,
         RescoreTrainingConfig,
         PoseRefineTrainingConfig,

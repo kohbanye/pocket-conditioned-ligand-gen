@@ -1,7 +1,7 @@
 """Dense Qwen3 decoder builder for the pocket-conditioned ligand LM.
 
 Builds a randomly-initialized ``Qwen3ForCausalLM`` (full attention, GQA,
-RMSNorm, SwiGLU, RoPE, QK-Norm) sized from :class:`~prolit.config.LigandLMConfig`.
+RMSNorm, SwiGLU, RoPE, QK-Norm) sized from :class:`~prolit.config.ProLITCLMConfig`.
 This is a from-scratch model — no pretrained weights are loaded.
 """
 
@@ -14,10 +14,10 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from prolit.tokenizers.lm_vocab import BOS_ID, EOS_ID, PAD_ID
 
 if TYPE_CHECKING:
-    from prolit.config import LigandLMConfig
+    from prolit.config import ProLITCLMConfig
 
 
-def build_qwen3_config(cfg: LigandLMConfig) -> Qwen3Config:
+def build_qwen3_config(cfg: ProLITCLMConfig) -> Qwen3Config:
     return Qwen3Config(
         vocab_size=cfg.vocab_size,
         hidden_size=cfg.hidden_size,
@@ -43,7 +43,7 @@ def build_qwen3_config(cfg: LigandLMConfig) -> Qwen3Config:
     )
 
 
-def build_qwen3_lm(cfg: LigandLMConfig) -> Qwen3ForCausalLM:
+def build_qwen3_lm(cfg: ProLITCLMConfig) -> Qwen3ForCausalLM:
     """Construct a randomly-initialized Qwen3 causal LM from scratch."""
     hf_config = build_qwen3_config(cfg)
     return Qwen3ForCausalLM._from_config(  # noqa: SLF001

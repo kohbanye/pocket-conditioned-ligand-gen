@@ -20,8 +20,8 @@ training sequence for one complex is::
 
     <bos> <p> P.. </p> <l> L.. </l> <eos>
 
-Only ``<p>...</p><l>...</l>`` is modelled (the ``<s>`` protein-sequence block
-from :mod:`prolit.tokenizers.sequence` is intentionally excluded for now).
+Only ``<p>...</p><l>...</l>`` is modelled; a ``<s>`` protein-sequence block
+is reserved in the vocabulary but nothing emits one.
 """
 
 from __future__ import annotations

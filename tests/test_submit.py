@@ -146,7 +146,7 @@ def test_a_sweep_writes_one_script_per_point(
         tmp_path, monkeypatch,
         "--name", "aff", "--resource", "gpu_1", "--hours", "8",
         "--sweep", "pooling=mean,attn,meanmax",
-        "--", "pipelines/train/head.py", "--pooling", "{pooling}",
+        "--", "pipelines/train/scoring_head.py", "--pooling", "{pooling}",
     )
     assert [p.name for p in written] == [
         "aff_pooling-attn.sh", "aff_pooling-mean.sh", "aff_pooling-meanmax.sh",

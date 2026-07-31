@@ -105,7 +105,7 @@ python pipelines/corpora/tokenize_crossdocked.py --ckpt <vqvae> --out-dir data/l
 python pipelines/train/vqvae.py    # the tokenizer
 python pipelines/train/clm.py      # ProLIT-CLM
 python pipelines/train/mlm.py      # ProLIT-MLM
-python pipelines/train/head.py     # a pose-rescoring or affinity head
+python pipelines/train/scoring_head.py     # a pose-rescoring or affinity head
 python pipelines/train/refiner.py  # the pose refiner
 ```
 

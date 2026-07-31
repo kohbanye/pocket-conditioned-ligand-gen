@@ -1,13 +1,13 @@
 """Low-inode all-atom descriptor prep: stream ligand tars, all-heavy-atom pockets.
 
-All-atom counterpart of :mod:`prolit.data.tar_prep`. For each ligand pose it builds
-the 33-D unified atom descriptor for BOTH the ligand atoms and every heavy atom
-of the pocket residues (Full ligand-parity chemistry via one RDKit receptor
-parse per receptor), and writes the ``data/descriptor_cache_allatom`` shard
-cache. Optionally keeps only ``label == 1`` (native-like) poses.
+For each ligand pose it builds the 33-D unified atom descriptor for BOTH the
+ligand atoms and every heavy atom of the pocket residues (full ligand-parity
+chemistry via one RDKit receptor parse per receptor), and writes the
+``data/descriptor_cache_allatom`` shard cache. Optionally keeps only
+``label == 1`` (native-like) poses.
 
-Like ``tar_prep``, ligands are read straight from ``ligands/{shard:06d}.tar`` so
-the only files on disk are the ~35 tars, the receptor PDBs, and the shards.
+Ligands are read straight from ``ligands/{shard:06d}.tar`` so the only files on
+disk are the ~35 tars, the receptor PDBs, and the shards.
 """
 
 from __future__ import annotations

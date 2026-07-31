@@ -1,7 +1,7 @@
 """Shared on-disk format for packed LM token streams.
 
 Every corpus builder under ``pipelines/corpora/`` emits the same layout that
-:class:`~prolit.data.lm_dataset.PackedTokenDataset` reads back:
+:class:`~prolit.data.clm_dataset.PackedTokenDataset` reads back:
 
     {split}.bin   uint16   all sequences concatenated end to end
     {split}.len   uint16   per-sequence token counts (cumsum -> doc offsets)
