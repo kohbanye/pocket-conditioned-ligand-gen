@@ -27,7 +27,10 @@ def build_qwen3_config(cfg: LigandLMConfig) -> Qwen3Config:
         num_key_value_heads=cfg.num_key_value_heads,
         head_dim=cfg.head_dim,
         max_position_embeddings=cfg.max_position_embeddings,
-        rope_theta=cfg.rope_theta,
+        rope_parameters={  # ty: ignore[missing-typed-dict-key]
+            "rope_type": "default",
+            "rope_theta": cfg.rope_theta,
+        },
         rms_norm_eps=cfg.rms_norm_eps,
         hidden_act=cfg.hidden_act,
         attention_bias=cfg.attention_bias,

@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 IGNORE_INDEX = -100
 
 
-class MLMTokenDataset(Dataset):
+class MLMTokenDataset(Dataset[dict[str, Tensor]]):
     """Yields one complex per item with BERT-style masked inputs + labels."""
 
     def __init__(  # noqa: PLR0913
@@ -98,12 +98,12 @@ class MLMTokenDataset(Dataset):
         """Advance the masking schedule (see the note in ``__init__``)."""
         self.epoch = epoch
 
-    def __getitem__(self, idx: int) -> dict[str, Tensor]:
+    def __getitem__(self, index: int) -> dict[str, Tensor]:
         rng = np.random.default_rng(
-            derive_seed(self.seed, f"mlm-mask:{self.epoch}:{idx}")
+            derive_seed(self.seed, f"mlm-mask:{self.epoch}:{index}")
         )
-        s = int(self.doc_offsets[idx])
-        e = int(self.doc_offsets[idx + 1])
+        s = int(self.doc_offsets[index])
+        e = int(self.doc_offsets[index + 1])
         e = min(e, s + self.block_size)
         arr = np.asarray(self.tokens[s:e], dtype=np.int64)
         n = arr.shape[0]
@@ -200,7 +200,9 @@ class MLMTokenDataModule(L.LightningDataModule):
             # worker (torch seeds only its own RNG in workers).
             generator=torch_generator(self._seed, "mlm-shuffle"),
             worker_init_fn=worker_init_fn,
-            collate_fn=collate_mlm,
+            # torch types collate_fn as Callable[[list[_T]], Any] with _T
+            # bound by nothing, so no function satisfies it.
+            collate_fn=collate_mlm,  # ty: ignore[invalid-argument-type]
         )
 
     def train_dataloader(self) -> DataLoader:

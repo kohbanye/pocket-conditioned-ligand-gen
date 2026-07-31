@@ -31,6 +31,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import PoseRefinerConfig, PoseRefineTrainingConfig
 from prolit.data.pose_refine_dataset import PoseRefineDataModule
 from prolit.model.pose_refiner import PoseRefinerModule
+from prolit.provenance import RecordProvenance
 from prolit.seeding import add_seed_argument, seed_from_args
 
 logging.basicConfig(level=logging.INFO)
@@ -125,6 +126,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         else None
     )
     callbacks: list = [
+        # Writes run.json beside the checkpoints: command, git SHA, seed.
+        RecordProvenance(seed=args.seed),
         ModelCheckpoint(
             dirpath=ckpt_dir,
             monitor="val/rmsd_refined",

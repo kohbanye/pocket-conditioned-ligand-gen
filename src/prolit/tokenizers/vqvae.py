@@ -16,6 +16,7 @@ codebook indices directly without needing element-prefixed tokens.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn.functional as F
@@ -37,6 +38,11 @@ from prolit.tokenizers.geometry import (
     sinusoidal_positional_encoding,
     spherical_to_cartesian_batched,
 )
+
+if TYPE_CHECKING:
+    # The live config. TransformerVQVAEConfig below is the shape older
+    # checkpoints were trained with, and is kept so they still load.
+    from prolit.config import AtomVQVAEConfig
 
 
 @dataclass
@@ -64,9 +70,15 @@ class TransformerVQVAEConfig:
 class TransformerVQVAE(nn.Module):
     """Transformer VQ-VAE with mixed-feature input + multi-head reconstruction."""
 
-    def __init__(self, config: TransformerVQVAEConfig) -> None:
+    # Registered as buffers below; ``register_buffer`` is invisible to a type
+    # checker, so declare them the way torch's own modules do.
+    pos_encoding: Tensor
+    _desc_mean: Tensor
+    _desc_std: Tensor
+
+    def __init__(self, config: TransformerVQVAEConfig | AtomVQVAEConfig) -> None:
         super().__init__()
-        self.config = config
+        self.config: TransformerVQVAEConfig | AtomVQVAEConfig = config
         if config.domain != "atom":
             msg = f"Unknown domain: {config.domain!r} (only 'atom' is supported)"
             raise ValueError(msg)
@@ -195,7 +207,7 @@ class TransformerVQVAE(nn.Module):
         self,
         x: Tensor,
         mask: Tensor | None = None,
-    ) -> dict[str, Tensor]:
+    ) -> dict[str, Any]:
         """Forward pass.
 
         Args:
@@ -468,5 +480,5 @@ class TransformerVQVAE(nn.Module):
 
         # Aggregate (sum without weighting; module-level recon_weights are
         # applied in the training step).
-        recon_loss = sum(head_losses.values()) if head_losses else x.new_zeros(())
+        recon_loss = sum(head_losses.values(), start=x.new_zeros(()))
         return recon_loss, head_losses, diag

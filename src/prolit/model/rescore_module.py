@@ -21,6 +21,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from prolit.model.complex_mlm import build_complex_mlm, count_parameters
 
 if TYPE_CHECKING:
+    from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
+
     from prolit.config import RescoreTrainingConfig
 
 logger = logging.getLogger(__name__)
@@ -33,7 +35,7 @@ class ComplexRescoreModule(L.LightningModule):
         self, config: RescoreTrainingConfig, mlm_state: dict | None = None
     ) -> None:
         super().__init__()
-        self.config = config
+        self.config: RescoreTrainingConfig = config
         self.save_hyperparameters(ignore=["mlm_state"])
         self.encoder = build_complex_mlm(config.model)
         if mlm_state is not None:
@@ -46,7 +48,7 @@ class ComplexRescoreModule(L.LightningModule):
             miss, unexp = self.encoder.load_state_dict(enc_state, strict=False)
             logger.info("warm-start: %d missing, %d unexpected", len(miss), len(unexp))
         h = config.model.hidden_size
-        self.pooling = config.pooling
+        self.pooling: str = config.pooling
         # meanmax and xattn concatenate a second pooled vector with the ligand
         # mean, so the head sees 2H; mean/attn produce a single H vector.
         in_dim = 2 * h if self.pooling in ("meanmax", "xattn") else h
@@ -65,7 +67,7 @@ class ComplexRescoreModule(L.LightningModule):
             # channels and sum over pairs -- the explicit sum-over-contacts
             # inductive bias the pooled readouts lack. The C-dim interaction
             # vector is concatenated with the ligand mean.
-            self.pair_heads = config.pair_heads
+            self.pair_heads: int = config.pair_heads
             self.pair_q = nn.Linear(h, h)
             self.pair_k = nn.Linear(h, h)
             in_dim = h + self.pair_heads
@@ -85,15 +87,17 @@ class ComplexRescoreModule(L.LightningModule):
                 batch_first=True,
                 norm_first=True,
             )
-            self.interaction = nn.TransformerEncoder(layer, num_layers=n_int)
+            self.interaction: nn.TransformerEncoder | None = nn.TransformerEncoder(
+                layer, num_layers=n_int
+            )
         else:
-            self.interaction = None
+            self.interaction: nn.TransformerEncoder | None = None
         # Dense auxiliary supervision: predict how far each ligand atom sits from
         # its native position. One RMSD scalar says only "this pose is wrong";
         # ~30 per-atom labels say WHICH atoms are wrong, which is the same
         # quantity the pose score aggregates and gives the interface a per-atom
         # error signal instead of a single pooled one.
-        self.atom_head = (
+        self.atom_head: nn.Linear | None = (
             nn.Linear(h, 1) if config.atom_aux_weight > 0 else None
         )
         self.head = nn.Sequential(
@@ -112,7 +116,7 @@ class ComplexRescoreModule(L.LightningModule):
             self.encoder.eval()
             for p in self.encoder.parameters():
                 p.requires_grad = False
-        self._logged = False
+        self._logged: bool = False
 
     def _pool(self, hs: Tensor, batch: dict[str, Tensor]) -> Tensor:
         """Collapse the (B, L, H) encoder states to one (B, in_dim) vector over
@@ -187,7 +191,7 @@ class ComplexRescoreModule(L.LightningModule):
     def on_fit_start(self) -> None:
         if not self._logged:
             self.print(f"Rescorer parameters: {count_parameters(self) / 1e6:.1f}M")
-            self._logged = True
+            self._logged: bool = True
 
     def _ranking_loss(self, pred: Tensor, rmsd: Tensor, groups: Tensor) -> Tensor:
         """Pairwise margin loss within each complex: for poses i,j with
@@ -305,7 +309,7 @@ class ComplexRescoreModule(L.LightningModule):
     def validation_step(self, batch: dict[str, Tensor], batch_idx: int) -> None:  # noqa: ARG002
         self._step(batch, "val")
 
-    def configure_optimizers(self) -> dict:
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         decay, no_decay = [], []
         for param in self.parameters():
             if not param.requires_grad:

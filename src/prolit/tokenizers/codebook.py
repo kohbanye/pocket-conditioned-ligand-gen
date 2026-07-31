@@ -4,6 +4,24 @@ import torch
 from torch import Tensor, nn
 
 
+def _all_reduce_sum(*tensors: Tensor) -> None:
+    """Sum each tensor across ranks, in place. A no-op in a single process.
+
+    ``torch.distributed``'s members exist only when torch was built with
+    distributed support, which is why they are reached through the guard rather
+    than imported -- and why a type checker cannot see that the guard is what
+    makes the calls safe.
+    """
+    dist = torch.distributed
+    if not dist.is_available():  # ty: ignore[possibly-missing-attribute]
+        return
+    if not dist.is_initialized():  # ty: ignore[possibly-missing-attribute]
+        return
+    op = dist.ReduceOp.SUM  # ty: ignore[possibly-missing-attribute]
+    for tensor in tensors:
+        dist.all_reduce(tensor, op=op)  # ty: ignore[possibly-missing-attribute]
+
+
 class EMACodebook(nn.Module):
     """Exponential Moving Average codebook for vector quantization.
 
@@ -11,6 +29,13 @@ class EMACodebook(nn.Module):
     Uses straight-through estimator for gradient propagation.
     Includes dead-code restart to prevent codebook collapse.
     """
+
+    # Registered as buffers below. ``register_buffer`` is invisible to a type
+    # checker, which then falls back to ``Module.__getattr__`` and calls these
+    # ``Tensor | Module``; declaring them is how torch's own modules do it.
+    embedding: Tensor
+    ema_cluster_size: Tensor
+    ema_embedding_sum: Tensor
 
     def __init__(
         self,
@@ -21,11 +46,11 @@ class EMACodebook(nn.Module):
         dead_code_threshold: float = 0.1,
     ) -> None:
         super().__init__()
-        self.num_codes = num_codes
-        self.code_dim = code_dim
-        self.ema_decay = ema_decay
-        self.commitment_cost = commitment_cost
-        self.dead_code_threshold = dead_code_threshold
+        self.num_codes: int = num_codes
+        self.code_dim: int = code_dim
+        self.ema_decay: float = ema_decay
+        self.commitment_cost: float = commitment_cost
+        self.dead_code_threshold: float = dead_code_threshold
 
         embedding = torch.randn(num_codes, code_dim)
         self.register_buffer("embedding", embedding)
@@ -97,13 +122,7 @@ class EMACodebook(nn.Module):
         batch_cluster_size = one_hot.sum(dim=0)
         batch_embedding_sum = one_hot.t() @ z
 
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.all_reduce(
-                batch_cluster_size, op=torch.distributed.ReduceOp.SUM
-            )
-            torch.distributed.all_reduce(
-                batch_embedding_sum, op=torch.distributed.ReduceOp.SUM
-            )
+        _all_reduce_sum(batch_cluster_size, batch_embedding_sum)
 
         # Update cluster sizes
         self.ema_cluster_size.mul_(self.ema_decay).add_(

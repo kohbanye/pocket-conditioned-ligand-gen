@@ -1,5 +1,7 @@
 # ProLIT — a structural tokenizer for 3D protein–ligand complexes
 
+[![CI](https://github.com/kohbanye/pocket-conditioned-ligand-gen/actions/workflows/ci.yml/badge.svg)](https://github.com/kohbanye/pocket-conditioned-ligand-gen/actions/workflows/ci.yml)
+
 Protein–ligand complexes encode the interactions that matter in drug discovery,
 but existing structure tokenizers represent proteins and ligands separately.
 **ProLIT** (Protein–Ligand Interface Tokenizer) encodes pocket residues and
@@ -138,6 +140,12 @@ uv run pytest          # library, pipelines and in-workspace benchmarks
 uv run ruff check .
 uv run ty check src
 ```
+
+CI runs exactly these three on every push and pull request
+(`.github/workflows/ci.yml`), against `uv.lock` rather than a fresh resolve, so
+a dependency added without re-locking fails there rather than on the cluster.
+The tests that reproduce a published table skip in CI and say so: weights and
+result dumps are not in git.
 
 Conventions: dataclass configs in `prolit/config.py` (no Hydra, despite what
 older notes say), `LightningModule` / `LightningDataModule` for models and data,

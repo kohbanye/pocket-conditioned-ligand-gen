@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import lightning as L
 import torch
@@ -12,6 +12,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from prolit.tokenizers.vqvae import TransformerVQVAE
 
 if TYPE_CHECKING:
+    from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
+
     from prolit.config import (
         AtomVQVAETrainingConfig,
     )
@@ -28,10 +30,10 @@ class AtomVQVAEModule(L.LightningModule):
 
     def __init__(self, config: AtomVQVAETrainingConfig) -> None:
         super().__init__()
-        self.config = config
+        self.config: AtomVQVAETrainingConfig = config
         self.save_hyperparameters()
         self.vqvae = TransformerVQVAE(config.atom)
-        self.automatic_optimization = False
+        self.automatic_optimization: bool = False
 
     def on_fit_start(self) -> None:
         self._inject_normalization_stats()
@@ -50,7 +52,7 @@ class AtomVQVAEModule(L.LightningModule):
 
     @staticmethod
     def _combine_losses(
-        out: dict[str, Tensor],
+        out: dict[str, Any],
         recon_weights: dict[str, float],
     ) -> Tensor:
         head_losses: dict[str, Tensor] = out["head_losses"]
@@ -100,6 +102,9 @@ class AtomVQVAEModule(L.LightningModule):
             msg = "Expected a single optimizer"
             raise TypeError(msg)
         sch = self.lr_schedulers()
+        if isinstance(sch, list):  # pragma: no cover - one scheduler is configured
+            msg = "Expected a single LR scheduler"
+            raise TypeError(msg)
 
         loss = self._run("train/atom", batch, train=True)
         self.log("train/total_loss", loss, prog_bar=True)
@@ -127,7 +132,7 @@ class AtomVQVAEModule(L.LightningModule):
     ) -> None:
         self._run("test/atom", batch, train=False)
 
-    def configure_optimizers(self) -> dict:
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         opt = torch.optim.AdamW(self.parameters(), lr=self.config.learning_rate)
         total_steps = int(self.trainer.estimated_stepping_batches)
         warmup_steps = max(1, min(500, total_steps // 20))

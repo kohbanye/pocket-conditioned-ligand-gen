@@ -37,7 +37,7 @@ def ligand_mask(arr: np.ndarray) -> np.ndarray:
     return mask
 
 
-class RescoreDataset(Dataset):
+class RescoreDataset(Dataset[dict[str, Tensor]]):
     """One (pose tokens, ligand mask, RMSD) example per doc."""
 
     def __init__(  # noqa: PLR0913
@@ -117,8 +117,8 @@ class RescoreDataset(Dataset):
     def __len__(self) -> int:
         return len(self.index)
 
-    def __getitem__(self, i: int) -> dict[str, Tensor]:
-        idx = int(self.index[i])
+    def __getitem__(self, index: int) -> dict[str, Tensor]:
+        idx = int(self.index[index])
         s = int(self.offsets[idx])
         e = min(int(self.offsets[idx + 1]), s + self.block_size)
         arr = np.asarray(self.tokens[s:e], dtype=np.int64)
@@ -265,12 +265,6 @@ class RescoreDataModule(L.LightningDataModule):
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:
         nw = self.config.num_workers
-        common = {
-            "num_workers": nw,
-            "persistent_workers": nw > 0,
-            "pin_memory": True,
-            "collate_fn": collate_rescore,
-        }
         # Both the pairwise ranking loss and the listwise loss need whole
         # complexes in a batch, not a random sample of poses.
         if self.config.ranking_loss_weight > 0 or self.config.listwise_loss_weight > 0:
@@ -282,7 +276,12 @@ class RescoreDataModule(L.LightningDataModule):
             )
             self._samplers[split] = sampler
             return DataLoader(
-                self._datasets[split], batch_sampler=sampler, **common
+                self._datasets[split],
+                batch_sampler=sampler,
+                num_workers=nw,
+                persistent_workers=nw > 0,
+                pin_memory=True,
+                collate_fn=collate_rescore,  # ty: ignore[invalid-argument-type]
             )
         return DataLoader(
             self._datasets[split],
@@ -293,7 +292,10 @@ class RescoreDataModule(L.LightningDataModule):
             # worker (torch seeds only its own RNG in workers).
             generator=torch_generator(self._seed, "rescore-shuffle"),
             worker_init_fn=worker_init_fn,
-            **common,
+            num_workers=nw,
+            persistent_workers=nw > 0,
+            pin_memory=True,
+            collate_fn=collate_rescore,  # ty: ignore[invalid-argument-type]
         )
 
     def train_dataloader(self) -> DataLoader:

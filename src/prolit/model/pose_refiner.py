@@ -50,6 +50,8 @@ from prolit.tokenizers.descriptor_schema import (
 )
 
 if TYPE_CHECKING:
+    from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
+
     from prolit.config import PoseRefinerConfig, PoseRefineTrainingConfig
 
 # Per-node categorical features, in the fixed order the dataset emits them.
@@ -159,7 +161,7 @@ class _Convolution(nn.Module):
         self.fc = FullyConnectedNet(
             [num_radial, radial_hidden, self.tp.weight_numel], F.silu
         )
-        self.irreps_out = irreps_out
+        self.irreps_out: o3.Irreps = irreps_out
 
     def forward(  # noqa: PLR0913
         self,
@@ -182,7 +184,7 @@ class PoseRefinerNet(nn.Module):
 
     def __init__(self, config: PoseRefinerConfig) -> None:
         super().__init__()
-        self.config = config
+        self.config: PoseRefinerConfig = config
         h = config.hidden_dim
         lmax = config.l_max
 
@@ -190,7 +192,7 @@ class PoseRefinerNet(nn.Module):
         self.embeds = nn.ModuleList(
             [nn.Embedding(vocab, h) for _, vocab in FEATURE_FIELDS]
         )
-        self.time_dim = h
+        self.time_dim: int = h
         self.time_mlp = nn.Sequential(nn.Linear(h, h), nn.SiLU(), nn.Linear(h, h))
 
         # Bond-graph edge feature (invariant): tells the network which close
@@ -214,7 +216,7 @@ class PoseRefinerNet(nn.Module):
             spec += f" + {mul}x{ell}o + {mul}x{ell}e"
         self.gate = _make_gate(o3.Irreps(spec))
         self.irreps_hidden = self.gate.irreps_out
-        self.irreps_sh = o3.Irreps.spherical_harmonics(lmax)
+        self.irreps_sh: o3.Irreps = o3.Irreps.spherical_harmonics(lmax)
 
         # Lift the input scalars (h x 0e) into the hidden irreps; higher-l
         # channels start at zero and are built up by the convolutions. Pocket
@@ -288,7 +290,7 @@ class PoseRefinerModule(L.LightningModule):
 
     def __init__(self, config: PoseRefineTrainingConfig) -> None:
         super().__init__()
-        self.config = config
+        self.config: PoseRefineTrainingConfig = config
         self.save_hyperparameters()
         self.net = PoseRefinerNet(config.model)
 
@@ -370,7 +372,7 @@ class PoseRefinerModule(L.LightningModule):
         """Flow-matching loss (+ physical aux) for one batch, no logging."""
         x0, x1 = batch["pos0"], batch["pos1"]
         # one diffusion time per graph, broadcast to nodes
-        t = torch.rand(batch["num_graphs"], device=x0.device)
+        t = torch.rand(int(batch["num_graphs"]), device=x0.device)
         t_node = t[batch["batch"]]
         x_t = self._interpolate(x0, x1, t_node)
         x_hat1 = self._predict_x1(x_t, t_node, batch)
@@ -400,7 +402,7 @@ class PoseRefinerModule(L.LightningModule):
     def _step(self, batch: dict[str, Tensor], stage: str) -> Tensor:
         out = self._compute(batch)
         sync = stage != "train"
-        bs = batch["num_graphs"]
+        bs = int(batch["num_graphs"])
         for name, val in out.items():
             self.log(
                 f"{stage}/{name}",
@@ -422,7 +424,7 @@ class PoseRefinerModule(L.LightningModule):
         refined = self.refine(batch)
         r_ref = (refined[mov] - batch["pos1"][mov]).pow(2).sum(-1).mean().sqrt()
         r_cor = (batch["pos0"][mov] - batch["pos1"][mov]).pow(2).sum(-1).mean().sqrt()
-        bs = batch["num_graphs"]
+        bs = int(batch["num_graphs"])
         self.log(
             "val/rmsd_refined", r_ref, prog_bar=True, sync_dist=True, batch_size=bs
         )
@@ -460,7 +462,7 @@ class PoseRefinerModule(L.LightningModule):
             x = x + (ts[i + 1] - ts[i]) * v * movf
         return x
 
-    def configure_optimizers(self) -> dict:
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         decay, no_decay = [], []
         for param in self.parameters():
             if not param.requires_grad:

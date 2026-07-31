@@ -25,6 +25,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
 from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
 from prolit.model.vqvae_module import AtomVQVAEModule
+from prolit.provenance import RecordProvenance
 from prolit.seeding import add_seed_argument, seed_from_args
 
 logging.basicConfig(level=logging.INFO)
@@ -152,6 +153,8 @@ def main() -> None:
         precision=config.precision,
         logger=WandbLogger(project="pocket-ligand-vqvae", name=args.run_name),
         callbacks=[
+            # Writes run.json beside the checkpoints: command, git SHA, seed.
+            RecordProvenance(seed=args.seed),
             ModelCheckpoint(
                 dirpath=ckpt_dir,
                 monitor="val/atom_coord",
