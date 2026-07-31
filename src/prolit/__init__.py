@@ -15,12 +15,6 @@ against. The subpackages behind it are:
 ``prolit.model``       the VQ-VAE, CLM, MLM, scoring heads and the pose refiner
 """
 
-from prolit import _legacy_import_path
-
-# Checkpoints trained before this package was renamed from ``src`` pickle their
-# config dataclass under ``src.config``; this makes those paths resolve here.
-_legacy_import_path.install()
-
 __all__ = ["__version__"]
 
 __version__ = "0.1.0"

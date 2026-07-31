@@ -518,21 +518,3 @@ class PoseRefineTrainingConfig:
     # ``cfg.seed`` and get this default. A field *without* a default would not
     # have been.
     seed: int = DEFAULT_SEED
-
-
-# --- Names these classes were pickled under -------------------------------
-#
-# Lightning stores a run's config *instance* in ``hyper_parameters``, and pickle
-# records a class by (module path, class name). Every checkpoint trained before
-# these classes took the paper's names therefore asks ``prolit.config`` for the
-# old name, and unpickling calls ``getattr`` on this module -- so an alias is
-# enough to keep them loading, and they come back as the new class.
-#
-# ``prolit/_legacy_import_path.py`` does the same job one level up, for the
-# module path. Deleting either one silently orphans trained weights: the failure
-# is an ImportError at load time, long after the run that produced them is gone.
-#
-# ``tests/test_legacy_checkpoint_path.py`` pins this.
-LigandLMConfig = ProLITCLMConfig
-LMTrainingConfig = CLMTrainingConfig
-ComplexMLMConfig = ProLITMLMConfig

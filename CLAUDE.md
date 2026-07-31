@@ -27,10 +27,11 @@
 | ProLIT-CLM | `ProLITCLMModule`, `ProLITCLMConfig`, `CLMTrainingConfig` (`model/clm.py`) |
 | refiner | `PoseRefinerNet` / `PoseRefinerModule` |
 
-**config dataclass の改名は checkpoint を壊す。** Lightning は config の
+**config dataclass の改名・移動は checkpoint を壊す。** Lightning は config の
 *インスタンス*を `hyper_parameters` に pickle し、pickle はクラスを
-(モジュールパス, クラス名) で記録する。改名するなら `prolit/config.py` の末尾に
-`旧名 = 新名` の別名を必ず残す（`tests/test_legacy_checkpoint_path.py` が固定）。
+(モジュールパス, クラス名) で記録するので、`prolit.config.LMTrainingConfig` を
+改名した時点で、それ以前の run は読めなくなる。互換の別名は置いていない
+（一度置いたが、明示的に外した）。**改名する = 既存の重みを捨てる**と考えること。
 `nn.Module` / `LightningModule` のクラス名とファイル名は pickle されないので安全。
 逆に**属性名**（`self.model` 等）は state_dict のキーなので変えてはいけない。
 
@@ -54,8 +55,6 @@ protein 原子と ligand 原子は**同じ codebook**から引く。片方が空
   書いてあるので、触る前に読むこと。
 - **`prolit/api.py` が公開 API**。`__all__` の外は内部実装。ベンチから private を
   掴まない。
-- **旧 `src.*` import パス**は checkpoint の pickle 互換のために
-  `prolit/_legacy_import_path.py` で生かしてある。消すと既存 checkpoint が全部読めなくなる。
 
 ## Tech Stack
 
