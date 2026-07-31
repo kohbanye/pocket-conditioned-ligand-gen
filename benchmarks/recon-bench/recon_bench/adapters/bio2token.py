@@ -7,7 +7,7 @@ to the joint all-atom tokenizer this paper proposes:
 
 * **One token per atom**, so the rate comparison is apples-to-apples. Its FSQ
   levels are ``[4]*6``, i.e. a 4096-entry codebook = **12 bits/atom**, the same
-  rate as the capacity-matched ``separate4096`` arm.
+  rate as the ``separate`` arm.
 * **It works in the input coordinate frame**, not a molecule-internal one. Its
   reconstruction therefore keeps absolute placement, which is why ``rmsd`` and
   ``kabsch_rmsd`` come out equal for it -- unlike ConfSeq or Token-Mol, whose

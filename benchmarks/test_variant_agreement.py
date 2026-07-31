@@ -21,7 +21,7 @@ if str(BENCHMARKS / "recon-bench") not in sys.path:
 
 from prolit_bench import variants  # noqa: E402
 
-ARM_NAMES = ["joint", "separate", "separate_4096"]
+ARM_NAMES = ["joint", "separate"]
 
 #: Trained weights are not in git. The identity checks below are pure metadata
 #: and always run; only the two that resolve an arm to a file need them present.

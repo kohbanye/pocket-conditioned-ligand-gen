@@ -38,7 +38,7 @@ the benchmark environment then scores. See `sbdd_bench/README.md`.
 ## The arm registry
 
 `common/src/prolit_bench/variants.py` defines which runs, normalization
-statistics and codebook sizes each arm (`joint`, `separate`, `separate_4096`)
+statistics and codebook sizes each arm (`joint`, `separate`)
 means. Read its module docstring before changing anything there — it documents a
 real discrepancy between the tables that is recorded rather than hidden, and
 `test_variant_agreement.py` fails if the benchmarks drift apart again.

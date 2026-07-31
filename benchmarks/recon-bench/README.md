@@ -120,8 +120,7 @@ ESM3 / FoldToken は**常に全長タンパク質を再構成**する（各モ�
 | arm | codebook | ligand frame | pose bits | 位置づけ |
 |---|---|---|---|---|
 | `joint` | 1 冊 8192 | 共有ポケット | 0 | 本命 |
-| `separate` | 2 冊 8192+8192 | 共有ポケット | 0 | レート一致（codebook ベクトルは 2 倍） |
-| `separate4096` | 2 冊 4096+4096 | 共有ポケット | 0 | 容量・語彙一致（12 bits/atom） |
+| `separate` | 2 冊 4096+4096 | 共有ポケット | 0 | joint と総 codebook サイズ・LM 語彙が一致（論文の ablation） |
 | `binning` | 格子 10³×12 元素 | 共有ポケット | 0 | **学習なし**の下限参照 |
 | `localframe_{oracle,3tok,2tok,1.5tok,1tok}` | 2 冊 8192+8192 | **リガンド自身** | ∞/39/26/20/13 | 単一モダリティ型リガンドトークナイザの構成 |
 

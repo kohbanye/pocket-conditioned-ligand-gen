@@ -5,7 +5,7 @@ docked largest fragment vs 22.8 for the CrossDocked reference ligands) and emits
 disconnected multi-fragment outputs ~19-32% of the time. Both directly depress
 ``vina_dock``, which is computed on the largest fragment after re-docking
 (measured on the existing 100-pocket dumps: connected & >=20 heavy atoms lifts
-separate_4096 from -6.80 to -8.52 kcal/mol).
+the separate arm from -6.80 to -8.52 kcal/mol).
 
 This script turns an oversampled pool of raw generations into a benchmark arm
 under an explicit, reportable inference-time protocol:
