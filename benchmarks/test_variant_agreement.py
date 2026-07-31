@@ -32,16 +32,16 @@ needs_weights = pytest.mark.skipif(
 
 
 def _recon_bench_arms() -> dict:
-    """recon_bench's own arm table, keyed by the shared registry's names."""
+    """recon_bench's own arm table, restricted to the shared registry's arms."""
     recon_bench_arms = pytest.importorskip(
         "recon_bench.adapters.own_allatom", reason="recon_bench not importable here"
     ).ARMS
     return {
-        variants.ALIASES.get(name, name): arm
+        name: arm
         for name, arm in recon_bench_arms.items()
         # recon_bench also carries binning / ligand-own-frame arms, which are
         # reconstruction-only and have no rescoring or generation counterpart.
-        if variants.ALIASES.get(name, name) in variants.REGISTRY
+        if name in variants.REGISTRY
     }
 
 

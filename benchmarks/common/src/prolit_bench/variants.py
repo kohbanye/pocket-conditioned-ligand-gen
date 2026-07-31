@@ -152,24 +152,14 @@ SEPARATE = Arm(
 
 REGISTRY: dict[str, Arm] = {a.name: a for a in (JOINT, SEPARATE)}
 
-#: Names the benchmarks used for the separate arm while a second, larger one
-#: existed. They resolve to the arm the paper reports, which is what they were
-#: reaching for -- a run pinned to the 8192+8192 arm is no longer expressible,
-#: on purpose.
-ALIASES: dict[str, str] = {
-    "separate4096": "separate",
-    "separate_4096": "separate",
-}
-
 
 def get(name: str) -> Arm:
-    """Look up an arm by name or by a benchmark's historical alias."""
-    key = ALIASES.get(name, name)
-    if key not in REGISTRY:
+    """Look up an arm by name."""
+    if name not in REGISTRY:
         known = ", ".join(sorted(REGISTRY))
         msg = f"unknown tokenizer arm {name!r}; known: {known}"
         raise KeyError(msg)
-    return REGISTRY[key]
+    return REGISTRY[name]
 
 
 #: The checkpoint-selection policy each benchmark's published numbers used.
