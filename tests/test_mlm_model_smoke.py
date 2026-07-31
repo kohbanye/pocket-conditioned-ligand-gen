@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from prolit.config import ComplexMLMConfig
+from prolit.config import ProLITMLMConfig
 from prolit.data.mlm_dataset import MLMTokenDataset, collate_mlm
-from prolit.model.complex_mlm import build_complex_mlm, count_parameters
+from prolit.model.mlm import build_prolit_mlm, count_parameters
 from prolit.tokenizers.lm_vocab import (
     BOS_ID,
     EOS_ID,
@@ -38,8 +38,8 @@ _DOC = [
 ]
 
 
-def _tiny_config() -> ComplexMLMConfig:
-    return ComplexMLMConfig(
+def _tiny_config() -> ProLITMLMConfig:
+    return ProLITMLMConfig(
         atom_codebook_size=32,
         hidden_size=32,
         num_hidden_layers=2,
@@ -50,7 +50,7 @@ def _tiny_config() -> ComplexMLMConfig:
 
 def test_esm_mlm_forward_backward(tmp_path: Path) -> None:
     cfg = _tiny_config()
-    model = build_complex_mlm(cfg)
+    model = build_prolit_mlm(cfg)
     model.train()
 
     # A tiny 3-doc cache -> masked batch through the real collate path.
@@ -86,7 +86,7 @@ def test_esm_mlm_forward_backward(tmp_path: Path) -> None:
 def test_mask_token_id_is_embeddable() -> None:
     """The appended <mask> id must be a valid embedding row (no off-by-one)."""
     cfg = _tiny_config()
-    model = build_complex_mlm(cfg)
+    model = build_prolit_mlm(cfg)
     emb = model.get_input_embeddings()
     assert emb.num_embeddings == cfg.vocab_size
     ids = torch.tensor([[cfg.mask_token_id, L_OPEN_ID, 7]])
@@ -97,7 +97,7 @@ def test_mask_token_id_is_embeddable() -> None:
 def test_padded_batch_produces_finite_loss(tmp_path: Path) -> None:
     """Key-padding bias must not create NaNs (guards 0 * -inf)."""
     cfg = _tiny_config()
-    model = build_complex_mlm(cfg)
+    model = build_prolit_mlm(cfg)
     short = [BOS_ID, L_OPEN_ID, 20, 21, L_CLOSE_ID, EOS_ID]
     flat = np.concatenate(
         [np.asarray(_DOC, dtype=np.uint16), np.asarray(short, dtype=np.uint16)]
@@ -125,6 +125,6 @@ def test_padded_batch_produces_finite_loss(tmp_path: Path) -> None:
 
 def test_default_config_is_about_100m() -> None:
     """Default architecture should land near the ~100M target."""
-    model = build_complex_mlm(ComplexMLMConfig(atom_codebook_size=8192))
+    model = build_prolit_mlm(ProLITMLMConfig(atom_codebook_size=8192))
     n = count_parameters(model)
     assert 80e6 < n < 120e6, f"{n / 1e6:.1f}M outside [80, 120]M"

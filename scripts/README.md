@@ -6,8 +6,8 @@ The ProLIT entry points a benchmark drives as a subprocess. Nothing else.
 |---|---|
 | `generate_ligands_for_target.py` | sbdd-bench's `own` adapter; pose-rescoring-bench |
 | `generate_ligands_3d.py` | pose-rescoring-bench (CrossDocked test pockets) |
-| `eval_casf_rescore.py` | pose-rescoring-bench (docking power) |
-| `eval_casf_scoring.py` | pose-rescoring-bench (scoring / ranking power) |
+| `eval_casf_docking_power.py` | pose-rescoring-bench (docking power) |
+| `eval_casf_scoring_power.py` | pose-rescoring-bench (scoring / ranking power) |
 | `prepare_target.py`, `dock_vina.py` | the generators above |
 
 The benchmarks run these rather than importing them, because generation needs

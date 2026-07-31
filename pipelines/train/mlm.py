@@ -32,7 +32,7 @@ from lightning.pytorch.loggers import WandbLogger
 
 from prolit.config import MLMTrainingConfig
 from prolit.data.mlm_dataset import MLMTokenDataModule
-from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.mlm_module import ProLITMLMModule
 from prolit.provenance import RecordProvenance
 from prolit.seeding import add_seed_argument, seed_from_args
 
@@ -139,7 +139,7 @@ def main() -> None:  # noqa: C901, PLR0915
         )
 
     dm = MLMTokenDataModule(config)
-    module = ComplexMLMModule(config)
+    module = ProLITMLMModule(config)
     if args.init_from is not None:
         ckpt = torch.load(args.init_from, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)

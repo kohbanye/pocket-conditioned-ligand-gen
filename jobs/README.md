@@ -34,7 +34,7 @@ ones. Vary the flag instead:
 ```sh
 python jobs/submit.py --name aff --resource gpu_1 --hours 8 \
     --sweep pooling=mean,attn,meanmax -- \
-    pipelines/train/head.py --pooling '{pooling}'
+    pipelines/train/scoring_head.py --pooling '{pooling}'
 ```
 
 Each `{key}` in the command is replaced by that point's value, and one script is

@@ -127,7 +127,7 @@ def resolve_vqvae(
 
 JOINT = Arm(
     name="joint",
-    label="ProLIT (one shared codebook)",
+    label="ProLIT",
     protein_run="xzkjxu9q",
     ligand_run="xzkjxu9q",
     protein_norm=ALLATOM_CACHE / "normalization_stats.pt",
@@ -140,42 +140,26 @@ JOINT = Arm(
 
 SEPARATE = Arm(
     name="separate",
-    label="Separate 8192+8192 (rate-matched)",
-    protein_run="protein-vqvae",
-    ligand_run="ligand-vqvae",
-    protein_norm=ALLATOM_CACHE / "normalization_stats_protein.pt",
-    ligand_norm=ALLATOM_CACHE / "normalization_stats_ligand.pt",
-    codebook_size=8192,
-    is_separate=True,
-    notes="same bits/atom as joint, twice the codebook vectors",
-)
-
-SEPARATE_4096 = Arm(
-    name="separate_4096",
-    label="Separate 4096+4096 (capacity-matched)",
+    label="ProLIT (separate tokenizers)",
     protein_run="protein-vqvae-4096",
     ligand_run="ligand-vqvae-4096",
     protein_norm=ALLATOM_CACHE / "normalization_stats_protein.pt",
     ligand_norm=ALLATOM_CACHE / "normalization_stats_ligand.pt",
     codebook_size=4096,
     is_separate=True,
-    notes="same codebook vectors and LM vocabulary as joint, 12 bits/atom",
+    notes="4096 + 4096, matching the joint arm's total codebook size",
 )
 
-REGISTRY: dict[str, Arm] = {a.name: a for a in (JOINT, SEPARATE, SEPARATE_4096)}
-
-#: Aliases the benchmarks grew independently for the same arm.
-ALIASES: dict[str, str] = {"separate4096": "separate_4096"}
+REGISTRY: dict[str, Arm] = {a.name: a for a in (JOINT, SEPARATE)}
 
 
 def get(name: str) -> Arm:
-    """Look up an arm by name or by a benchmark's historical alias."""
-    key = ALIASES.get(name, name)
-    if key not in REGISTRY:
+    """Look up an arm by name."""
+    if name not in REGISTRY:
         known = ", ".join(sorted(REGISTRY))
         msg = f"unknown tokenizer arm {name!r}; known: {known}"
         raise KeyError(msg)
-    return REGISTRY[key]
+    return REGISTRY[name]
 
 
 #: The checkpoint-selection policy each benchmark's published numbers used.

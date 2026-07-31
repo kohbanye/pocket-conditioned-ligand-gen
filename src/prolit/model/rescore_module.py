@@ -1,6 +1,6 @@
 """LightningModule for the pose-scoring head (discriminative rescorer).
 
-The pretrained complex-token MLM encoder (:class:`~prolit.model.complex_mlm.ComplexMLM`,
+The pretrained complex-token MLM encoder (:class:`~prolit.model.mlm.ProLITMLM`,
 warm-started from an MLM checkpoint) is fine-tuned with a small MLP head that
 mean-pools the ligand-token representations and regresses the pose RMSD. Lower
 predicted RMSD = more native-like -- so at eval time a pose is scored by
@@ -18,7 +18,7 @@ import torch
 from torch import Tensor, nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
-from prolit.model.complex_mlm import build_complex_mlm, count_parameters
+from prolit.model.mlm import build_prolit_mlm, count_parameters
 
 if TYPE_CHECKING:
     from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
@@ -37,9 +37,9 @@ class ComplexRescoreModule(L.LightningModule):
         super().__init__()
         self.config: RescoreTrainingConfig = config
         self.save_hyperparameters(ignore=["mlm_state"])
-        self.encoder = build_complex_mlm(config.model)
+        self.encoder = build_prolit_mlm(config.model)
         if mlm_state is not None:
-            # MLM checkpoint keys are prefixed "model." (ComplexMLMModule.model).
+            # MLM checkpoint keys are prefixed "model." (ProLITMLMModule.model).
             enc_state = {
                 k[len("model.") :]: v
                 for k, v in mlm_state.items()

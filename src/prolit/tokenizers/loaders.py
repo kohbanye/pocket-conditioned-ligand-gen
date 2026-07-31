@@ -98,13 +98,13 @@ def load_causal_lm(
     device: torch.device,
 ) -> Any:  # noqa: ANN401
     """Load ProLIT-CLM, the generative decoder over interface tokens."""
-    from prolit.config import LMTrainingConfig  # noqa: PLC0415
-    from prolit.model.lm_module import LigandLMModule  # noqa: PLC0415
+    from prolit.config import CLMTrainingConfig  # noqa: PLC0415
+    from prolit.model.clm_module import ProLITCLMModule  # noqa: PLC0415
 
-    config = LMTrainingConfig()
+    config = CLMTrainingConfig()
     config.model.atom_codebook_size = codebook_size
     return (
-        LigandLMModule.load_from_checkpoint(
+        ProLITCLMModule.load_from_checkpoint(
             str(ckpt), config=config, map_location=device
         )
         .eval()
@@ -124,12 +124,12 @@ def load_masked_lm(
     unchanged and the token caches stay valid; callers masking tokens need it.
     """
     from prolit.config import MLMTrainingConfig  # noqa: PLC0415
-    from prolit.model.mlm_module import ComplexMLMModule  # noqa: PLC0415
+    from prolit.model.mlm_module import ProLITMLMModule  # noqa: PLC0415
 
     config = MLMTrainingConfig()
     config.model.atom_codebook_size = codebook_size
     module = (
-        ComplexMLMModule.load_from_checkpoint(
+        ProLITMLMModule.load_from_checkpoint(
             str(ckpt), config=config, map_location=device
         )
         .eval()

@@ -136,14 +136,15 @@ _NUM_SPECIAL_TOKENS = 7
 
 
 @dataclass
-class LigandLMConfig:
+class ProLITCLMConfig:
     """Architecture config for the dense Qwen3-style autoregressive LM (~0.3B)."""
 
     # Size of the single all-atom code range the flat vocabulary is built on
     # (``vocab_size = specials + atom_codebook_size``). 8192 is the joint
     # tokenizer; the separate-tokenizer ablation passes the COMBINED size of its
-    # two sub-codebooks (16384 for 8192+8192, 8192 for 4096+4096), because both
-    # arms stitch their books into one contiguous range before the LM sees them.
+    # two sub-codebooks -- also 8192, since it is 4096 per modality -- because
+    # both arms stitch their books into one contiguous range before the LM sees
+    # them.
     atom_codebook_size: int = 8192
 
     # Dims chosen to land at ~0.3B parameters with the ~12.3k vocabulary
@@ -171,7 +172,7 @@ class LigandLMConfig:
 
 
 @dataclass
-class LMTrainingConfig:
+class CLMTrainingConfig:
     """Config for from-scratch training of the autoregressive ligand LM."""
 
     token_dir: Path = Path("data/lm_tokens")
@@ -197,7 +198,7 @@ class LMTrainingConfig:
     num_workers: int = 8
     precision: str = "bf16-mixed"
 
-    model: LigandLMConfig = field(default_factory=LigandLMConfig)
+    model: ProLITCLMConfig = field(default_factory=ProLITCLMConfig)
 
     # Seed for this run, recorded so a checkpoint remembers what it was trained
     # with. Safe to add: a dataclass field with a default is also a class
@@ -208,7 +209,7 @@ class LMTrainingConfig:
 
 
 @dataclass
-class ComplexMLMConfig:
+class ProLITMLMConfig:
     """Architecture config for the self-implemented ESM-style complex-token MLM.
 
     A from-scratch bidirectional transformer encoder (rotary attention, pre-LN
@@ -219,7 +220,7 @@ class ComplexMLMConfig:
     embedding table; the ``<mask>`` id is only ever an input, never a target.
     """
 
-    # Base vocabulary, mirroring LigandLMConfig: one all-atom code range.
+    # Base vocabulary, mirroring ProLITCLMConfig: one all-atom code range.
     atom_codebook_size: int = 8192
 
     # ~100M-param ESM3-style encoder: 13 x (hidden 768, 12 heads, SwiGLU 8/3).
@@ -293,7 +294,7 @@ class MLMTrainingConfig:
     num_workers: int = 8
     precision: str = "bf16-mixed"
 
-    model: ComplexMLMConfig = field(default_factory=ComplexMLMConfig)
+    model: ProLITMLMConfig = field(default_factory=ProLITMLMConfig)
 
     # Seed for this run, recorded so a checkpoint remembers what it was trained
     # with. Safe to add: a dataclass field with a default is also a class
@@ -307,7 +308,7 @@ class MLMTrainingConfig:
 class RescoreTrainingConfig:
     """Config for fine-tuning a pose-scoring head on the pretrained MLM encoder.
 
-    The encoder (:class:`ComplexMLMConfig`) is warm-started from a pretrained MLM
+    The encoder (:class:`ProLITMLMConfig`) is warm-started from a pretrained MLM
     checkpoint; a small MLP head over the mean-pooled ligand-token representations
     regresses the pose RMSD (lower = more native-like). Trained on RMSD-labelled
     decoys (:mod:`pipelines.corpora.tokenize_decoys`).
@@ -398,7 +399,7 @@ class RescoreTrainingConfig:
     num_workers: int = 8
     precision: str = "bf16-mixed"
 
-    model: ComplexMLMConfig = field(default_factory=ComplexMLMConfig)
+    model: ProLITMLMConfig = field(default_factory=ProLITMLMConfig)
 
     # Seed for this run, recorded so a checkpoint remembers what it was trained
     # with. Safe to add: a dataclass field with a default is also a class

@@ -19,7 +19,7 @@ stop writing new ones:
 
     python jobs/submit.py --name aff --resource gpu_1 --hours 8 \
         --sweep pooling=mean,attn,meanmax -- \
-        pipelines/train/head.py --pooling '{pooling}'
+        pipelines/train/scoring_head.py --pooling '{pooling}'
 
 That is three jobs from one command. Repeat ``--sweep`` for a cross product.
 Each point gets its own script, rather than one array job indexing a shell

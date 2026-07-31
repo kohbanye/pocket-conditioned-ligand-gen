@@ -27,7 +27,7 @@ from torch import Tensor, nn
 from prolit.tokenizers.lm_vocab import PAD_ID
 
 if TYPE_CHECKING:
-    from prolit.config import ComplexMLMConfig
+    from prolit.config import ProLITMLMConfig
 
 
 # --- rotary position embeddings (non-interleaved, ESM3 convention) ----------
@@ -158,7 +158,7 @@ def swiglu_ffn(
 class TransformerBlock(nn.Module):
     """ESM3 UnifiedTransformerBlock (plain attention, no geometric track)."""
 
-    def __init__(self, cfg: ComplexMLMConfig, scaling_factor: float) -> None:
+    def __init__(self, cfg: ProLITMLMConfig, scaling_factor: float) -> None:
         super().__init__()
         self.attn = MultiHeadAttention(
             cfg.hidden_size,
@@ -209,12 +209,12 @@ class MLMOutput:
     logits: Tensor
 
 
-class ComplexMLM(nn.Module):
+class ProLITMLM(nn.Module):
     """ESM3-style encoder + MLM head over the VQ-VAE complex-token vocabulary."""
 
-    def __init__(self, cfg: ComplexMLMConfig) -> None:
+    def __init__(self, cfg: ProLITMLMConfig) -> None:
         super().__init__()
-        self.cfg: ComplexMLMConfig = cfg
+        self.cfg: ProLITMLMConfig = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.hidden_size, padding_idx=PAD_ID)
         scaling = math.sqrt(cfg.num_hidden_layers / 36) if cfg.scale_residue else 1.0
         self.layers = nn.ModuleList(
@@ -279,9 +279,9 @@ class ComplexMLM(nn.Module):
         return MLMOutput(loss=loss, logits=logits)
 
 
-def build_complex_mlm(cfg: ComplexMLMConfig) -> ComplexMLM:
+def build_prolit_mlm(cfg: ProLITMLMConfig) -> ProLITMLM:
     """Construct a randomly-initialized ESM3-style complex-token MLM."""
-    return ComplexMLM(cfg)
+    return ProLITMLM(cfg)
 
 
 def count_parameters(model: nn.Module) -> int:

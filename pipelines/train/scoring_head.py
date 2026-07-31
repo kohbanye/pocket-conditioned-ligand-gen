@@ -7,7 +7,7 @@ The discriminative complement to zero-shot masked PLL.
 
 Run (single GPU)::
 
-    uv run python pipelines/train/head.py \
+    uv run python pipelines/train/scoring_head.py \
         --token-dir data/lm_tokens_decoys \
         --mlm-ckpt pocket-ligand-mlm/j90rlrgm/checkpoints/mlm-e01-vl0.8528.ckpt \
         --run-name rescore_v1 --max-epochs 8
@@ -28,7 +28,7 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import WandbLogger
 
-from prolit.config import ComplexMLMConfig, RescoreTrainingConfig
+from prolit.config import ProLITMLMConfig, RescoreTrainingConfig
 from prolit.data.rescore_dataset import RescoreDataModule
 from prolit.model.rescore_module import ComplexRescoreModule
 from prolit.provenance import RecordProvenance
@@ -144,7 +144,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     seed_from_args(args)
 
     config = RescoreTrainingConfig(
-        model=ComplexMLMConfig(atom_codebook_size=args.atom_codebook_size)
+        model=ProLITMLMConfig(atom_codebook_size=args.atom_codebook_size)
     )
     # Recorded in the checkpoint's hparams, so a run remembers its seed.
     config.seed = args.seed

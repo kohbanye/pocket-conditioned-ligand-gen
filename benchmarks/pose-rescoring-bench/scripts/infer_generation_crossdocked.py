@@ -3,7 +3,7 @@
 This is the standard SBDD benchmark path (the 100 pockets DiffSBDD / TargetDiff /
 DiffGui all report on). It drives the sbdd-bench harness end-to-end through the
 ``own`` adapter, so our joint (``joint``/``joint_nocasf``) and separate
-(``separate``/``separate_4096``) tokenizer variants are scored by the *identical*
+(``separate``) tokenizer variants are scored by the *identical*
 metric suite / docking protocol as the prior-work baselines.
 
 Flow (GPU for --gen, CPU-parallel Vina for --eval)::
@@ -14,7 +14,7 @@ Flow (GPU for --gen, CPU-parallel Vina for --eval)::
 
     per variant (this script):
         uv run python scripts/infer_generation_crossdocked.py --variant joint_nocasf
-        uv run python scripts/infer_generation_crossdocked.py --variant separate_4096
+        uv run python scripts/infer_generation_crossdocked.py --variant separate
 
 Results land in ``results/generation/<variant>/{per_model,per_target}.csv`` +
 ``per_molecule.parquet`` — exactly the layout ``pose_rescoring_bench.report`` /
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", default="separate_4096")
+    parser.add_argument("--variant", default="separate")
     parser.add_argument("--results", type=Path, default=Path("results"))
     parser.add_argument(
         "--index",

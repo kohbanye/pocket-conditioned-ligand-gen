@@ -1,6 +1,6 @@
 """Pseudo-log-likelihood pose scoring with the complex-token MLM.
 
-The bidirectional MLM (:class:`~prolit.model.complex_mlm.ComplexMLM`) is turned into
+The bidirectional MLM (:class:`~prolit.model.mlm.ProLITMLM`) is turned into
 a pose rescorer via masked pseudo-log-likelihood (PLL): each ligand token is
 masked in turn and the model's log-probability of the true token (given the
 pocket + the rest of the ligand, bidirectionally) is read off. Summed over the

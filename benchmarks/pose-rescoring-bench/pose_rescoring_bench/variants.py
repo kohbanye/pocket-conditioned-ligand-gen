@@ -5,15 +5,20 @@ protein-ligand COMPLEX tokenizer vs SEPARATELY-trained protein-only + ligand-onl
 tokenizers stitched into one combined code space, each carried through the full
 downstream pipeline of every task while the downstream protocol is held identical.
 
-Four variants are registered. ``joint`` is the paper baseline (single combined
+Three variants are registered. ``joint`` is the paper baseline (single combined
 VQ, ``codebook_size`` 8192). ``joint_nocasf`` is the fair joint-side control that
 shares the exact downstream protocol (MLM + heads) trained alongside the separate
 arm, so the two ablation arms differ *only* in the tokenizer. ``separate`` loads
-two single-modality VQ-VAEs (protein codes ``[0, 8192)``, ligand ``[8192, 16384)``)
-via :class:`prolit.tokenizers.separate_vqvae.SeparateVQVAE`, so its combined
-``codebook_size`` is 16384. ``separate_4096`` is the FAIR-ablation redo of the
-separate arm with 4096+4096 sub-codebooks (combined ``codebook_size`` 8192), so
-its LM vocabulary matches the joint arm exactly (only pose + generation tasks).
+two single-modality VQ-VAEs of 4096 codes each (protein ``[0, 4096)``, ligand
+``[4096, 8192)``) via :class:`prolit.tokenizers.separate_vqvae.SeparateVQVAE`, so
+its combined ``codebook_size`` is 8192 and its LM vocabulary matches the joint
+arm exactly -- the arm the paper describes.
+
+An 8192+8192 separate arm was registered here too, before the ablation was
+redone at matched total size. It is gone: its combined vocabulary was twice the
+joint arm's, so it varied the token budget as well as the tokenizer, and the
+paper reports the matched one. Its affinity head (``aff_head_sep``) had no
+matched counterpart, so the separate arm now covers pose and generation only.
 Checkpoint strings are stated relative to the source repo and resolved with
 ``PathsConfig.ckpt`` (heads may be run-names, resolved by
 :func:`pose_rescoring_bench.inference.encode.resolve_rescore_ckpt`).
@@ -139,17 +144,14 @@ class Variant:
 # jointly-trained all-atom complex tokenizer (paper baseline)
 _JOINT_VQVAE = "pocket-ligand-vqvae/xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"  # noqa: E501
 
-# separately-trained single-modality VQ-VAEs + their per-modality RAW-descriptor
-# normalization stats (combined code space assembled by SeparateVQVAE)
-_PROTEIN_VQVAE = "pocket-ligand-vqvae/protein-vqvae/checkpoints/last.ckpt"
-_LIGAND_VQVAE = "pocket-ligand-vqvae/ligand-vqvae/checkpoints/last.ckpt"
+# Separately-trained single-modality VQ-VAEs, 4096 codes each so the combined
+# space matches the joint arm's 8192 -- what the paper describes -- plus their
+# per-modality RAW-descriptor normalization stats. The combined code space is
+# assembled by SeparateVQVAE; the stats are codebook-independent.
+_PROTEIN_VQVAE = "pocket-ligand-vqvae/protein-vqvae-4096/checkpoints/last.ckpt"
+_LIGAND_VQVAE = "pocket-ligand-vqvae/ligand-vqvae-4096/checkpoints/last.ckpt"
 _PROTEIN_NORM = "data/descriptor_cache_allatom/normalization_stats_protein.pt"
 _LIGAND_NORM = "data/descriptor_cache_allatom/normalization_stats_ligand.pt"
-
-# FAIR-ablation redo: separate arm with 4096+4096 sub-codebooks (combined 8192).
-# Norm stats are codebook-independent, so the 8192-arm files above are reused.
-_PROTEIN_VQVAE_4096 = "pocket-ligand-vqvae/protein-vqvae-4096/checkpoints/last.ckpt"
-_LIGAND_VQVAE_4096 = "pocket-ligand-vqvae/ligand-vqvae-4096/checkpoints/last.ckpt"
 
 # MLM shared by the joint-side control (its non-CASF-leaking training run)
 _NOCASF_MLM = "pocket-ligand-mlm/wxlhgqx3/checkpoints/mlm-e02-vl0.8199.ckpt"
@@ -163,8 +165,7 @@ _REFINER = "pocket-ligand-refine/refine_atom_bond_v1/checkpoints/refine-e08-r0.9
 # differ only in the tokenizer, both matched to identical training corpora. The
 # paper-baseline generation model (JOINT below, p6lpk7br) is a separate deliverable.
 _GEN_LM_JOINTNOCASF = "pocket-ligand-lm/lm_placement_joint2/checkpoints/last.ckpt"
-_GEN_LM_SEPARATE = "pocket-ligand-lm/lm_placement_sep/checkpoints/last.ckpt"
-_GEN_LM_SEPARATE_4096 = "pocket-ligand-lm/lm_placement_sep4096/checkpoints/last.ckpt"
+_GEN_LM_SEPARATE = "pocket-ligand-lm/lm_placement_sep4096/checkpoints/last.ckpt"
 
 JOINT = Variant(
     name="joint",
@@ -222,56 +223,22 @@ JOINT_NOCASF = Variant(
 
 SEPARATE = Variant(
     name="separate",
-    description="Separately-trained protein + ligand tokenizers in one code space.",
+    description="Separately-trained protein + ligand tokenizers, 4096 each.",
     generation=GenerationCkpts(
         vqvae=None,
         lm=_GEN_LM_SEPARATE,
         refiner=_REFINER,
-        protein_vqvae=_PROTEIN_VQVAE,
-        ligand_vqvae=_LIGAND_VQVAE,
-        protein_norm=_PROTEIN_NORM,
-        ligand_norm=_LIGAND_NORM,
-    ),
-    rescoring=RescoringCkpts(
-        vqvae=None,
-        protein_vqvae=_PROTEIN_VQVAE,
-        ligand_vqvae=_LIGAND_VQVAE,
-        protein_norm=_PROTEIN_NORM,
-        ligand_norm=_LIGAND_NORM,
-        mlm="pocket-ligand-mlm/mlm_nocasf_sep/checkpoints/last.ckpt",
-        heads=(HeadSpec("pose_head_sep", "mean", "v2"),),
-        codebook_size=16384,
-    ),
-    affinity=AffinityCkpts(
-        vqvae=None,
-        protein_vqvae=_PROTEIN_VQVAE,
-        ligand_vqvae=_LIGAND_VQVAE,
-        protein_norm=_PROTEIN_NORM,
-        ligand_norm=_LIGAND_NORM,
-        mlm="pocket-ligand-mlm/mlm_nocasf_sep/checkpoints/last.ckpt",
-        heads=(HeadSpec("aff_head_sep", "mean", "kdki"),),
-        codebook_size=16384,
-    ),
-)
-
-SEPARATE_4096 = Variant(
-    name="separate_4096",
-    description="Separate 4096+4096 tokenizers matched to the joint 8192 LM vocab.",
-    generation=GenerationCkpts(
-        vqvae=None,
-        lm=_GEN_LM_SEPARATE_4096,
-        refiner=_REFINER,
         # PER-MODALITY size; the generator doubles it to the 8192 combined space.
         codebook_size=4096,
-        protein_vqvae=_PROTEIN_VQVAE_4096,
-        ligand_vqvae=_LIGAND_VQVAE_4096,
+        protein_vqvae=_PROTEIN_VQVAE,
+        ligand_vqvae=_LIGAND_VQVAE,
         protein_norm=_PROTEIN_NORM,
         ligand_norm=_LIGAND_NORM,
     ),
     rescoring=RescoringCkpts(
         vqvae=None,
-        protein_vqvae=_PROTEIN_VQVAE_4096,
-        ligand_vqvae=_LIGAND_VQVAE_4096,
+        protein_vqvae=_PROTEIN_VQVAE,
+        ligand_vqvae=_LIGAND_VQVAE,
         protein_norm=_PROTEIN_NORM,
         ligand_norm=_LIGAND_NORM,
         mlm="pocket-ligand-mlm/mlm_nocasf_sep4096/checkpoints/last.ckpt",
@@ -282,10 +249,10 @@ SEPARATE_4096 = Variant(
 )
 
 REGISTRY: dict[str, Variant] = {
-    v.name: v for v in (JOINT, JOINT_NOCASF, SEPARATE, SEPARATE_4096)
+    v.name: v for v in (JOINT, JOINT_NOCASF, SEPARATE)
 }
 
-ABLATION_ORDER: tuple[str, ...] = ("joint_nocasf", "separate", "separate_4096")
+ABLATION_ORDER: tuple[str, ...] = ("joint_nocasf", "separate")
 
 
 def get(name: str) -> Variant:

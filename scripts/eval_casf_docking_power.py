@@ -14,7 +14,7 @@ Metrics (subset unless --max-targets is unset):
 
 Run (single GPU)::
 
-    uv run python scripts/eval_casf_rescore.py \
+    uv run python scripts/eval_casf_docking_power.py \
         --mlm-ckpt pocket-ligand-mlm/liqftueb/checkpoints/mlm-e00-vl1.1349.ckpt \
         --vqvae-ckpt "<atom-vqvae>.ckpt" \
         --norm-stats data/descriptor_cache_allatom/normalization_stats.pt \
@@ -33,11 +33,11 @@ import torch
 from prolit.chem.mol2 import parse_mol2_multi
 from prolit.config import (
     AtomVQVAETrainingConfig,
-    ComplexMLMConfig,
     MLMTrainingConfig,
     PocketExtractionConfig,
+    ProLITMLMConfig,
 )
-from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.mlm_module import ProLITMLMModule
 from prolit.model.mlm_score import ligand_pll
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
@@ -175,9 +175,9 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     # In separate-tokenizer mode the MLM's code space is the COMBINED one
     # (protein ids then ligand ids), i.e. twice the per-modality codebook.
     mlm_cfg = MLMTrainingConfig(
-        model=ComplexMLMConfig(atom_codebook_size=vocab_codebook)
+        model=ProLITMLMConfig(atom_codebook_size=vocab_codebook)
     )
-    mlm = ComplexMLMModule.load_from_checkpoint(
+    mlm = ProLITMLMModule.load_from_checkpoint(
         args.mlm_ckpt, config=mlm_cfg, map_location=device
     ).model
     mlm.eval().to(device)
@@ -211,7 +211,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         cfg = saved.get("config")
         if cfg is None:
             cfg = RescoreTrainingConfig(
-                model=ComplexMLMConfig(atom_codebook_size=args.codebook_size),
+                model=ProLITMLMConfig(atom_codebook_size=args.codebook_size),
                 pooling=args.pooling,
                 head_interaction_layers=args.interaction_layers,
             )

@@ -16,13 +16,13 @@ import torch
 from prolit.chem.mol2 import mol_to_dict, parse_mol2_multi  # noqa: F401
 from prolit.config import (
     AtomVQVAETrainingConfig,
-    ComplexMLMConfig,
     MLMTrainingConfig,
     PocketExtractionConfig,
+    ProLITMLMConfig,
     RescoreTrainingConfig,
 )
 from prolit.data.rescore_dataset import ligand_mask
-from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.mlm_module import ProLITMLMModule
 from prolit.model.rescore_module import ComplexRescoreModule
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.lm_vocab import AtomLMVocab
@@ -123,8 +123,8 @@ def load_tokenizer(
 
 def load_mlm(ckpt: Path, codebook_size: int, device: torch.device) -> tuple[Any, int]:
     """Load the complex-token MLM backbone; return (model, mask_token_id)."""
-    cfg = MLMTrainingConfig(model=ComplexMLMConfig(atom_codebook_size=codebook_size))
-    mlm = ComplexMLMModule.load_from_checkpoint(
+    cfg = MLMTrainingConfig(model=ProLITMLMConfig(atom_codebook_size=codebook_size))
+    mlm = ProLITMLMModule.load_from_checkpoint(
         ckpt,
         config=cfg,
         map_location=device,
@@ -142,7 +142,7 @@ def load_rescorer(
 ) -> ComplexRescoreModule:
     """Load a rescoring/affinity head (its pooling must match the checkpoint)."""
     cfg = RescoreTrainingConfig(
-        model=ComplexMLMConfig(atom_codebook_size=codebook_size),
+        model=ProLITMLMConfig(atom_codebook_size=codebook_size),
         pooling=pooling,
         head_interaction_layers=interaction_layers,
     )

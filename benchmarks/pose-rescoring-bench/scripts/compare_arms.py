@@ -11,7 +11,7 @@ rings / PoseBusters. Answers two questions in one pass:
 
 Usage::
 
-    uv run python scripts/compare_arms.py joint_bo sep4096_bo --vs-diffsbdd
+    uv run python scripts/compare_arms.py joint_bo separate_bo --vs-diffsbdd
 """
 
 from __future__ import annotations

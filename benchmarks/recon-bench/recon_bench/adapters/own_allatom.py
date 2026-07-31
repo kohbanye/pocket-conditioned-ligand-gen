@@ -9,9 +9,9 @@ One adapter instance = one **arm**. The arms in :data:`ARMS` span the two design
 axes the paper argues about:
 
 * **codebook** — one shared book (``joint``) vs a hard partition into a
-  protein-only and a ligand-only book (``separate*``). No partition can match a
-  shared book on codebook vectors *and* on bits/atom at once, so the separate
-  arms come in a capacity-matched and a rate-matched variant.
+  protein-only and a ligand-only book (``separate``), 4096 codes each so the two
+  arms match on total codebook size and on LM vocabulary and differ only in
+  whether the book is shared.
 * **frame** — the ligand encoded in the shared pocket frame (placement is in
   every atom token, ``pose_bits=0``) vs in its own canonical frame like a
   single-modality ligand tokenizer (tokens are SE(3)-invariant, so the pose must
@@ -68,7 +68,7 @@ def _cache(name: str) -> Path:
 ARMS: dict[str, Arm] = {
     "joint": Arm(
         name="joint",
-        label="Joint (one shared codebook)",
+        label="ProLIT",
         protein_run="xzkjxu9q",
         ligand_run="xzkjxu9q",
         protein_norm=_cache("normalization_stats.pt"),
@@ -77,23 +77,13 @@ ARMS: dict[str, Arm] = {
     ),
     "separate": Arm(
         name="separate",
-        label="Separate 8192+8192 (rate-matched)",
-        protein_run="protein-vqvae",
-        ligand_run="ligand-vqvae",
-        protein_norm=_cache("normalization_stats_protein.pt"),
-        ligand_norm=_cache("normalization_stats_ligand.pt"),
-        codebook="2 books (8192+8192)",
-        notes="same bits/atom as joint, 2x the codebook vectors",
-    ),
-    "separate4096": Arm(
-        name="separate4096",
-        label="Separate 4096+4096 (capacity-matched)",
+        label="ProLIT (separate tokenizers)",
         protein_run="protein-vqvae-4096",
         ligand_run="ligand-vqvae-4096",
         protein_norm=_cache("normalization_stats_protein.pt"),
         ligand_norm=_cache("normalization_stats_ligand.pt"),
         codebook="2 books (4096+4096)",
-        notes="same codebook vectors and vocab as joint, 12 bits/atom",
+        notes="matched to the joint arm on total codebook size and LM vocabulary",
     ),
     "binning": Arm(
         name="binning",

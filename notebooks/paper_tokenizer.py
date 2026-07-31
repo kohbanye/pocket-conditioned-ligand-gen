@@ -157,12 +157,11 @@ def _(os, project_root):
 
     JOINT_CKPT = VQ_DIR / "xzkjxu9q/checkpoints/atomvqvae-epoch=99-val/atom_coord=0.1073.ckpt"
     PROT_CKPT = VQ_DIR / "protein-vqvae/checkpoints/atomvqvae-epoch=98-val/atom_coord=0.1412.ckpt"
-    LIG_CKPT = VQ_DIR / "ligand-vqvae/checkpoints/atomvqvae-epoch=96-val/atom_coord=0.0809.ckpt"
 
     ARMS = [
         {
             "name": "joint",
-            "label": "Joint (ours)",
+            "label": "ProLIT",
             "frame": "shared",
             "codebook": "1 shared book",
             "protein_ckpt": JOINT_CKPT,
@@ -170,17 +169,6 @@ def _(os, project_root):
             "ligand_ckpt": JOINT_CKPT,
             "ligand_norm": CACHE_DIR / "normalization_stats.pt",
             "vocab": 8192,
-        },
-        {
-            "name": "separate",
-            "label": "Separate (protein-VQ + ligand-VQ)",
-            "frame": "shared",
-            "codebook": "2 books",
-            "protein_ckpt": PROT_CKPT,
-            "protein_norm": CACHE_DIR / "normalization_stats_protein.pt",
-            "ligand_ckpt": LIG_CKPT,
-            "ligand_norm": CACHE_DIR / "normalization_stats_ligand.pt",
-            "vocab": 16384,
         },
     ]
 
@@ -194,17 +182,16 @@ def _(os, project_root):
         "vocab": 8000 * 12,
     })
 
-    # --- capacity-matched separate arm ------------------------------------
-    # 4096+4096 matches the JOINT budget on codebook vectors AND on LM vocab
-    # rows, while spending 12 bits/atom against joint's 13. The 8192+8192 arm
-    # above matches the rate instead but uses 2x the codebook vectors. No single
-    # partition matches both -- that asymmetry IS the argument for sharing.
+    # --- separate-tokenizer ablation --------------------------------------
+    # 4096+4096 matches the joint arm on codebook vectors AND on LM vocabulary
+    # rows, so the two differ only in whether the book is shared. This is the
+    # arm the paper reports.
     SEP4K_PROT = _best_ckpt(VQ_DIR / "protein-vqvae-4096/checkpoints")
     SEP4K_LIG = _best_ckpt(VQ_DIR / "ligand-vqvae-4096/checkpoints")
     if SEP4K_PROT is not None and SEP4K_LIG is not None:
         ARMS.append({
-            "name": "separate4096",
-            "label": "Separate 4096+4096 (capacity-matched)",
+            "name": "separate",
+            "label": "ProLIT (separate tokenizers)",
             "frame": "shared",
             "codebook": "2 books",
             "protein_ckpt": SEP4K_PROT,
@@ -214,7 +201,7 @@ def _(os, project_root):
             "vocab": 8192,
         })
     else:
-        print(f"separate-4096 VQs not past epoch {MIN_EPOCH} -- arm skipped")
+        print(f"separate VQs not past epoch {MIN_EPOCH} -- arm skipped")
 
     # --- ligand-own-frame arms -------------------------------------------
     # A ligand-only tokenizer encodes the molecule in ITS OWN canonical frame,

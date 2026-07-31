@@ -21,7 +21,7 @@ if str(BENCHMARKS / "recon-bench") not in sys.path:
 
 from prolit_bench import variants  # noqa: E402
 
-ARM_NAMES = ["joint", "separate", "separate_4096"]
+ARM_NAMES = ["joint", "separate"]
 
 #: Trained weights are not in git. The identity checks below are pure metadata
 #: and always run; only the two that resolve an arm to a file need them present.
@@ -32,16 +32,16 @@ needs_weights = pytest.mark.skipif(
 
 
 def _recon_bench_arms() -> dict:
-    """recon_bench's own arm table, keyed by the shared registry's names."""
+    """recon_bench's own arm table, restricted to the shared registry's arms."""
     recon_bench_arms = pytest.importorskip(
         "recon_bench.adapters.own_allatom", reason="recon_bench not importable here"
     ).ARMS
     return {
-        variants.ALIASES.get(name, name): arm
+        name: arm
         for name, arm in recon_bench_arms.items()
         # recon_bench also carries binning / ligand-own-frame arms, which are
         # reconstruction-only and have no rescoring or generation counterpart.
-        if variants.ALIASES.get(name, name) in variants.REGISTRY
+        if name in variants.REGISTRY
     }
 
 

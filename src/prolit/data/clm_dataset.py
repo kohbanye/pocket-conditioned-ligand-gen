@@ -13,7 +13,7 @@ cross-document attention and reset positions:
   (``<bos>``) set to ``-100`` so no loss crosses a document boundary.
 
 The 4D block-diagonal causal attention mask is built from ``segment_ids`` in
-:class:`~prolit.model.lm_module.LigandLMModule` (on-device, per step).
+:class:`~prolit.model.clm_module.ProLITCLMModule` (on-device, per step).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from prolit.seeding import DEFAULT_SEED, torch_generator, worker_init_fn
 from prolit.tokenizers.lm_vocab import L_OPEN_ID, PAD_ID
 
 if TYPE_CHECKING:
-    from prolit.config import LMTrainingConfig
+    from prolit.config import CLMTrainingConfig
 
 PAD_SEGMENT = -1
 IGNORE_INDEX = -100
@@ -139,10 +139,10 @@ def collate_blocks(batch: list[dict[str, Tensor]]) -> dict[str, Tensor]:
     return {key: torch.stack([b[key] for b in batch]) for key in batch[0]}
 
 
-class LMTokenDataModule(L.LightningDataModule):
+class CLMTokenDataModule(L.LightningDataModule):
     """Serves packed token blocks for train/val/test splits."""
 
-    def __init__(self, config: LMTrainingConfig) -> None:
+    def __init__(self, config: CLMTrainingConfig) -> None:
         super().__init__()
         self.config = config
         self._seed = getattr(config, "seed", DEFAULT_SEED)

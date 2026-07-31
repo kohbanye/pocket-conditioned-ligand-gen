@@ -34,9 +34,9 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import WandbLogger
 
-from prolit.config import LMTrainingConfig
-from prolit.data.lm_dataset import LMTokenDataModule
-from prolit.model.lm_module import LigandLMModule
+from prolit.config import CLMTrainingConfig
+from prolit.data.clm_dataset import CLMTokenDataModule
+from prolit.model.clm_module import ProLITCLMModule
 from prolit.provenance import RecordProvenance
 from prolit.seeding import add_seed_argument, seed_from_args
 
@@ -85,7 +85,7 @@ def main() -> None:  # noqa: C901
     args = parser.parse_args()
     seed_from_args(args)
 
-    config = LMTrainingConfig()
+    config = CLMTrainingConfig()
 
     # Recorded in the checkpoint's hparams, so a run remembers its seed.
 
@@ -139,8 +139,8 @@ def main() -> None:  # noqa: C901
             )
         )
 
-    dm = LMTokenDataModule(config)
-    module = LigandLMModule(config)
+    dm = CLMTokenDataModule(config)
+    module = ProLITCLMModule(config)
     if args.init_from is not None:
         ckpt = torch.load(args.init_from, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("state_dict", ckpt)

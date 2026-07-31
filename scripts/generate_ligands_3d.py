@@ -35,11 +35,11 @@ from prolit.chem.pdb_io import (
 )
 from prolit.config import (
     AtomVQVAETrainingConfig,
-    LMTrainingConfig,
+    CLMTrainingConfig,
     PocketExtractionConfig,
 )
 from prolit.data.descriptors import read_mol_from_tar
-from prolit.model.lm_module import LigandLMModule
+from prolit.model.clm_module import ProLITCLMModule
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
@@ -220,10 +220,10 @@ def load_atom_vqvae(
 
 def load_atom_lm(ckpt: str, codebook_size: int, device: torch.device) -> object:
     """Load an all-atom LM checkpoint over a single ``codebook_size`` range."""
-    config = LMTrainingConfig()
+    config = CLMTrainingConfig()
     config.model.atom_codebook_size = codebook_size
     return (
-        LigandLMModule.load_from_checkpoint(ckpt, config=config, map_location=device)
+        ProLITCLMModule.load_from_checkpoint(ckpt, config=config, map_location=device)
         .eval()
         .to(device)
         .model
