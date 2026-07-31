@@ -128,14 +128,14 @@ class ComplexTokenEncoder:
         Absent rows come back as empty code lists, so a batch mixing pocketed and
         pocket-less documents still lines up with its inputs.
         """
-        present = [i for i, d in enumerate(descs) if d is not None]
+        present = [(i, d) for i, d in enumerate(descs) if d is not None]
         codes: list[list[int]] = [[] for _ in descs]
         if not present:
             return codes
-        x, mask = collate_molecules([descs[i] for i in present])
+        x, mask = collate_molecules([d for _, d in present])
         idx = self.tokenizer.encode_batch(
             x.to(self.device), mask.to(self.device)
         ).cpu()
-        for row, i in enumerate(present):
+        for row, (i, _) in enumerate(present):
             codes[i] = idx[row][mask[row]].tolist()
         return codes

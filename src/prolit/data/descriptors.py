@@ -332,8 +332,8 @@ class MoleculeDataset(Dataset[Tensor]):
     def __len__(self) -> int:
         return len(self.molecules)
 
-    def __getitem__(self, idx: int) -> Tensor:
-        return self.molecules[idx]
+    def __getitem__(self, index: int) -> Tensor:
+        return self.molecules[index]
 
 
 def collate_molecules(batch: list[Tensor]) -> tuple[Tensor, Tensor]:

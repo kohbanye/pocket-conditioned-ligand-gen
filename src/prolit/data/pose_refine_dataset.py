@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 FEAT = NUM_FEATURE_FIELDS
 
 
-class PoseRefineDataset(Dataset):
+class PoseRefineDataset(Dataset[dict]):
     """One (x0, x1, pocket) refinement example per corruption record."""
 
     def __init__(  # noqa: PLR0913
@@ -104,11 +104,11 @@ class PoseRefineDataset(Dataset):
     def __len__(self) -> int:
         return int(self.record_cid.shape[0])
 
-    def __getitem__(self, idx: int) -> dict:
-        c = int(self.record_cid[idx])
+    def __getitem__(self, index: int) -> dict:
+        c = int(self.record_cid[index])
         nl, npk, nb = int(self.n_lig[c]), int(self.n_pkt[c]), int(self.n_bonds[c])
         lo, po, bo = int(self.lig_off[c]), int(self.pkt_off[c]), int(self.bond_off[c])
-        x0o = int(self.x0_off[idx])
+        x0o = int(self.x0_off[index])
         x0 = np.asarray(self.lig_x0[x0o : x0o + nl], dtype=np.float32)
         if self.jitter_sigma > 0:  # intramolecular distortion for the net to repair
             x0 = x0 + self._rng.normal(0.0, self.jitter_sigma, x0.shape).astype(
@@ -147,7 +147,7 @@ class PoseRefineDataset(Dataset):
             "bond_ref": np.asarray(self.lig_bond_ref[bo : bo + nb], dtype=np.float32),
             "pkt_x": np.asarray(self.pkt_x[po : po + npk], dtype=np.float32),
             "pkt_feat": np.asarray(self.pkt_feat[po : po + npk], dtype=np.int64),
-            "scale": float(self.record_scale[idx]),
+            "scale": float(self.record_scale[index]),
         }
 
 
@@ -203,7 +203,7 @@ def make_collate(cutoff: float, max_pkt: int, knn: int) -> Callable:
     lists (``ll_edge``/``lp_edge``/``bond_edge``) are undirected pair lists.
     """
 
-    def collate(batch: list[dict]) -> dict[str, Tensor]:
+    def collate(batch: list[dict]) -> dict[str, Tensor | int]:
         pos0, pos1, feat, movable, bvec = [], [], [], [], []
         esrc, edst, ebond = [], [], []
         ll_e, lp_e, bond_e, bond_ref, angle_t = [], [], [], [], []

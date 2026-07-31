@@ -58,7 +58,7 @@ def _pack_blocks(doc_lengths: np.ndarray, block_size: int) -> np.ndarray:
     return np.asarray(breaks, dtype=np.int64)
 
 
-class PackedTokenDataset(Dataset):
+class PackedTokenDataset(Dataset[dict[str, Tensor]]):
     """Yields packed, padded ``block_size`` blocks with per-document structure."""
 
     def __init__(
@@ -83,9 +83,9 @@ class PackedTokenDataset(Dataset):
     def __len__(self) -> int:
         return len(self.block_breaks) - 1
 
-    def __getitem__(self, idx: int) -> dict[str, Tensor]:
-        s = int(self.block_breaks[idx])
-        e = int(self.block_breaks[idx + 1])
+    def __getitem__(self, index: int) -> dict[str, Tensor]:
+        s = int(self.block_breaks[index])
+        e = int(self.block_breaks[index + 1])
         tok_start = int(self.doc_offsets[s])
         tok_end = int(self.doc_offsets[e])
         # Truncate to block_size (only triggers for a pathological single doc).
@@ -179,7 +179,9 @@ class LMTokenDataModule(L.LightningDataModule):
             # worker (torch seeds only its own RNG in workers).
             generator=torch_generator(self._seed, "lm-shuffle"),
             worker_init_fn=worker_init_fn,
-            collate_fn=collate_blocks,
+            # torch types collate_fn as Callable[[list[_T]], Any] with _T
+            # bound by nothing, so no function satisfies it.
+            collate_fn=collate_blocks,  # ty: ignore[invalid-argument-type]
         )
 
     def train_dataloader(self) -> DataLoader:

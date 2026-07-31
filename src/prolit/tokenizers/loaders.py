@@ -19,12 +19,10 @@ code space to everything downstream.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import torch
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def load_norm_stats(path: str | Path, device: torch.device) -> dict[str, torch.Tensor]:
@@ -85,10 +83,10 @@ def load_separate_tokenizer(  # noqa: PLR0913
     from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
     return SeparateVQVAE.from_checkpoints(
-        protein_ckpt,
-        protein_norm,
-        ligand_ckpt,
-        ligand_norm,
+        Path(protein_ckpt),
+        Path(protein_norm),
+        Path(ligand_ckpt),
+        Path(ligand_norm),
         device,
         codebook_size=codebook_size,
     )

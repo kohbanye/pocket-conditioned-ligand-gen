@@ -98,7 +98,7 @@ def _atom_process_pose(  # noqa: PLR0913
     prot_desc: ProteinAtomDescriptor,
     lig_desc: LigandAtomDescriptor,
     ligand_frame: str = "pocket",
-) -> dict[str, np.ndarray | list[str]] | None:
+) -> dict[str, np.ndarray | list[str] | int] | None:
     """Process one (receptor, ligand pose) pair into all-atom descriptors.
 
     ``ligand_frame`` selects the reference frame for the LIGAND descriptors:
@@ -607,7 +607,9 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
             num_workers=nw,
             persistent_workers=nw > 0,
             pin_memory=True,
-            collate_fn=collate_molecules,
+            # torch types collate_fn as Callable[[list[_T]], Any] with _T
+            # bound by nothing, so no function satisfies it.
+            collate_fn=collate_molecules,  # ty: ignore[invalid-argument-type]
         )
 
     def train_dataloader(self) -> DataLoader:

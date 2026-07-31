@@ -19,6 +19,8 @@ from prolit.data.mlm_dataset import IGNORE_INDEX
 from prolit.model.complex_mlm import build_complex_mlm, count_parameters
 
 if TYPE_CHECKING:
+    from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
+
     from prolit.config import MLMTrainingConfig
 
 
@@ -27,10 +29,10 @@ class ComplexMLMModule(L.LightningModule):
 
     def __init__(self, config: MLMTrainingConfig) -> None:
         super().__init__()
-        self.config = config
+        self.config: MLMTrainingConfig = config
         self.save_hyperparameters()
         self.model = build_complex_mlm(config.model)
-        self._logged_param_count = False
+        self._logged_param_count: bool = False
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
         out = self.model(
@@ -44,7 +46,7 @@ class ComplexMLMModule(L.LightningModule):
         if not self._logged_param_count:
             n = count_parameters(self.model)
             self.print(f"Model parameters: {n / 1e6:.1f}M")
-            self._logged_param_count = True
+            self._logged_param_count: bool = True
 
     def _masked_accuracy(self, logits: Tensor, labels: Tensor) -> Tensor | None:
         mask = labels != IGNORE_INDEX
@@ -72,7 +74,7 @@ class ComplexMLMModule(L.LightningModule):
     def test_step(self, batch: dict[str, Tensor], batch_idx: int) -> None:  # noqa: ARG002
         self._step(batch, "test")
 
-    def configure_optimizers(self) -> dict:
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         decay, no_decay = [], []
         for param in self.model.parameters():
             if not param.requires_grad:

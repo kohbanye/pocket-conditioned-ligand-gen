@@ -58,7 +58,7 @@ from prolit.tokenizers.ligand import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from rdkit.Chem.rdchem import Atom, RingInfo
+    from rdkit.Chem.rdchem import Atom, Mol, RingInfo
 
     from prolit.tokenizers.protein import PocketAtomData
 
@@ -309,7 +309,7 @@ def precompute_receptor_atom_features_from_text(
 
 
 def _receptor_atom_features_from_mol(
-    mol: object,
+    mol: Mol | None,
 ) -> dict[tuple[str, int, str], tuple[int, ...]]:
     from rdkit import Chem  # noqa: PLC0415
 

@@ -17,6 +17,8 @@ import numpy as np
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from Bio.PDB.Model import Model
+
     from prolit.config import PocketExtractionConfig
 
 # Standard amino acid 3-letter to 1-letter mapping
@@ -125,7 +127,7 @@ def precompute_pocket_atom_candidates_from_text(
     return _precompute_pocket_atoms_from_model(structure[0])
 
 
-def _precompute_pocket_atoms_from_model(model: object) -> PrecomputedPocketAtoms:
+def _precompute_pocket_atoms_from_model(model: Model) -> PrecomputedPocketAtoms:
     ca_list: list[np.ndarray] = []
     chain_ids: list[str] = []
     residue_indices: list[int] = []

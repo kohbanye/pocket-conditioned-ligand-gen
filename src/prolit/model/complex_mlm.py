@@ -41,11 +41,13 @@ def rotate_half(x: Tensor) -> Tensor:
 class RotaryEmbedding(nn.Module):
     """Caches cos/sin over positions and applies them per-head to q, k."""
 
+    inv_freq: Tensor  # registered as a buffer, which a type checker cannot see
+
     def __init__(self, dim: int, base: float = 10000.0) -> None:
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self._seq_len = 0
+        self._seq_len: int = 0
         self._cos: Tensor | None = None
         self._sin: Tensor | None = None
 
@@ -56,7 +58,7 @@ class RotaryEmbedding(nn.Module):
             and self._cos.device == device
         ):
             return
-        self._seq_len = seq_len
+        self._seq_len: int = seq_len
         t = torch.arange(seq_len, device=device, dtype=torch.float32)
         freqs = torch.outer(t, self.inv_freq.to(device))
         emb = torch.cat((freqs, freqs), dim=-1)
@@ -92,9 +94,9 @@ class MultiHeadAttention(nn.Module):
         layer_norm_eps: float,
     ) -> None:
         super().__init__()
-        self.n_heads = n_heads
-        self.d_head = d_model // n_heads
-        self.dropout = dropout
+        self.n_heads: int = n_heads
+        self.d_head: int = d_model // n_heads
+        self.dropout: float = dropout
         self.layernorm_qkv = nn.Sequential(
             nn.LayerNorm(d_model, eps=layer_norm_eps),
             nn.Linear(d_model, d_model * 3, bias=bias),
@@ -173,7 +175,7 @@ class TransformerBlock(nn.Module):
             bias=cfg.bias,
             layer_norm_eps=cfg.layer_norm_eps,
         )
-        self.scaling_factor = scaling_factor
+        self.scaling_factor: float = scaling_factor
 
     def forward(self, x: Tensor, attn_bias: Tensor | None) -> Tensor:
         x = x + self.attn(x, attn_bias) / self.scaling_factor
@@ -212,7 +214,7 @@ class ComplexMLM(nn.Module):
 
     def __init__(self, cfg: ComplexMLMConfig) -> None:
         super().__init__()
-        self.cfg = cfg
+        self.cfg: ComplexMLMConfig = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.hidden_size, padding_idx=PAD_ID)
         scaling = math.sqrt(cfg.num_hidden_layers / 36) if cfg.scale_residue else 1.0
         self.layers = nn.ModuleList(

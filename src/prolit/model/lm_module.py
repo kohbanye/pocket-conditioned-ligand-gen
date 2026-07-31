@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import lightning as L
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 
 from prolit.data.lm_dataset import PAD_SEGMENT
 from prolit.model.ligand_lm import build_qwen3_lm, count_parameters
 
 if TYPE_CHECKING:
+    from lightning.pytorch.utilities.types import OptimizerLRSchedulerConfig
+
     from prolit.config import LMTrainingConfig
 
 
@@ -47,15 +49,16 @@ class LigandLMModule(L.LightningModule):
 
     def __init__(self, config: LMTrainingConfig) -> None:
         super().__init__()
-        self.config = config
+        self.config: LMTrainingConfig = config
         self.save_hyperparameters()
         self.model = build_qwen3_lm(config.model)
-        self._logged_param_count = False
+        self._logged_param_count: bool = False
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
         # Build the block-diagonal causal mask in the parameter dtype so it
         # matches the attention scores' dtype under autocast.
-        attn_dtype = self.model.get_input_embeddings().weight.dtype
+        embed = cast("nn.Embedding", self.model.get_input_embeddings())
+        attn_dtype = embed.weight.dtype
         attn_mask = build_block_diagonal_mask(batch["segment_ids"], attn_dtype)
         out = self.model(
             input_ids=batch["input_ids"],
@@ -69,7 +72,7 @@ class LigandLMModule(L.LightningModule):
         if not self._logged_param_count:
             n = count_parameters(self.model)
             self.print(f"Model parameters: {n / 1e6:.1f}M")
-            self._logged_param_count = True
+            self._logged_param_count: bool = True
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:  # noqa: ARG002
         loss = self(batch)
@@ -87,7 +90,7 @@ class LigandLMModule(L.LightningModule):
         self.log("test/loss", loss, sync_dist=True)
         self.log("test/ppl", torch.exp(loss.detach()), sync_dist=True)
 
-    def configure_optimizers(self) -> dict:
+    def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
         # Decoupled weight decay: skip 1D params (norms, biases). Embeddings are
         # tied to the LM head, so decaying them is standard practice here.
         decay, no_decay = [], []

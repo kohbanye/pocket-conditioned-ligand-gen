@@ -255,7 +255,7 @@ def _build_rdkit_mol(
     return final_mol
 
 
-def _atom_features_from_mol(mol: Mol, num_atoms: int) -> dict[str, np.ndarray]:
+def _atom_features_from_mol(mol: Mol | None, num_atoms: int) -> dict[str, np.ndarray]:
     """Extract per-atom integer features for ``num_atoms`` heavy atoms.
 
     Returns arrays of shape ``(num_atoms,)`` for ``element``, ``charge``,
