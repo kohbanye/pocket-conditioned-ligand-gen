@@ -3,7 +3,7 @@
 ``scripts/jobs/eval_arm_chunk.sh`` splits an arm's 100 targets over N array
 tasks, each writing its own ``results/generation/<arm>/chunk<K>/``. This
 concatenates the per-molecule dumps into ``results/generation/<arm>/
-per_molecule.parquet`` so :mod:`scripts.compare_arms` (which derives every
+per_molecule.parquet`` so ``compare_arms.py`` (which derives every
 aggregate from the per-molecule rows) can read the arm as if it had been scored
 in one job.
 

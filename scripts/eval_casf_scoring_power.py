@@ -12,7 +12,7 @@ measures both honestly on the 285 crystal poses.
 
 Run::
 
-    uv run python scripts/eval_casf_scoring.py --mlm-ckpt ... --vqvae-ckpt ... \
+    uv run python scripts/eval_casf_scoring_power.py --mlm-ckpt ... --vqvae-ckpt ... \
         --norm-stats ... --rescore-ckpt ... --pooling mean --out-csv out.csv
 """
 
@@ -27,11 +27,11 @@ import torch
 
 from prolit.config import (
     AtomVQVAETrainingConfig,
-    ComplexMLMConfig,
     MLMTrainingConfig,
     PocketExtractionConfig,
+    ProLITMLMConfig,
 )
-from prolit.model.mlm_module import ComplexMLMModule
+from prolit.model.mlm_module import ProLITMLMModule
 from prolit.model.mlm_score import ligand_pll
 from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.lm_vocab import AtomLMVocab
@@ -124,9 +124,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
 
     mlm_cfg = MLMTrainingConfig(
-        model=ComplexMLMConfig(atom_codebook_size=args.codebook_size)
+        model=ProLITMLMConfig(atom_codebook_size=args.codebook_size)
     )
-    mlm = ComplexMLMModule.load_from_checkpoint(
+    mlm = ProLITMLMModule.load_from_checkpoint(
         args.mlm_ckpt, config=mlm_cfg, map_location=device
     ).model
     mlm.eval().to(device)
@@ -150,7 +150,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         rescorer = ComplexRescoreModule.load_from_checkpoint(
             args.rescore_ckpt,
             config=RescoreTrainingConfig(
-                model=ComplexMLMConfig(atom_codebook_size=args.codebook_size),
+                model=ProLITMLMConfig(atom_codebook_size=args.codebook_size),
                 pooling=args.pooling,
                 head_interaction_layers=args.interaction_layers,
             ),

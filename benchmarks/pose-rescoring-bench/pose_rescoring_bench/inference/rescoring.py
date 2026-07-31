@@ -1,6 +1,6 @@
 """CASF-2016 pose-rescoring inference -> per-pose dump (pdbid,pose,rmsd,head,pll).
 
-Ported from ``scripts/eval_casf_rescore.py`` (inference half only; metrics live
+Ported from ``scripts/eval_casf_docking_power.py`` (inference half only; metrics live
 in :mod:`pose_rescoring_bench.metrics.rescoring`). For each target we extract the pocket
 once
 around the crystal ligand, then score the docking decoys (native excluded by

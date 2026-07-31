@@ -1,6 +1,6 @@
 """CASF-2016 affinity inference -> per-complex dump (pdbid,logka,cluster,pll,head).
 
-Ported from ``scripts/eval_casf_scoring.py`` (inference half only). Each crystal
+Ported from ``scripts/eval_casf_scoring_power.py`` (inference half only). Each crystal
 complex is encoded once and scored by the affinity head (raw output = pK) and by
 the MLM pseudo-log-likelihood; metrics live in
 :mod:`pose_rescoring_bench.metrics.affinity`.
