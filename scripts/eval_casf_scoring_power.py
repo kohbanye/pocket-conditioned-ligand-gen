@@ -13,7 +13,7 @@ measures both honestly on the 285 crystal poses.
 Run::
 
     uv run python scripts/eval_casf_scoring_power.py --mlm-ckpt ... --vqvae-ckpt ... \
-        --norm-stats ... --rescore-ckpt ... --pooling mean --out-csv out.csv
+        --norm-stats ... --rescore-ckpt ... --out-csv out.csv
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ from prolit.config import (
 )
 from prolit.model.mlm_module import ProLITMLMModule
 from prolit.model.mlm_score import ligand_pll
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
@@ -74,11 +74,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     p.add_argument("--norm-stats", type=Path, required=True)
     p.add_argument("--rescore-ckpt", type=Path, default=None)
     p.add_argument(
-        "--pooling",
-        choices=["mean", "meanmax", "attn", "xattn", "pairsum"],
-        default="mean",
-    )
-    p.add_argument(
         "--affinity-head",
         action="store_true",
         help="The head regresses pK (higher = stronger), so use its raw output. "
@@ -91,12 +86,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Head was trained on ligand efficiency (pK / heavy-atom count); "
         "multiply its output by the ligand token count to recover pK. Implies "
         "--affinity-head.",
-    )
-    p.add_argument(
-        "--interaction-layers",
-        type=int,
-        default=0,
-        help="Must match the head ckpt's trainable interaction transformer depth.",
     )
     p.add_argument("--casf-dir", type=Path, default=Path("data/casf2016"))
     p.add_argument("--codebook-size", type=int, default=8192)
@@ -116,9 +105,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     vq_cfg = AtomVQVAETrainingConfig()
     vq_cfg.atom.codebook_size = args.codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.vqvae_ckpt, config=vq_cfg, map_location=device
-    )
+    module = load_atom_vqvae(args.vqvae_ckpt, device)
     module.eval().to(device)
     norm = torch.load(args.norm_stats, weights_only=False)
     module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
@@ -150,9 +137,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         rescorer = ComplexRescoreModule.load_from_checkpoint(
             args.rescore_ckpt,
             config=RescoreTrainingConfig(
-                model=ProLITMLMConfig(atom_codebook_size=args.codebook_size),
-                pooling=args.pooling,
-                head_interaction_layers=args.interaction_layers,
+                model=ProLITMLMConfig(atom_codebook_size=args.codebook_size)
             ),
             map_location=device,
         )

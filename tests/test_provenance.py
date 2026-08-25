@@ -140,11 +140,21 @@ def test_callback_is_silent_off_rank_zero(tmp_path: Path) -> None:
 
 
 def test_every_training_script_records_provenance() -> None:
-    """The part that rots: a new trainer added without the callback."""
+    """The part that rots: a new trainer added without the callback.
+
+    ``write_manifest(`` counts too. The callback reads its output directory off
+    a ``ModelCheckpoint``, so a script that deliberately writes no checkpoints
+    -- a hyperparameter search whose trials are thrown away -- cannot use it and
+    calls the writer directly instead. What the rule is actually about is that
+    the run records the command and SHA that produced it, not which of the two
+    ways it does so.
+    """
     offenders = [
         p.name
         for p in sorted((REPO / "pipelines" / "train").glob("*.py"))
-        if "RecordProvenance(" not in p.read_text()
+        if not any(
+            call in p.read_text() for call in ("RecordProvenance(", "write_manifest(")
+        )
     ]
     assert not offenders, f"train without recording provenance: {offenders}"
 

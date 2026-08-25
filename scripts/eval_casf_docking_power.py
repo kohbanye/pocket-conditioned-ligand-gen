@@ -39,10 +39,10 @@ from prolit.config import (
 )
 from prolit.model.mlm_module import ProLITMLMModule
 from prolit.model.mlm_score import ligand_pll
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
@@ -95,23 +95,11 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         help="ComplexRescoreModule ckpt (head mode).",
     )
     parser.add_argument(
-        "--pooling",
-        choices=["mean", "meanmax", "attn", "xattn", "pairsum"],
-        default="mean",
-        help="Must match the head ckpt's pooling (meanmax head has a 2H input).",
-    )
-    parser.add_argument(
         "--tta-rotations",
         type=int,
         default=1,
         help="Average the head over this many random frame rotations (1 = off). "
         "Same physical pose, different VQ codes -> cancels quantization noise.",
-    )
-    parser.add_argument(
-        "--interaction-layers",
-        type=int,
-        default=0,
-        help="Must match the head ckpt: trainable transformer layers before pooling.",
     )
     parser.add_argument(
         "--exclude-native",
@@ -163,9 +151,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
         vocab_codebook = 2 * args.codebook_size
     else:
-        module = AtomVQVAEModule.load_from_checkpoint(
-            args.vqvae_ckpt, config=vq_cfg, map_location=device
-        )
+        module = load_atom_vqvae(args.vqvae_ckpt, device)
         module.eval().to(device)
         norm = torch.load(args.norm_stats, weights_only=False)
         module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
@@ -200,27 +186,16 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         from prolit.data.rescore_dataset import ligand_mask  # noqa: PLC0415
         from prolit.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
 
-        # Prefer the config stored in the checkpoint: it records every option
-        # that changes the module's parameters (pooling, interaction layers, the
-        # per-atom auxiliary head, ...). Rebuilding it from CLI flags silently
-        # drifts -- an atom-aux checkpoint failed to load because the eval had no
-        # such flag, so its atom_head weights had nowhere to go.
+        # Prefer the config stored in the checkpoint: it records the training
+        # settings the module reads when it builds itself. Rebuilding it from
+        # CLI flags silently drifts from what the weights were trained with.
         saved = torch.load(
             args.rescore_ckpt, map_location="cpu", weights_only=False
         ).get("hyper_parameters", {})
         cfg = saved.get("config")
         if cfg is None:
             cfg = RescoreTrainingConfig(
-                model=ProLITMLMConfig(atom_codebook_size=args.codebook_size),
-                pooling=args.pooling,
-                head_interaction_layers=args.interaction_layers,
-            )
-        else:
-            logger.info(
-                "using checkpoint config: pooling=%s interaction=%d atom_aux=%.2f",
-                cfg.pooling,
-                cfg.head_interaction_layers,
-                cfg.atom_aux_weight,
+                model=ProLITMLMConfig(atom_codebook_size=args.codebook_size)
             )
         rescorer = ComplexRescoreModule.load_from_checkpoint(
             args.rescore_ckpt, config=cfg, map_location=device

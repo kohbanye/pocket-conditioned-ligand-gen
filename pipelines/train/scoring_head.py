@@ -64,11 +64,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     parser.add_argument("--listwise-tau", type=float, default=None)
     parser.add_argument(
-        "--atom-aux-weight",
-        type=float,
+        "--listwise-topk",
+        type=int,
         default=None,
-        help="Weight of the per-ligand-atom displacement auxiliary loss.",
+        help="Size of the EXTRA top-k listwise term (0 = off).",
     )
+    parser.add_argument("--listwise-topk-weight", type=float, default=None)
+    parser.add_argument("--listwise-topk-by-label", action="store_true")
+    parser.add_argument("--listwise-topk-tau", type=float, default=None)
+    parser.add_argument("--drop-native-pose", action="store_true")
     parser.add_argument("--complexes-per-batch", type=int, default=None)
     parser.add_argument(
         "--max-per-group",
@@ -77,26 +81,15 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Cap docs taken per group in a batch (affinity: ligands per protein).",
     )
     parser.add_argument(
-        "--pooling",
-        choices=["mean", "meanmax", "attn", "xattn", "pairsum"],
-        default=None,
-    )
-    parser.add_argument(
         "--freeze-encoder",
         action="store_true",
-        help="Train only pooling+head (encoder fixed); pairs with ranking loss.",
+        help="Train only the head (encoder fixed); pairs with ranking loss.",
     )
     parser.add_argument(
         "--efficiency",
         action="store_true",
         help="Regress pK / heavy-atom count (ligand efficiency) to strip the "
         "molecular-size confound; eval multiplies back by size.",
-    )
-    parser.add_argument(
-        "--interaction-layers",
-        type=int,
-        default=None,
-        help="Trainable transformer layers over the tokens before pooling.",
     )
     parser.add_argument(
         "--mlm-aux-weight",
@@ -160,10 +153,18 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.num_workers = args.num_workers
     if args.ranking_loss_weight is not None:
         config.ranking_loss_weight = args.ranking_loss_weight
-    if args.atom_aux_weight is not None:
-        config.atom_aux_weight = args.atom_aux_weight
     if args.listwise_weight is not None:
         config.listwise_loss_weight = args.listwise_weight
+    if args.listwise_topk is not None:
+        config.listwise_topk = args.listwise_topk
+    if args.listwise_topk_weight is not None:
+        config.listwise_topk_weight = args.listwise_topk_weight
+    if args.listwise_topk_by_label:
+        config.listwise_topk_by_label = True
+    if args.listwise_topk_tau is not None:
+        config.listwise_topk_tau = args.listwise_topk_tau
+    if args.drop_native_pose:
+        config.drop_native_pose = True
     if args.listwise_tau is not None:
         config.listwise_label_tau = args.listwise_tau
         config.listwise_pred_tau = args.listwise_tau
@@ -175,12 +176,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.freeze_encoder = True
     if args.efficiency:
         config.label_divide_by_size = True
-    if args.interaction_layers is not None:
-        config.head_interaction_layers = args.interaction_layers
     if args.mlm_aux_weight is not None:
         config.mlm_aux_weight = args.mlm_aux_weight
-    if args.pooling is not None:
-        config.pooling = args.pooling
     if args.block_size is not None:
         config.block_size = args.block_size
     if args.max_docs is not None:
@@ -200,7 +197,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     # Pin the checkpoint dir to the run name. The default (a wandb run hash)
     # is non-deterministic, so a caller that has to *discover* which dir a job
     # produced races when several jobs run concurrently -- it once made a
-    # meanmax job evaluate a sibling attn job's checkpoint. A run-name path is
+    # sweep point evaluate a sibling point's checkpoint. A run-name path is
     # unique per experiment and knowable in advance.
     ckpt_dir = (
         Path("pocket-ligand-rescore") / args.run_name / "checkpoints"

@@ -30,6 +30,12 @@ def main() -> None:
     parser.add_argument("--variant", default="joint")
     parser.add_argument("--results", type=Path, default=Path("results"))
     parser.add_argument("--max-targets", type=int, default=None)
+    parser.add_argument(
+        "--n-frames",
+        type=int,
+        default=1,
+        help="average the head score over this many frame rotations",
+    )
     add_seed_argument(parser)
     args = parser.parse_args()
     seed_from_args(args)
@@ -43,6 +49,7 @@ def main() -> None:
         return
     cfg = EvalConfig()
     cfg.rescoring.max_targets = args.max_targets
+    cfg.rescoring.n_frames = args.n_frames
     out_dir = args.results / "rescoring" / args.variant
     for i, head in enumerate(rescoring_ckpts.heads):
         df = rescoring.score_casf(
@@ -52,6 +59,8 @@ def main() -> None:
             head_index=i,
         )
         label = head.label or f"head{i}"
+        if args.n_frames > 1:
+            label = f"{label}_f{args.n_frames}"
         write_pose_scores(df, out_dir / f"{label}.csv")
         logger.info("wrote %d poses for head %s", len(df), label)
 

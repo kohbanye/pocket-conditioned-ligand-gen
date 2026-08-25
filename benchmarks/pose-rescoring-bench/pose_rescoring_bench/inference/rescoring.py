@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 import torch
 from prolit.model.mlm_score import ligand_pll
+from prolit.seeding import rng_for
+from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.ligand import parse_sdf
 
 from pose_rescoring_bench.inference.encode import (
@@ -88,7 +90,6 @@ def score_casf(
     rescorer = (
         load_rescorer(
             resolve_rescore_ckpt(paths.source_repo, head_spec.ckpt),
-            head_spec.pooling,
             codebook_size,
             device,
         )
@@ -106,6 +107,67 @@ def score_casf(
         rows.extend(_score_target(tid, casf, enc, mlm, mask_id, rescorer, cfg, device))
     cols = ["pdbid", "pose", "rmsd", "head", "pll"]
     return pd.DataFrame(rows, columns=cols)  # ty: ignore[invalid-argument-type]
+
+
+def _head_scores(
+    seqs: list[list[int] | None],
+    rescorer: Any,  # noqa: ANN401  (source-repo head)
+    device: torch.device,
+    batch_size: int = 64,
+) -> np.ndarray:
+    """Predicted RMSD for each sequence (NaN where the pose did not encode)."""
+    out = np.full(len(seqs), np.nan)
+    idx = [i for i, q in enumerate(seqs) if q is not None]
+    for start in range(0, len(idx), batch_size):
+        chunk = idx[start : start + batch_size]
+        width = max(len(seqs[i]) for i in chunk)  # ty: ignore[possibly-unbound]
+        ids = torch.zeros((len(chunk), width), dtype=torch.long, device=device)
+        att = torch.zeros_like(ids)
+        lig = torch.zeros((len(chunk), width), dtype=torch.bool, device=device)
+        for row, i in enumerate(chunk):
+            q = seqs[i]
+            ids[row, : len(q)] = torch.tensor(q, device=device)
+            att[row, : len(q)] = 1
+            lig[row, : len(q)] = torch.tensor(
+                sequence_ligand_mask(q), device=device
+            )
+        with torch.no_grad():
+            pred = rescorer(
+                {"input_ids": ids, "attention_mask": att, "ligand_mask": lig}
+            )
+        out[chunk] = pred.float().cpu().numpy()
+    return out
+
+
+def _frame_averaged(  # noqa: PLR0913
+    mols: list[dict],
+    p_codes: list[int],
+    frame: Any,  # noqa: ANN401  (source-repo pocket frame)
+    enc: PoseEncoder,
+    rescorer: Any,  # noqa: ANN401  (source-repo head)
+    n_frames: int,
+    tid: str,
+    device: torch.device,
+) -> np.ndarray:
+    """Mean predicted RMSD over ``n_frames`` frame rotations of the complex.
+
+    The descriptors are computed once and rotated, so extra frames cost one
+    quantization and one head pass each, not a re-featurization.
+    """
+    descs = enc.ligand_descs(mols, frame)
+    rng = rng_for(0, f"frame_average:{tid}")
+    acc = np.zeros(len(mols))
+    seen = np.zeros(len(mols))
+    for k in range(max(n_frames, 1)):
+        rot = None if k == 0 else random_rotation_matrix(rng)
+        codes = p_codes if rot is None else enc.pocket_codes_rotated(rot)
+        pred = _head_scores(
+            enc.seqs_from_descs(codes, descs, rotation=rot), rescorer, device
+        )
+        ok = ~np.isnan(pred)
+        acc[ok] += pred[ok]
+        seen[ok] += 1
+    return np.where(seen > 0, acc / np.maximum(seen, 1), np.nan)
 
 
 def _score_target(  # noqa: PLR0913
@@ -136,13 +198,35 @@ def _score_target(  # noqa: PLR0913
         p_codes, frame = setup
         rmsd = _read_rmsd(rmsd_dat)
         poses = parse_mol2_multi(decoys.read_text())
-        rows: list[dict] = []
+        scored: list[tuple[str, dict, float]] = []
         if not cfg.exclude_native:
+            scored.append((f"{tid}_native", native, 0.0))
+        scored.extend(
+            (name, mol, rmsd[name]) for name, mol in poses if name in rmsd
+        )
+        # One frame reproduces the original per-pose path; more than one
+        # averages the head over frames the score should already be blind to.
+        avg = (
+            _frame_averaged(
+                [m for _, m, _ in scored],
+                p_codes,
+                frame,
+                enc,
+                rescorer,
+                cfg.n_frames,
+                tid,
+                device,
+            )
+            if rescorer is not None and cfg.n_frames > 1
+            else None
+        )
+        rows: list[dict] = []
+        for i, (name, mol, ref) in enumerate(scored):
             rows.extend(
                 _score_pose(
-                    f"{tid}_native",
-                    native,
-                    0.0,
+                    name,
+                    mol,
+                    ref,
                     tid,
                     p_codes,
                     frame,
@@ -151,25 +235,9 @@ def _score_target(  # noqa: PLR0913
                     mask_id,
                     rescorer,
                     device,
+                    head_override=None if avg is None else float(avg[i]),
                 )
             )
-        for name, mol in poses:
-            if name in rmsd:
-                rows.extend(
-                    _score_pose(
-                        name,
-                        mol,
-                        rmsd[name],
-                        tid,
-                        p_codes,
-                        frame,
-                        enc,
-                        mlm,
-                        mask_id,
-                        rescorer,
-                        device,
-                    )
-                )
     except Exception:
         logger.exception("target %s failed", tid)
         return []
@@ -188,12 +256,15 @@ def _score_pose(  # noqa: PLR0913
     mask_id: int,
     rescorer: Any,  # noqa: ANN401  (source-repo head)
     device: torch.device,
+    head_override: float | None = None,
 ) -> list[dict]:
     seq = enc.ligand_seq(p_codes, mol, frame)
     if seq is None:
         return []
     head = float("nan")
-    if rescorer is not None:
+    if head_override is not None:
+        head = -head_override  # lower predicted RMSD = higher score
+    elif rescorer is not None:
         ids = torch.tensor([seq], device=device)
         batch = {
             "input_ids": ids,

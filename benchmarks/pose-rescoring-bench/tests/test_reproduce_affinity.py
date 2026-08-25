@@ -1,8 +1,13 @@
-"""Reproduce the source repo's known CASF affinity numbers from copied dumps.
+"""Reproduce the CASF affinity numbers from the local dumps.
 
-Guards the metric implementations against the real data: the LF5 z-sum ensemble
-must reproduce OUR paper number and GenScore/Vina must reproduce theirs, matching
-``outputs/casf/method_comparison.csv`` (copied to ``results/affinity/``).
+Guards the metric implementations against real data. The arm is a SINGLE
+mean-pooled head: this file used to pin a five-member z-sum ensemble over
+``{mean,attn,meanmax} x {ic50,kdki}`` heads, but the attn and meanmax readouts
+were removed after each was measured and neither beat the plain ligand-mean, so
+those dumps moved to ``docs/results/stale_prefix_2026-08-25/``.
+
+Regenerated with the fixed V2000 counts-line parser, which changes the five
+CASF ligands that carry 100+ atoms or bonds (3ag9, 3bv9, 3prs, 3pww, 3uri).
 """
 
 from __future__ import annotations
@@ -16,14 +21,7 @@ from pose_rescoring_bench.aggregate import affinity_metrics
 from pose_rescoring_bench.metrics import affinity as A
 
 _RESULTS = Path(__file__).resolve().parent.parent / "results" / "affinity"
-_JOINT = _RESULTS / "joint"
-_LF5 = (
-    "mean_ic50.csv",
-    "attn_ic50.csv",
-    "mean_kdki.csv",
-    "attn_kdki.csv",
-    "meanmax_kdki.csv",
-)
+_JOINT = _RESULTS / "joint" / "kdki-mean.csv"
 
 # Result dumps are not tracked in git -- only code is.
 pytestmark = pytest.mark.skipif(
@@ -32,15 +30,20 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _lf5_ensemble() -> pd.DataFrame:
-    frames = [pd.read_csv(_JOINT / f) for f in _LF5]
-    return A.zsum_ensemble(frames)
+def _ours() -> pd.DataFrame:
+    return pd.read_csv(_JOINT)
 
 
-def test_our_lf5_ensemble_matches_paper() -> None:
-    ens = _lf5_ensemble()
-    assert A.scoring_r(ens) == pytest.approx(0.7899, abs=1e-3)
-    assert A.ranking_rho(ens) == pytest.approx(0.6737, abs=1e-3)
+def test_our_head_matches_recorded_numbers() -> None:
+    ours = _ours()
+    assert A.scoring_r(ours) == pytest.approx(0.7711, abs=1e-3)
+    assert A.ranking_rho(ours) == pytest.approx(0.6474, abs=1e-3)
+
+
+def test_affinity_still_trails_genscore() -> None:
+    """Recorded as a fact, not a target: the pose head leads, this one does not."""
+    gen = pd.read_csv(_RESULTS / "genscore" / "scoring.csv")
+    assert A.scoring_r(_ours()) < A.scoring_r(gen, "score")
 
 
 def test_genscore_matches_method_comparison() -> None:
@@ -57,11 +60,13 @@ def test_vina_scoring_power_matches_reference() -> None:
 
 def test_affinity_metrics_table_assembles() -> None:
     preds = {
-        "OURS (LF5)": _lf5_ensemble(),
+        "OURS (joint)": _ours(),
         "GenScore": pd.read_csv(_RESULTS / "genscore" / "scoring.csv").rename(
             columns={"score": "head"},
         ),
     }
     table = affinity_metrics(preds)
     assert table.loc["GenScore", "scoring_R"] == pytest.approx(0.8159, abs=1e-3)
-    assert table.loc["OURS (LF5)", "scoring_R"] == pytest.approx(0.7899, abs=1e-3)
+    assert table.loc["OURS (joint)", "scoring_R"] == pytest.approx(
+        0.7711, abs=1e-3
+    )

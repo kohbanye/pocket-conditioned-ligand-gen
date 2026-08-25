@@ -20,9 +20,9 @@ So every run writes ``run.json`` into its own directory:
 ``job`` is present when the run came from ``jobs/submit.py``, which passes it
 through the environment -- the submitter cannot know the run directory (with no
 ``--run-name`` it is the W&B run id, decided at startup), so the run records it
-instead. For one arm of a ``--sweep`` it also carries ``"sweep": {"pooling":
-"attn"}``: which comparison this run belongs to, which the command alone does
-not say.
+instead. For one arm of a ``--sweep`` it also carries
+``"sweep": {"listwise-tau": "0.5"}``: which comparison this run belongs to,
+which the command alone does not say.
 
 The dirty flag matters more than the SHA. A clean SHA means the code is
 recoverable; a dirty one means it is not, and a number produced from it cannot be
