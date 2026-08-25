@@ -69,7 +69,6 @@ from prolit.tokenizers.loaders import (
     load_masked_lm,
     load_norm_stats,
     load_pose_refiner,
-    load_scoring_head,
     load_separate_tokenizer,
     load_tokenizer,
 )
@@ -103,7 +102,6 @@ __all__ = [
     "load_masked_lm",
     "load_norm_stats",
     "load_pose_refiner",
-    "load_scoring_head",
     "load_separate_tokenizer",
     "load_tokenizer",
     "mol_to_dict",

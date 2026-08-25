@@ -133,26 +133,6 @@ def load_masked_lm(
     return module.model, config.model.mask_token_id
 
 
-def load_scoring_head(
-    ckpt: str | Path,
-    codebook_size: int,
-    device: torch.device,
-) -> Any:  # noqa: ANN401
-    """Load a pose-rescoring or affinity head (encoder + ligand-mean MLP)."""
-    from prolit.config import RescoreTrainingConfig  # noqa: PLC0415
-    from prolit.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
-
-    config = RescoreTrainingConfig()
-    config.model.atom_codebook_size = codebook_size
-    return (
-        ComplexRescoreModule.load_from_checkpoint(
-            str(ckpt), config=config, map_location=device
-        )
-        .eval()
-        .to(device)
-    )
-
-
 def load_atom_vqvae(
     ckpt: str | Path,
     device: torch.device,

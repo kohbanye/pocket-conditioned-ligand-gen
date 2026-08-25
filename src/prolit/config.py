@@ -567,17 +567,13 @@ class RescoreTrainingConfig:
     # ranking) and losses beyond ~this add noise.
     rmsd_cap: float = 8.0
 
-    # Pairwise ranking loss (docking power is a ranking task, not regression).
-    # When > 0, batches are grouped by complex (native pose has RMSD 0.0 marks
-    # each group boundary) and a margin loss pushes pred(lower-RMSD) below
-    # pred(higher-RMSD) within each complex, added to the regression loss.
-    ranking_loss_weight: float = 0.0
-    ranking_margin: float = 0.5
-
     # ListNet-style listwise loss over the poses of one complex: softmax(-pred)
-    # is matched to softmax(-rmsd / tau). Unlike the pairwise margin loss it
-    # spends its gradient on the near-native end (which pose wins) instead of
-    # weighting every pose pair equally, and the model stays a per-pose scorer.
+    # is matched to softmax(-rmsd / tau). It spends its gradient on the
+    # near-native end (which pose wins) rather than on every pose pair equally,
+    # and the model stays a per-pose scorer. A pairwise margin loss was the
+    # alternative and was measured: it cuts the total number of band-crossing
+    # inversions 3.8x but leaves the number of targets carrying at least one
+    # unchanged (6 of 95 either way), and that count is what DP@2A reads.
     # Cap the number of TRAIN docs (0 = all). Prefix of the corpus, so it takes
     # whole complexes; used to compare corpora at matched size.
     max_docs: int = 0
@@ -609,22 +605,10 @@ class RescoreTrainingConfig:
     # 0 = take the whole group (pose corpus: ~20 poses/complex).
     max_per_group: int = 0
 
-    # Freeze the pretrained encoder and train only the head. Cuts the
-    # trainable capacity from 99M to ~1M so a ranking loss can't memorize the
-    # small affinity corpus; the head re-weights fixed features instead.
-    freeze_encoder: bool = False
-
     # Regress ligand efficiency (label / heavy-atom count) instead of the raw
     # label. For the affinity head this decorrelates the target from molecular
     # size; eval multiplies the prediction back by size to recover pK.
     label_divide_by_size: bool = False
-
-    # Masked-LM auxiliary loss during affinity fine-tuning: keeps the encoder's
-    # structure knowledge intact (regularizer) while a ranking loss adapts it to
-    # affinity, so the ranking objective can't collapse/memorize the small corpus
-    # the way it did head-only. 0 = off.
-    mlm_aux_weight: float = 0.0
-    mlm_aux_mask_prob: float = 0.15
 
     learning_rate: float = 1e-4  # low: the encoder is pretrained
     min_lr_ratio: float = 0.1

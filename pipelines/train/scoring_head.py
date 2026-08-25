@@ -51,12 +51,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser.add_argument("--atom-codebook-size", type=int, default=8192)
     parser.add_argument("--early-stop-patience", type=int, default=0)
     parser.add_argument(
-        "--ranking-loss-weight",
-        type=float,
-        default=None,
-        help="Add pairwise within-complex ranking loss (groups by RMSD==0 native).",
-    )
-    parser.add_argument(
         "--listwise-weight",
         type=float,
         default=None,
@@ -81,22 +75,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Cap docs taken per group in a batch (affinity: ligands per protein).",
     )
     parser.add_argument(
-        "--freeze-encoder",
-        action="store_true",
-        help="Train only the head (encoder fixed); pairs with ranking loss.",
-    )
-    parser.add_argument(
         "--efficiency",
         action="store_true",
         help="Regress pK / heavy-atom count (ligand efficiency) to strip the "
         "molecular-size confound; eval multiplies back by size.",
-    )
-    parser.add_argument(
-        "--mlm-aux-weight",
-        type=float,
-        default=None,
-        help="Weight of a masked-LM regularizer during affinity fine-tuning "
-        "(lets a ranking loss adapt the encoder without collapsing it).",
     )
     parser.add_argument(
         "--label-cap",
@@ -151,8 +133,6 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.learning_rate = args.lr
     if args.num_workers is not None:
         config.num_workers = args.num_workers
-    if args.ranking_loss_weight is not None:
-        config.ranking_loss_weight = args.ranking_loss_weight
     if args.listwise_weight is not None:
         config.listwise_loss_weight = args.listwise_weight
     if args.listwise_topk is not None:
@@ -172,12 +152,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.complexes_per_batch = args.complexes_per_batch
     if args.max_per_group is not None:
         config.max_per_group = args.max_per_group
-    if args.freeze_encoder:
-        config.freeze_encoder = True
     if args.efficiency:
         config.label_divide_by_size = True
-    if args.mlm_aux_weight is not None:
-        config.mlm_aux_weight = args.mlm_aux_weight
     if args.block_size is not None:
         config.block_size = args.block_size
     if args.max_docs is not None:
