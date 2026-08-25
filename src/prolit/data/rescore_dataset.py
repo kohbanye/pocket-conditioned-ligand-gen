@@ -246,7 +246,7 @@ class RescoreDataModule(L.LightningDataModule):
         nw = self.config.num_workers
         # Both the pairwise ranking loss and the listwise loss need whole
         # complexes in a batch, not a random sample of poses.
-        if self.config.ranking_loss_weight > 0 or self.config.listwise_loss_weight > 0:
+        if self.config.listwise_loss_weight > 0:
             sampler = GroupBatchSampler(
                 self._datasets[split].groups,
                 self.config.complexes_per_batch,

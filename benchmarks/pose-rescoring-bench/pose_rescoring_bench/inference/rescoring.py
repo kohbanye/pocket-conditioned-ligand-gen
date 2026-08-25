@@ -61,7 +61,9 @@ def score_casf(
     """Score CASF poses with one variant head (vqvae, mlm, head) -> per-pose DataFrame.
 
     ``head_index`` selects which pose head to use; run once per head to build the
-    multi-head ensemble downstream. ``pll`` is head-independent and always filled.
+    multi-head ensemble downstream. ``pll`` is head-independent and is filled
+    only when ``cfg.score_mode`` reads it -- it is the more expensive of the two
+    scorers, so a head-mode run does not pay for a column nothing consumes.
     The codebook size is taken from ``ckpts.codebook_size`` (8192 for the joint
     tokenizer, 16384 for the separate protein+ligand tokenizer).
     """
@@ -236,6 +238,7 @@ def _score_target(  # noqa: PLR0913
                     rescorer,
                     device,
                     head_override=None if avg is None else float(avg[i]),
+                    want_pll=cfg.score_mode in ("pll", "ensemble"),
                 )
             )
     except Exception:
@@ -257,6 +260,8 @@ def _score_pose(  # noqa: PLR0913
     rescorer: Any,  # noqa: ANN401  (source-repo head)
     device: torch.device,
     head_override: float | None = None,
+    *,
+    want_pll: bool = False,
 ) -> list[dict]:
     seq = enc.ligand_seq(p_codes, mol, frame)
     if seq is None:
@@ -275,5 +280,9 @@ def _score_pose(  # noqa: PLR0913
         }
         with torch.no_grad():
             head = -float(rescorer(batch).item())  # lower predicted RMSD = higher score
-    pll = float(ligand_pll(mlm, seq, mask_id, device))
+    # One encoder pass per ligand token, so this costs more than the whole
+    # frame-averaged head: 126 s against 40 s over 600 poses on one GPU. It is
+    # the zero-shot scorer, not an input to the head's score, so it is only
+    # computed when ``score_mode`` actually reads it.
+    pll = float(ligand_pll(mlm, seq, mask_id, device)) if want_pll else float("nan")
     return [{"pdbid": tid, "pose": name, "rmsd": rmsd, "head": head, "pll": pll}]

@@ -55,15 +55,6 @@ class ComplexRescoreModule(L.LightningModule):
             nn.LayerNorm(h),
             nn.Linear(h, 1),
         )
-        if getattr(config, "freeze_encoder", False):
-            # Freeze the 99M-param encoder so only the MLP head learns.
-            # A ranking loss trained end-to-end memorized the tiny affinity corpus
-            # (train/rank -> 0, val/rank 0.5); with the encoder fixed the head
-            # can only re-weight existing features, so the ordering signal has a
-            # chance to generalize instead of overfitting.
-            self.encoder.eval()
-            for p in self.encoder.parameters():
-                p.requires_grad = False
         self._logged: bool = False
 
     def _pool(self, hs: Tensor, batch: dict[str, Tensor]) -> Tensor:
@@ -106,30 +97,6 @@ class ComplexRescoreModule(L.LightningModule):
         if not self._logged:
             self.print(f"Rescorer parameters: {count_parameters(self) / 1e6:.1f}M")
             self._logged: bool = True
-
-    def _ranking_loss(self, pred: Tensor, rmsd: Tensor, groups: Tensor) -> Tensor:
-        """Pairwise margin loss within each complex: for poses i,j with
-        rmsd_i < rmsd_j, push pred_i below pred_j by at least ``margin``.
-        Directly optimizes the pose ordering that docking power measures."""
-        margin = self.config.ranking_margin
-        total = pred.new_zeros(())
-        npairs = 0
-        for g in groups.unique():
-            m = groups == g
-            p, r = pred[m], rmsd[m]
-            if p.numel() < 2:  # noqa: PLR2004
-                continue
-            dp = p.unsqueeze(0) - p.unsqueeze(1)  # pred_j - pred_i  (rows i, cols j)
-            dr = r.unsqueeze(0) - r.unsqueeze(1)  # rmsd_j - rmsd_i
-            # pairs where i is the better pose (rmsd_i < rmsd_j): want pred_i < pred_j
-            better = dr > 0
-            if not better.any():
-                continue
-            # penalize pred_i >= pred_j - margin  ->  relu(margin - (pred_j - pred_i))
-            hinge = torch.relu(margin - dp)[better]
-            total = total + hinge.sum()
-            npairs += int(better.sum())
-        return total / max(1, npairs)
 
     def _listwise_loss(
         self, pred: Tensor, rmsd: Tensor, groups: Tensor, topk: int = 0
@@ -201,23 +168,6 @@ class ComplexRescoreModule(L.LightningModule):
             n += 1
         return total / max(1, n)
 
-    def _mlm_aux_loss(self, batch: dict[str, Tensor]) -> Tensor:
-        """Masked-LM loss on the same complexes: mask a fraction of the structure
-        (codebook) tokens and predict them through the encoder's MLM head. Used
-        as a regularizer so a ranking loss adapts the encoder to affinity without
-        collapsing the pretrained structure representation."""
-        ids = batch["input_ids"]
-        attn = batch["attention_mask"].bool()
-        cb = self.config.model.atom_codebook_size or 0
-        maskable = attn & (ids < cb)  # only real structure tokens
-        rand = torch.rand(ids.shape, device=ids.device)
-        do = (rand < self.config.mlm_aux_mask_prob) & maskable
-        if not bool(do.any()):
-            return ids.new_zeros((), dtype=torch.float)
-        labels = ids.masked_fill(~do, -100)
-        masked = ids.masked_fill(do, self.config.model.mask_token_id)
-        return self.encoder(masked, batch["attention_mask"], labels=labels).loss
-
     def _step(self, batch: dict[str, Tensor], stage: str) -> Tensor:
         pred = self(batch)
         rmsd = batch["rmsd"]
@@ -225,11 +175,6 @@ class ComplexRescoreModule(L.LightningModule):
         reg = nn.functional.smooth_l1_loss(pred, target)
         loss = reg
         sync = stage != "train"
-        if self.config.ranking_loss_weight > 0 and "group_ids" in batch:
-            rank = self._ranking_loss(pred, rmsd, batch["group_ids"])
-            loss = reg + self.config.ranking_loss_weight * rank
-            self.log(f"{stage}/rank", rank, prog_bar=True, sync_dist=sync)
-            self.log(f"{stage}/reg", reg, sync_dist=sync)
         if self.config.listwise_loss_weight > 0 and "group_ids" in batch:
             lw = self._listwise_loss(pred, rmsd, batch["group_ids"])
             loss = loss + self.config.listwise_loss_weight * lw
@@ -245,10 +190,6 @@ class ComplexRescoreModule(L.LightningModule):
             )
             loss = loss + self.config.listwise_topk_weight * lwk
             self.log(f"{stage}/list", lw, prog_bar=True, sync_dist=sync)
-        if self.config.mlm_aux_weight > 0:
-            mlm = self._mlm_aux_loss(batch)
-            loss = loss + self.config.mlm_aux_weight * mlm
-            self.log(f"{stage}/mlm", mlm, prog_bar=True, sync_dist=sync)
         self.log(f"{stage}/loss", loss, prog_bar=True, sync_dist=sync)
         self.log(
             f"{stage}/mae",
@@ -257,14 +198,6 @@ class ComplexRescoreModule(L.LightningModule):
             sync_dist=sync,
         )
         return loss
-
-    def train(self, mode: bool = True):  # noqa: ANN201, FBT001, FBT002
-        """Keep a frozen encoder in eval mode (no dropout) even when Lightning
-        flips the module to train() at each epoch, so its features stay fixed."""
-        super().train(mode)
-        if getattr(self.config, "freeze_encoder", False):
-            self.encoder.eval()
-        return self
 
     def training_step(self, batch: dict[str, Tensor], batch_idx: int) -> Tensor:  # noqa: ARG002
         return self._step(batch, "train")
