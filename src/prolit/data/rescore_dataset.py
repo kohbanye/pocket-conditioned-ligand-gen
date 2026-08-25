@@ -47,9 +47,9 @@ class RescoreDataset(Dataset[dict[str, Tensor]]):
         rmsd_path: Path,
         block_size: int,
         group_path: Path | None = None,
-        disp_path: Path | None = None,
         *,
         divide_by_size: bool = False,
+        drop_native: bool = False,
         max_label: float = 0.0,
         max_docs: int = 0,
     ) -> None:
@@ -64,17 +64,6 @@ class RescoreDataset(Dataset[dict[str, Tensor]]):
         self.lengths = np.fromfile(len_path, dtype=np.uint16).astype(np.int64)
         self.rmsd = np.fromfile(rmsd_path, dtype=np.float32)
         self.offsets = np.concatenate([[0], np.cumsum(self.lengths)]).astype(np.int64)
-        # Optional per-ligand-atom displacement labels (dense supervision): one
-        # float per ligand token, streamed in .disp with per-doc counts in .dlen.
-        self.disp = None
-        if disp_path is not None and disp_path.exists():
-            dlen_path = disp_path.with_suffix(".dlen")
-            if dlen_path.exists():
-                self.disp = np.memmap(disp_path, dtype=np.float32, mode="r")
-                self.dlen = np.fromfile(dlen_path, dtype=np.uint16).astype(np.int64)
-                self.doffsets = np.concatenate(
-                    [[0], np.cumsum(self.dlen)]
-                ).astype(np.int64)
         if group_path is not None and group_path.exists():
             # Explicit group ids, one per doc (affinity corpus: the protein).
             # The RMSD==0 heuristic below cannot work there -- that stream holds
@@ -104,6 +93,20 @@ class RescoreDataset(Dataset[dict[str, Tensor]]):
             self.index = self.index[:max_docs]
         if max_label > 0:
             self.index = self.index[self.rmsd[self.index] <= max_label]
+        if drop_native:
+            # Every complex here carries its crystal pose at RMSD exactly 0 and
+            # its decoys are that pose perturbed, so "distance from the crystal
+            # conformer" and "RMSD" are the SAME quantity in training -- and the
+            # head learns the former as a stand-in for the latter. Measured on
+            # CASF with RMSD held fixed within each complex, its score
+            # correlates +0.484 with distance-from-crystal-conformer where
+            # RTMScore's correlates +0.023. That is the largest partial
+            # correlation found for any quantity, and it points the wrong way:
+            # CASF's answers are docked poses sitting 0.3-0.8 A off the crystal
+            # conformer, so the stand-in inverts. Dropping the exact-zero pose
+            # leaves a set whose best member is merely near-native, which is the
+            # comparison CASF actually poses.
+            self.index = self.index[self.rmsd[self.index] > 0.0]
         keep = set(self.index.tolist())
         # Group ids may be sparse (protein ids), so index by value, not by range.
         # Groups index into THIS dataset's positions, not raw doc ids.
@@ -126,23 +129,13 @@ class RescoreDataset(Dataset[dict[str, Tensor]]):
         label = float(self.rmsd[idx])
         if self.divide_by_size:
             label /= max(int(lig.sum()), 1)
-        out = {
+        return {
             "input_ids": torch.from_numpy(arr),
             "ligand_mask": torch.from_numpy(lig),
             "rmsd": torch.tensor(label, dtype=torch.float32),
             "length": torch.tensor(arr.shape[0], dtype=torch.int64),
             "group": torch.tensor(int(self.doc_group[idx]), dtype=torch.int64),
         }
-        if self.disp is not None:
-            ds, de = int(self.doffsets[idx]), int(self.doffsets[idx + 1])
-            # copy: a memmap slice is read-only and torch.from_numpy warns on it
-            d = np.array(self.disp[ds:de], dtype=np.float32)
-            # Only usable when it lines up with the ligand tokens of THIS doc
-            # (a truncated block_size read can shorten the token side).
-            if d.shape[0] != int(lig.sum()):
-                d = np.zeros(0, np.float32)
-            out["disp"] = torch.from_numpy(d)
-        return out
 
 
 class GroupBatchSampler(Sampler[list[int]]):
@@ -214,20 +207,6 @@ def collate_rescore(batch: list[dict[str, Tensor]]) -> dict[str, Tensor]:
         "ligand_mask": ligand_mask,
         "rmsd": rmsd,
     }
-    if "disp" in batch[0]:
-        # Scatter each doc's per-atom displacements onto its ligand-token slots;
-        # docs without usable labels stay all-zero and are masked out by disp_mask.
-        disp = torch.zeros((bsz, max_len), dtype=torch.float32)
-        disp_mask = torch.zeros((bsz, max_len), dtype=torch.bool)
-        for i, b in enumerate(batch):
-            d = b["disp"]
-            if d.numel() == 0:
-                continue
-            pos = torch.nonzero(ligand_mask[i], as_tuple=True)[0]
-            disp[i, pos] = d
-            disp_mask[i, pos] = True
-        out["disp"] = disp
-        out["disp_mask"] = disp_mask
     if "group" in batch[0]:
         # Remap absolute complex ids to 0..K-1 within this batch for the loss.
         raw = torch.tensor([int(b["group"]) for b in batch])
@@ -257,10 +236,10 @@ class RescoreDataModule(L.LightningDataModule):
                     self.token_dir / f"{split}.rmsd",
                     self.config.block_size,
                     group_path=self.token_dir / f"{split}.grp",
-                    disp_path=self.token_dir / f"{split}.disp",
                     divide_by_size=self.config.label_divide_by_size,
                     max_label=self.config.max_label,
                     max_docs=self.config.max_docs if split == "train" else 0,
+                    drop_native=self.config.drop_native_pose,
                 )
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:

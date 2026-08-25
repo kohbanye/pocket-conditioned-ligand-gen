@@ -86,6 +86,14 @@ class RescoringConfig:
     """CASF pose-rescoring inference settings."""
 
     score_mode: str = "head"  # pll | head | ensemble
+    # Average the head score over this many random frame rotations. The
+    # score of a pose should not depend on the arbitrary frame the pocket
+    # extraction picked, but it does: across frames a pose's predicted RMSD
+    # has a median spread of 0.32 A, while the score gap that decides which
+    # pose gets picked is 0.28 A -- the frame noise is larger than the
+    # signal. It falls as 1/sqrt(k), so averaging restores the invariance
+    # the model was trained for but never guaranteed.
+    n_frames: int = 1
     exclude_native: bool = True
     native_thresh: float = 2.0
     max_residues: int = 50

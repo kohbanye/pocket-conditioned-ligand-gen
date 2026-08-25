@@ -1,7 +1,16 @@
-"""Reproduce the source repo's CASF pose docking-power table from copied dumps.
+"""Reproduce the CASF pose docking-power numbers from the local dumps.
 
-Targets = the published docking-power table (decoys-only, shared 284-target set).
-Confirms orient/docking_power/ranking_rho/zsum reproduce every published row.
+Every arm here is a SINGLE mean-pooled head. The earlier version of this file
+pinned a three-head z-sum ensemble (``v2_mean`` + ``v6_meanmax`` + ``v7_attn``)
+and a Vina-fused variant; those readouts were removed once each was measured
+and none beat the plain ligand-mean, so their dumps moved to
+``docs/results/stale_prefix_2026-08-25/``.
+
+All five rows below were produced with the fixed V2000 counts-line parser (see
+``prolit.tokenizers.ligand._counts_line``). Five CASF ligands -- 3ag9, 3bv9,
+3prs, 3pww, 3uri -- have 100+ atoms or bonds and were parsed with three times
+too many atoms before that fix, which blew the extracted pocket past the
+training context and cost every one of them.
 """
 
 from __future__ import annotations
@@ -17,7 +26,7 @@ _RESULTS = Path(__file__).resolve().parent.parent / "results" / "rescoring"
 
 # Result dumps are not tracked in git -- only code is.
 pytestmark = pytest.mark.skipif(
-    not (_RESULTS / "joint").exists(),
+    not (_RESULTS / "e250_div" / "div_f16.csv").exists(),
     reason="pose dumps not present locally (results/ is git-ignored)",
 )
 
@@ -25,12 +34,8 @@ _DP = 0.3  # docking-power tolerance (pt); table rounded to 0.1
 _RHO = 0.02  # ranking-rho tolerance
 
 
-def _our(name: str) -> pd.DataFrame:
-    return R.orient(pd.read_csv(_RESULTS / "joint" / name), raw_col="head")
-
-
-def _vina() -> pd.DataFrame:
-    return R.orient(pd.read_csv(_RESULTS / "vina" / "pose_scores.csv"), raw_col="head")
+def _our(variant: str, name: str) -> pd.DataFrame:
+    return R.orient(pd.read_csv(_RESULTS / variant / name), raw_col="head")
 
 
 def _baseline(backend: str, rmsd_key: pd.DataFrame) -> pd.DataFrame:
@@ -43,28 +48,31 @@ def _baseline(backend: str, rmsd_key: pd.DataFrame) -> pd.DataFrame:
 
 
 def test_pose_docking_power_table() -> None:
-    v2, v6, v7, vina = (
-        _our("v2_mean.csv"),
-        _our("v6_meanmax.csv"),
-        _our("v7_attn.csv"),
-        _vina(),
+    div = _our("e250_div", "div_f16.csv")
+    joint = _our("joint", "v2_f16.csv")
+    vina = R.orient(
+        pd.read_csv(_RESULTS / "vina" / "pose_scores.csv"), raw_col="head"
     )
-    rmsd_key = v2[["pdbid", "pose", "rmsd"]]
+    rmsd_key = div[["pdbid", "pose", "rmsd"]]
     rtm, gen = _baseline("rtmscore", rmsd_key), _baseline("genscore", rmsd_key)
-    ens3 = R.zsum([v2, v6, v7])
-    ens_v2_vina = R.zsum([v2, vina])
-    ens3_vina = R.zsum([v2, v6, v7, vina])
 
     expect = {
-        "RTMScore": (rtm, 94.0, 75.4, 0.86),
-        "GenScore": (gen, 90.8, 73.2, 0.85),
+        "RTMScore": (rtm, 94.4, 75.7, 0.86),
+        "GenScore": (gen, 91.2, 73.6, 0.85),
         "Vina": (vina, 84.6, 71.6, 0.31),
-        "v2": (v2, 88.8, 66.7, 0.83),
-        "3-head": (ens3, 89.5, 70.9, 0.83),
-        "v2+Vina": (ens_v2_vina, 89.8, 77.9, 0.68),
-        "3-head+Vina": (ens3_vina, 90.5, 75.8, 0.80),
+        "joint": (joint, 89.5, 73.7, 0.85),
+        "e250_div": (div, 95.4, 82.1, 0.89),
     }
     for label, (df, dp2, dp1, rho) in expect.items():
         assert R.docking_power(df, 2.0) == pytest.approx(dp2, abs=_DP), f"{label} DP@2"
         assert R.docking_power(df, 1.0) == pytest.approx(dp1, abs=_DP), f"{label} DP@1"
         assert R.ranking_rho(df) == pytest.approx(rho, abs=_RHO), f"{label} rho"
+
+
+def test_e250_div_leads_every_metric() -> None:
+    """The arm the paper reports beats RTMScore on all three, not just on one."""
+    div = _our("e250_div", "div_f16.csv")
+    rtm = _baseline("rtmscore", div[["pdbid", "pose", "rmsd"]])
+    assert R.docking_power(div, 2.0) > R.docking_power(rtm, 2.0)
+    assert R.docking_power(div, 1.0) > R.docking_power(rtm, 1.0)
+    assert R.ranking_rho(div) > R.ranking_rho(rtm)

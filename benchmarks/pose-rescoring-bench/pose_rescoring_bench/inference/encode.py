@@ -24,13 +24,15 @@ from prolit.config import (
 from prolit.data.rescore_dataset import ligand_mask
 from prolit.model.mlm_module import ProLITMLMModule
 from prolit.model.rescore_module import ComplexRescoreModule
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.pose_encoder import PoseEncoder
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from prolit.model.vqvae_module import AtomVQVAEModule
 
     from pose_rescoring_bench.config import PathsConfig
     from pose_rescoring_bench.variants import AffinityCkpts, RescoringCkpts
@@ -45,7 +47,7 @@ def load_vqvae(
     """Load the all-atom VQ-VAE tokenizer + its normalization stats (eval mode)."""
     cfg = AtomVQVAETrainingConfig()
     cfg.atom.codebook_size = codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(ckpt, config=cfg, map_location=device)
+    module = load_atom_vqvae(ckpt, device)
     module.eval().to(device)
     norm = torch.load(norm_stats, weights_only=False)
     module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
@@ -135,17 +137,26 @@ def load_mlm(ckpt: Path, codebook_size: int, device: torch.device) -> tuple[Any,
 
 def load_rescorer(
     ckpt: Path,
-    pooling: str,
     codebook_size: int,
     device: torch.device,
-    interaction_layers: int = 0,
 ) -> ComplexRescoreModule:
-    """Load a rescoring/affinity head (its pooling must match the checkpoint)."""
-    cfg = RescoreTrainingConfig(
-        model=ProLITMLMConfig(atom_codebook_size=codebook_size),
-        pooling=pooling,
-        head_interaction_layers=interaction_layers,
-    )
+    """Load a rescoring/affinity head.
+
+    The checkpoint's own config is the base rather than a fresh one built from
+    the caller's arguments: the stored instance carries the training settings
+    the module reads at construction time, and rebuilding it from scratch has
+    already produced a head whose submodules did not match its state_dict.
+    """
+    stored = torch.load(ckpt, map_location="cpu", weights_only=False).get(
+        "hyper_parameters", {}
+    ).get("config")
+    cfg = stored if isinstance(stored, RescoreTrainingConfig) else None
+    if cfg is None:
+        cfg = RescoreTrainingConfig(
+            model=ProLITMLMConfig(atom_codebook_size=codebook_size)
+        )
+    else:
+        cfg.model.atom_codebook_size = codebook_size
     rescorer = ComplexRescoreModule.load_from_checkpoint(
         ckpt,
         config=cfg,

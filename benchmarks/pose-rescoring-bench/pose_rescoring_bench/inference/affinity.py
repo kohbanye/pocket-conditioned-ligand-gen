@@ -86,7 +86,6 @@ def score_casf(
     head_spec = ckpts.heads[head_index]
     rescorer = load_rescorer(
         resolve_rescore_ckpt(paths.source_repo, head_spec.ckpt),
-        head_spec.pooling,
         codebook_size,
         device,
     )

@@ -145,19 +145,19 @@ def test_a_sweep_writes_one_script_per_point(
     written = _run(
         tmp_path, monkeypatch,
         "--name", "aff", "--resource", "gpu_1", "--hours", "8",
-        "--sweep", "pooling=mean,attn,meanmax",
-        "--", "pipelines/train/scoring_head.py", "--pooling", "{pooling}",
+        "--sweep", "tau=0.3,0.5,0.7",
+        "--", "pipelines/train/scoring_head.py", "--listwise-tau", "{tau}",
     )
     assert [p.name for p in written] == [
-        "aff_pooling-attn.sh", "aff_pooling-mean.sh", "aff_pooling-meanmax.sh",
+        "aff_tau-0.3.sh", "aff_tau-0.5.sh", "aff_tau-0.7.sh",
     ]
     for path in written:
-        pooling = path.stem.split("-")[-1]
+        tau = path.stem.split("-")[-1]
         text = path.read_text()
-        assert f"--pooling {pooling}" in text
-        assert "{pooling}" not in text
+        assert f"--listwise-tau {tau}" in text
+        assert "{tau}" not in text
         assert f"export PROLIT_JOB_NAME={path.stem}" in text
-        assert f'PROLIT_JOB_SWEEP=\'{{"pooling": "{pooling}"}}\'' in text
+        assert f'PROLIT_JOB_SWEEP=\'{{"tau": "{tau}"}}\'' in text
         assert f"#$ -N {path.stem}" in text
 
 
