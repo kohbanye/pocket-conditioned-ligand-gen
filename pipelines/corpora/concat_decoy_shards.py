@@ -47,7 +47,7 @@ def main() -> None:
         n_docs = n_tok = max_len = 0
         # disp/dlen carry the per-ligand-atom displacement labels; they only
         # exist for corpora built with that supervision, hence the skip below.
-        for ext in ("bin", "len", "rmsd", "disp", "dlen"):
+        for ext in ("bin", "len", "rmsd", "disp", "dlen", "comp"):
             if not any((s / f"{split}.{ext}").exists() for s in shards):
                 continue
             with (args.out_dir / f"{split}.{ext}").open("wb") as out:

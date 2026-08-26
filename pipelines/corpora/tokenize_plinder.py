@@ -38,7 +38,6 @@ import torch
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
@@ -49,6 +48,7 @@ from prolit.tokenizers.atom import (
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.ligand import parse_sdf_text
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.protein import (
     compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
@@ -314,9 +314,7 @@ def main() -> None:  # noqa: PLR0915, C901
             codebook_size=2 * args.codebook_size
         )
     else:
-        module = AtomVQVAEModule.load_from_checkpoint(
-            args.ckpt, config=config, map_location=device
-        )
+        module = load_atom_vqvae(args.ckpt, device)
         module.eval()
         module.to(device)
         norm_stats = torch.load(args.norm_stats, weights_only=False)

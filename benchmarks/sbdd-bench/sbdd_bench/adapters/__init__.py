@@ -7,6 +7,7 @@ from sbdd_bench.adapters.base import GenerativeModel
 _REGISTRY = {
     "own": ("sbdd_bench.adapters.own", "OwnAdapter"),
     "diffsbdd": ("sbdd_bench.adapters.diffsbdd", "DiffSBDDAdapter"),
+    "flowr": ("sbdd_bench.adapters.flowr", "FlowrAdapter"),
     "targetdiff": ("sbdd_bench.adapters.targetdiff", "TargetDiffAdapter"),
     "diffgui": ("sbdd_bench.adapters.diffgui", "DiffGuiAdapter"),
 }

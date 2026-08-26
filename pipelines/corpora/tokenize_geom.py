@@ -35,11 +35,11 @@ from prolit.data.geom import (
 )
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import LigandAtomDescriptor, rotate_atom_descriptor
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -146,9 +146,7 @@ def main() -> None:  # noqa: C901, PLR0915
             codebook_size=2 * args.codebook_size
         )
     else:
-        module = AtomVQVAEModule.load_from_checkpoint(
-            args.ckpt, config=config, map_location=device
-        )
+        module = load_atom_vqvae(args.ckpt, device)
         module.eval()
         module.to(device)
         norm_stats = torch.load(args.norm_stats, weights_only=False)

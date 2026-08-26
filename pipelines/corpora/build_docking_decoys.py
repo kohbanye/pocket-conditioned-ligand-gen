@@ -51,7 +51,6 @@ from tokenize_decoys import _cd_test_pdbs, _RmsdWriter
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.descriptors import collate_molecules
 from prolit.external_tools import tool_default
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
@@ -60,6 +59,7 @@ from prolit.tokenizers.atom import (
 )
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.protein import (
     compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
@@ -305,6 +305,15 @@ def main() -> None:  # noqa: C901, PLR0915
     parser.add_argument("--num-modes", type=int, default=20)
     parser.add_argument("--exhaustiveness", type=int, default=8)
     parser.add_argument("--dock-timeout", type=int, default=300)
+    parser.add_argument(
+        "--skip-complexes",
+        type=int,
+        default=0,
+        help="drop this many complexes off the front of the shuffled pool "
+        "before taking --n-complexes. Set it to the training corpus's "
+        "--n-complexes to build a disjoint selection set (see the comment at "
+        "the sampling site).",
+    )
     parser.add_argument("--min-heavy", type=int, default=8)
     parser.add_argument("--max-heavy", type=int, default=45)
     parser.add_argument("--val-frac", type=float, default=0.03)
@@ -340,7 +349,12 @@ def main() -> None:  # noqa: C901, PLR0915
         seen.add((s[0], s[2]))
         uniq.append(s)
     rng.shuffle(uniq)
-    uniq = uniq[: args.n_complexes]
+    # ``tokenize_decoys.py`` builds the same list -- same sites, same exclusions,
+    # same dedup key, same seeded shuffle -- and consumes ``uniq[:n_complexes]``.
+    # Skipping that many here therefore yields complexes the training corpus has
+    # never seen, which is what a selection set has to be. It is not enough to
+    # pick a different seed: that reshuffles the SAME pool and overlaps it.
+    uniq = uniq[args.skip_complexes : args.skip_complexes + args.n_complexes]
     val_pdbs = {s[0] for s in uniq[: int(len(uniq) * args.val_frac)]}
     logger.info("selected %d native complexes to redock", len(uniq))
 
@@ -408,9 +422,7 @@ def main() -> None:  # noqa: C901, PLR0915
     # ---- Phase B setup: VQ-VAE on GPU (after fork) ----
     vq_cfg = AtomVQVAETrainingConfig()
     vq_cfg.atom.codebook_size = args.codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.ckpt, config=vq_cfg, map_location=device
-    )
+    module = load_atom_vqvae(args.ckpt, device)
     module.eval().to(device)
     norm = torch.load(args.norm_stats, weights_only=False)
     module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])

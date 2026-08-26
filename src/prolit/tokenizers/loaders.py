@@ -163,6 +163,7 @@ def load_atom_vqvae(
     return module.eval().to(device)
 
 
+
 def load_pose_refiner(ckpt: str | Path, device: torch.device) -> Any:  # noqa: ANN401
     """Load the E(3)-equivariant flow-matching pose refiner."""
     from prolit.model.pose_refiner import PoseRefinerModule  # noqa: PLC0415

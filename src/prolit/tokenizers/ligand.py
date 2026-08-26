@@ -383,34 +383,59 @@ def _knn_offsets_and_elements(
     offsets = np.zeros((n, k * 4), dtype=np.float32)
     nbr_elements = np.full((n, k), LIGAND_OTHER_IDX, dtype=np.int64)
 
-    if context_coords is not None and len(context_coords):
-        search = np.vstack([canonical_coords, np.asarray(context_coords)])
-        search_elements = np.concatenate(
-            [elements, np.asarray(context_elements, dtype=elements.dtype)]
-        )
+    use_context = context_coords is not None and len(context_coords) > 0
+    if use_context:
+        # RESERVE the trailing slots for the context rather than merging the two
+        # search sets. Merging does nothing: a ligand's own atoms sit at 1.4 A
+        # (bonded) and ~2.4 A (next-nearest), while the closest protein atom is
+        # 2.7 A away even in a crystal structure, so a plain k-nearest search
+        # returns ligand atoms every time and the descriptor came out
+        # byte-identical to the context-free one (measured).
+        #
+        # Splitting costs no bonded information. Slots 1-2 hold the bonded
+        # neighbours (median 1.38 / 1.44 A); slots 3-4 are already non-bonded
+        # (2.35 / 2.40 A), so handing those two to the pocket replaces
+        # second-shell intramolecular geometry -- which the coord block and the
+        # first two slots already pin down -- with the receptor contacts the
+        # atom has no other way to see.
+        k_self = max(1, k // 2)
+        k_ctx = k - k_self
     else:
-        search, search_elements = canonical_coords, elements
-    if n == 0 or search.shape[0] <= 1:
+        k_self, k_ctx = k, 0
+    if n == 0 or (canonical_coords.shape[0] <= 1 and not use_context):
         return offsets, nbr_elements
 
-    # Pairwise distances (small N, brute force is faster than building a tree).
-    diff = canonical_coords[:, None, :] - search[None, :, :]  # (N, M, 3)
-    dist = np.linalg.norm(diff, axis=-1)
-    dist[np.arange(n), np.arange(n)] = np.inf  # exclude self
+    def _fill(coords, elems, exclude_self, base_slot, want) -> None:  # noqa: ANN001
+        """Write the ``want`` nearest atoms of ``coords`` from slot ``base_slot``."""
+        if want <= 0 or coords.shape[0] == 0:
+            return
+        dist = np.linalg.norm(
+            canonical_coords[:, None, :] - coords[None, :, :], axis=-1
+        )
+        if exclude_self:
+            dist[np.arange(n), np.arange(n)] = np.inf
+        take = min(want, coords.shape[0] - (1 if exclude_self else 0))
+        if take <= 0:
+            return
+        idx = np.argpartition(dist, take - 1, axis=1)[:, :take]
+        for i in range(n):
+            order = np.argsort(dist[i, idx[i]])
+            for slot, j in enumerate(idx[i][order]):
+                delta = coords[j] - canonical_coords[i]
+                r, theta, sphi, cphi = cartesian_to_spherical(delta)
+                pos = base_slot + slot
+                offsets[i, pos * 4 : pos * 4 + 4] = (r, theta, sphi, cphi)
+                nbr_elements[i, pos] = elems[j]
 
-    take = min(k, search.shape[0] - 1)
-    nbr_idx = np.argpartition(dist, take - 1, axis=1)[:, :take]
-    # Order each row's neighbours by ascending distance (argpartition is unsorted).
-    for i in range(n):
-        order = np.argsort(dist[i, nbr_idx[i]])
-        nbr_idx[i] = nbr_idx[i, order]
-
-    for i in range(n):
-        for slot, j in enumerate(nbr_idx[i]):
-            delta = search[j] - canonical_coords[i]
-            r, theta, sphi, cphi = cartesian_to_spherical(delta)
-            offsets[i, slot * 4 : slot * 4 + 4] = (r, theta, sphi, cphi)
-            nbr_elements[i, slot] = search_elements[j]
+    _fill(canonical_coords, elements, True, 0, k_self)  # noqa: FBT003
+    if use_context:
+        _fill(
+            np.asarray(context_coords),
+            np.asarray(context_elements, dtype=elements.dtype),
+            False,  # noqa: FBT003
+            k_self,
+            k_ctx,
+        )
     return offsets, nbr_elements
 
 

@@ -87,6 +87,8 @@ def _assemble_atom_descriptor(  # noqa: PLR0913
     chem: dict[str, np.ndarray],  # charge/hybrid/aromatic/ring/numH -> (N,)
     aa_idx: np.ndarray,  # (N,)
     bb_sc_idx: np.ndarray,  # (N,)
+    context_coords: np.ndarray | None = None,
+    context_elements: np.ndarray | None = None,
 ) -> np.ndarray:
     """Fill an ``(N, ATOM_DESCRIPTOR_DIM)`` descriptor from per-atom features."""
     n = canonical.shape[0]
@@ -105,7 +107,12 @@ def _assemble_atom_descriptor(  # noqa: PLR0913
     desc[:, f["aa"].start] = aa_idx
     desc[:, f["bb_sc"].start] = bb_sc_idx
 
-    knn_offsets, knn_elements = _knn_offsets_and_elements(canonical, element_idx)
+    knn_offsets, knn_elements = _knn_offsets_and_elements(
+        canonical,
+        element_idx,
+        context_coords=context_coords,
+        context_elements=context_elements,
+    )
     desc[:, f["knn_offsets"].start : f["knn_offsets"].end] = knn_offsets
     desc[:, f["knn_elements"].start : f["knn_elements"].end] = knn_elements
     return desc
@@ -166,23 +173,46 @@ def atom_descriptor_to_coords(
 
 
 class LigandAtomDescriptor:
-    """Unified-layout descriptor for ligand heavy atoms (source = ligand)."""
+    """Unified-layout descriptor for ligand heavy atoms (source = ligand).
+
+    ``atom_order`` decides the sequence the language model will have to
+    generate. ``"file"`` keeps whatever order the SDF stored, which is what
+    every existing checkpoint was trained on; ``"buried_first"`` imposes a
+    canonical walk outward from the pocket (see :func:`_buried_first_order`).
+    Changing it changes the token stream, so it invalidates checkpoints -- the
+    default stays ``"file"`` and the new order is opt-in until it is measured.
+    """
 
     DESCRIPTOR_DIM = ATOM_DESCRIPTOR_DIM
+
+    def __init__(self, atom_order: str = "file") -> None:
+        self.atom_order = atom_order
 
     def compute(
         self,
         atoms: list[tuple[str, float, float, float]],
         bonds: list[tuple[int, int, int]],
         pocket_frame: tuple[np.ndarray, np.ndarray] | None = None,
+        pocket_canonical: np.ndarray | None = None,
+        pocket_elements: np.ndarray | None = None,
     ) -> tuple[np.ndarray, list[str], dict[str, Any]]:
-        """Compute ``(N_heavy, 33)`` descriptors for the ligand's heavy atoms."""
+        """Compute ``(N_heavy, 33)`` descriptors for the ligand's heavy atoms.
+
+        ``pocket_canonical`` / ``pocket_elements`` widen the knn SEARCH set to
+        the receptor, so a ligand atom's empty neighbour slots are filled by the
+        protein atoms nearest to it. Terminal atoms -- the ones that clash --
+        have three of four slots free, so this is where the information lands.
+        Descriptor width is unchanged; passing nothing reproduces the previous
+        behaviour exactly.
+        """
         if pocket_frame is None:
             msg = "LigandAtomDescriptor.compute requires a pocket_frame"
             raise ValueError(msg)
 
         heavy_indices = [i for i, (e, *_) in enumerate(atoms) if e != "H"]
         centroid, rotation = pocket_frame
+        if self.atom_order == "buried_first":
+            heavy_indices = _buried_first_order(atoms, bonds, heavy_indices, centroid)
         if not heavy_indices:
             return (
                 np.zeros((0, ATOM_DESCRIPTOR_DIM), dtype=np.float32),
@@ -216,6 +246,8 @@ class LigandAtomDescriptor:
             {name: feats[name] for name in _CHEM_FIELDS},
             np.full(n, PROTEIN_AA_X_IDX, dtype=np.int64),
             np.full(n, BB_SC_NA_IDX, dtype=np.int64),
+            context_coords=pocket_canonical,
+            context_elements=pocket_elements,
         )
         metadata: dict[str, Any] = {
             "centroid": centroid,
@@ -228,6 +260,55 @@ class LigandAtomDescriptor:
 # ---------------------------------------------------------------------------
 # Protein front-end (Full ligand-parity chemistry via an RDKit receptor parse)
 # ---------------------------------------------------------------------------
+
+
+def _buried_first_order(
+    atoms: list[tuple[str, float, float, float]],
+    bonds: list[tuple[int, int, int]],
+    heavy_indices: list[int],
+    centroid: np.ndarray,
+) -> list[int]:
+    """Order heavy atoms by walking the bond graph out from the buried end.
+
+    Until this existed the order was **whatever the SDF happened to store**, so
+    "the next atom" meant nothing spatially and an autoregressive model had no
+    relation to the atoms it had already placed. The cost is measurable: among
+    generated atoms at the *same* distance from the ligand centroid, ones late
+    in the sequence clash 1.35-2.05x as often as early ones, and the ratio is
+    largest (2.05x) near the centre, where position alone cannot explain it.
+
+    Walking outward from the atom nearest the pocket centroid makes each new
+    atom bonded to one already placed, so the model is always extending a
+    structure it can see rather than starting somewhere new. Ties inside a
+    shell break by distance to the centroid, then by original index, so the
+    order is a function of the molecule and its pocket -- not of the file.
+    """
+    coords = np.array([atoms[i][1:] for i in heavy_indices], dtype=np.float64)
+    radius = np.linalg.norm(coords - centroid, axis=1)
+    local = {orig: k for k, orig in enumerate(heavy_indices)}
+    adjacency: list[list[int]] = [[] for _ in heavy_indices]
+    for a, b, _ in bonds:
+        if a in local and b in local:
+            adjacency[local[a]].append(local[b])
+            adjacency[local[b]].append(local[a])
+
+    order: list[int] = []
+    seen = set()
+    # Several fragments can appear; each starts at its own most buried atom.
+    while len(order) < len(heavy_indices):
+        remaining = [k for k in range(len(heavy_indices)) if k not in seen]
+        start = min(remaining, key=lambda k: (radius[k], k))
+        frontier = [start]
+        seen.add(start)
+        while frontier:
+            frontier.sort(key=lambda k: (radius[k], k))
+            k = frontier.pop(0)
+            order.append(k)
+            for nb in adjacency[k]:
+                if nb not in seen:
+                    seen.add(nb)
+                    frontier.append(nb)
+    return [heavy_indices[k] for k in order]
 
 
 def _chem_feature_indices(atom: Atom, ring_info: RingInfo) -> tuple[int, ...]:

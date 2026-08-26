@@ -22,3 +22,6 @@
 [submodule "third_party/token-mol"]
 	path = third_party/token-mol
 	url = https://github.com/jkwang93/token-mol
+[submodule "third_party/flowr"]
+	path = third_party/flowr
+	url = https://github.com/jule-c/flowr.git

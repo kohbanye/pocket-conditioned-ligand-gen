@@ -44,6 +44,13 @@ if TYPE_CHECKING:
 FEAT = NUM_FEATURE_FIELDS
 
 
+#: Below this many pocket atoms the centre of mass is not a direction worth
+#: trusting, so the pressed-in corruption is skipped.
+_MIN_POCKET_ATOMS = 3
+#: A displacement direction shorter than this is numerically meaningless.
+_NEGLIGIBLE_DIRECTION = 1e-6
+
+
 class PoseRefineDataset(Dataset[dict]):
     """One (x0, x1, pocket) refinement example per corruption record."""
 
@@ -55,12 +62,14 @@ class PoseRefineDataset(Dataset[dict]):
         rigid_trans: float = 0.0,
         rigid_rot_deg: float = 0.0,
         rigid_prob: float = 1.0,
+        press_sigma: float = 0.0,
         seed: int = DEFAULT_SEED,
     ) -> None:
         self.jitter_sigma = jitter_sigma
         self.rigid_trans = rigid_trans
         self.rigid_rot_deg = rigid_rot_deg
         self.rigid_prob = rigid_prob
+        self.press_sigma = press_sigma
         # Named stream so the jitter is reproducible and does not correlate
         # with anything else seeded from the same run seed.
         self.seed = seed
@@ -139,6 +148,27 @@ class PoseRefineDataset(Dataset[dict]):
                 x0 = ((x0 - cen) @ rot.T.astype(np.float32)) + cen
             if self.rigid_trans > 0:
                 x0 = x0 + self._rng.normal(0.0, self.rigid_trans, 3).astype(np.float32)
+        if self.press_sigma > 0:
+            # PRESSED-IN corruption, which the isotropic translation above
+            # cannot express because it has no preferred direction.
+            #
+            # Measured over 99 targets: 59% of generated ligand atoms overlap
+            # the receptor by Vina's radii (reference ligands 20%), the median
+            # surface gap is -0.467 A against the reference's -0.104, and every
+            # *attractive* Vina term is better than FLOWR's while repulsion is
+            # 7.50 against 1.64. The molecules sit in the right place making
+            # the right contacts, uniformly ~0.36 A too deep. A refiner never
+            # shown that error cannot learn to undo it.
+            #
+            # Direction is toward the pocket's own centre of mass, which is the
+            # only inward direction available without the receptor surface.
+            pkt = np.asarray(self.pkt_x[po : po + npk], dtype=np.float32)
+            if len(pkt) >= _MIN_POCKET_ATOMS:
+                toward = pkt.mean(axis=0) - x0.mean(axis=0)
+                n = float(np.linalg.norm(toward))
+                if n > _NEGLIGIBLE_DIRECTION:
+                    depth = abs(self._rng.normal(0.0, self.press_sigma))
+                    x0 = x0 + (toward / n * depth).astype(np.float32)
         return {
             "x1": np.asarray(self.lig_x1[lo : lo + nl], dtype=np.float32),
             "x0": x0,
@@ -309,18 +339,25 @@ class PoseRefineDataModule(L.LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:  # noqa: ARG002
         for split in ("train", "val"):
-            if (self.data_dir / f"{split}.records").exists():
-                train = split == "train"
-                jitter = self.config.online_jitter_sigma if train else 0.0
-                self._datasets[split] = PoseRefineDataset(
-                    self.data_dir,
-                    split,
-                    jitter,
-                    rigid_trans=self.config.online_rigid_trans if train else 0.0,
-                    rigid_rot_deg=self.config.online_rigid_rot_deg if train else 0.0,
-                    rigid_prob=self.config.online_rigid_prob,
-                    seed=self._seed,
-                )
+            if not (self.data_dir / f"{split}.records").exists():
+                continue
+            # The SAME corruption on both splits. Holding it out of val made the
+            # validation measure a different problem from the one being trained:
+            # a model taught to undo a 2 A rigid displacement was shown poses
+            # that had none, moved them 2 A anyway, and reported val RMSD 829 A
+            # against train loss 0.419. That was read as divergence and the
+            # rigid-corruption refiner was abandoned on it. The rng is named per
+            # split, so val stays deterministic.
+            self._datasets[split] = PoseRefineDataset(
+                self.data_dir,
+                split,
+                self.config.online_jitter_sigma,
+                rigid_trans=self.config.online_rigid_trans,
+                rigid_rot_deg=self.config.online_rigid_rot_deg,
+                rigid_prob=self.config.online_rigid_prob,
+                press_sigma=getattr(self.config, "online_press_sigma", 0.0),
+                seed=self._seed,
+            )
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:
         m = self.config.model
