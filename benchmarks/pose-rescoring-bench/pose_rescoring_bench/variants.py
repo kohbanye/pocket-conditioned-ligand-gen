@@ -248,8 +248,144 @@ SEPARATE = Variant(
     ),
 )
 
+# The rebuilt rescoring stack on the leak-free vq_e250_lig3 tokenizer. One head,
+# no ensemble: the published "3-head" row averaged three heads picked by their
+# CASF score, which is selection on the test set and cannot go in a paper. Here
+# the pooling is chosen by DECOY VALIDATION LOSS and CASF is scored once.
+#
+# The decoy corpus is rebuilt too. tokenize_decoys already drops CASF and
+# CrossDocked-test PDB ids, but the v16-family corpora also took their
+# heavy-atom stratification FROM CASF, so the design itself leaked; these use
+# the v10-style parameters with no stratification.
+_E250_VQ = (
+    "pocket-ligand-vqvae/vq_e250_lig3/checkpoints/"
+    "atomvqvae-epoch=237-val/atom_coord=0.1021.ckpt"
+)
+_E250_MLM = "pocket-ligand-mlm/mlm_e250lig3/checkpoints/mlm-e02-vl0.8009.ckpt"
+
+E250_MEAN = Variant(
+    name="e250_mean",
+    description="vq_e250_lig3 + leak-free MLM + a single mean-pooled head.",
+    generation=GenerationCkpts(vqvae=_E250_VQ, lm=None, refiner=None),
+    rescoring=RescoringCkpts(
+        vqvae=_E250_VQ,
+        mlm=_E250_MLM,
+        heads=(HeadSpec("head_mean_e250lig3", "mean", "mean"),),
+        codebook_size=8192,
+    ),
+    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
+)
+
+E250_PAIRSUM = Variant(
+    name="e250_pairsum",
+    description="vq_e250_lig3 + leak-free MLM + a single pairwise-interaction head.",
+    generation=GenerationCkpts(vqvae=_E250_VQ, lm=None, refiner=None),
+    rescoring=RescoringCkpts(
+        vqvae=_E250_VQ,
+        mlm=_E250_MLM,
+        heads=(HeadSpec("head_pairsum_e250lig3", "pairsum", "pairsum"),),
+        codebook_size=8192,
+    ),
+    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
+)
+
+
+#: The two arms the 2026-08-19 loop selected, both a SINGLE mean-pooled head --
+#: no ensemble, no PLL term, no pairwise readout. What changed is the loss and,
+#: for the second one, the corpus's ligand-size coverage.
+#:
+#: The published heads were trained with plain smooth-L1 regression on RMSD.
+#: That optimises calibration everywhere, but docking power reads only the
+#: argmax over a complex's poses: 97.9% of CASF targets already have a sub-2 A
+#: pose in the head's top 5 (94.0% in the top 2 -- exactly RTMScore's DP@2A),
+#: so every point of headroom sits in the last swap, not in the tail the
+#: regression spends its capacity on. Adding the ListNet term over each
+#: complex's poses -- weight 1.0, temperature 0.5, both already implemented and
+#: both defaulting to off -- is worth +3.6 points of val DP@1A, consistent
+#: across two seeds and two training lengths.
+#:
+#: ``_BIG`` additionally trains on a corpus built with ``--max-heavy 80``
+#: instead of the default 50. The cap was arbitrary and it is exactly where
+#: CASF falls off a cliff (DP@2A 89.5 for <=45 heavy atoms, 42.9 for 46-50,
+#: 0.0 for >50). Sampling, seed and ``--n-complexes`` match the original build,
+#: so the supplement is precisely the complexes that build discarded -- the
+#: size histogram is NOT matched to CASF's, which would repeat the v16 mistake
+#: named above. It narrows the val cliff from 14.4 to 8.4 points and costs 0.8
+#: points on the <=45 tier, which is why both arms are kept and both reported.
+_E250_VQ_BIG = _E250_VQ
+
+E250_LISTWISE = Variant(
+    name="e250_listwise",
+    description=(
+        "vq_e250_lig3 + leak-free MLM + a single mean-pooled head trained with "
+        "smooth-L1 + ListNet over each complex's poses."
+    ),
+    generation=GenerationCkpts(vqvae=_E250_VQ, lm=None, refiner=None),
+    rescoring=RescoringCkpts(
+        vqvae=_E250_VQ,
+        mlm=_E250_MLM,
+        heads=(HeadSpec("head_e10_lw1.0_s7", "mean", "listwise"),),
+        codebook_size=8192,
+    ),
+    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
+)
+
+E250_LISTWISE_BIG = Variant(
+    name="e250_listwise_big",
+    description=(
+        "As e250_listwise, but the decoy corpus keeps ligands up to 80 heavy "
+        "atoms instead of 50 (size-coverage ablation)."
+    ),
+    generation=GenerationCkpts(vqvae=_E250_VQ_BIG, lm=None, refiner=None),
+    rescoring=RescoringCkpts(
+        vqvae=_E250_VQ_BIG,
+        mlm=_E250_MLM,
+        heads=(HeadSpec("head_big_lw1.0_s7", "mean", "listwise_big"),),
+        codebook_size=8192,
+    ),
+    affinity=AffinityCkpts(
+        vqvae=_E250_VQ_BIG, mlm=_E250_MLM, heads=(), codebook_size=8192
+    ),
+)
+
+
+#: Generation on the retokenised stack. Shares ``_E250_VQ`` with the rescoring
+#: arms rather than naming the file again -- one tokenizer, one string.
+#:
+#: The point of this arm is PoseBusters validity. Generation sat at 0.216 on the
+#: old tokenizer, whose own CASP16 reconstruction is valid only 0.128 of the
+#: time; this tokenizer reconstructs 0.668, so the ceiling the LM was pressed
+#: against moves by 5.2x. Its corpora also drop the 54 generation-benchmark
+#: pockets that ProLIT's fold split labelled train -- half the evaluation set
+#: was inside the old CLM's training data.
+#:
+#: ``refiner=None`` on purpose: every refiner in the repo was measured less
+#: accurate (best r 0.303) than this tokenizer's own ligand error (Kabsch
+#: 0.329), so one can only add noise to what it is meant to repair.
+E250_GEN = Variant(
+    name="e250_gen",
+    description="vq_e250_lig3 + CLM retrained on its tokens, leak-free corpora.",
+    generation=GenerationCkpts(
+        vqvae=_E250_VQ,
+        lm="pocket-ligand-lm/clm_e250lig3_fullft/checkpoints/lm-e00-vl5.3568.ckpt",
+        refiner=None,
+        codebook_size=8192,
+    ),
+)
+
+
 REGISTRY: dict[str, Variant] = {
-    v.name: v for v in (JOINT, JOINT_NOCASF, SEPARATE)
+    v.name: v
+    for v in (
+        JOINT,
+        JOINT_NOCASF,
+        SEPARATE,
+        E250_MEAN,
+        E250_PAIRSUM,
+        E250_LISTWISE,
+        E250_LISTWISE_BIG,
+        E250_GEN,
+    )
 }
 
 ABLATION_ORDER: tuple[str, ...] = ("joint_nocasf", "separate")

@@ -30,13 +30,14 @@ import torch
 
 from prolit.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
 from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
+from prolit.data.holdout import sbdd_bench_pockets
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import rotate_atom_descriptor
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,7 +87,7 @@ def _tokenize_split(  # noqa: PLR0913
     encoder.flush_all()
 
 
-def _build_pocket_plans(  # noqa: PLR0913
+def _build_pocket_plans(  # noqa: PLR0913, C901
     shard_dir: Path,
     shard_counts: list[int],
     manifest_path: Path,
@@ -95,8 +96,11 @@ def _build_pocket_plans(  # noqa: PLR0913
     max_per_pocket: int,
     seed: int,
     casf_pdbs: set[str] | None = None,
+    exclude_pockets: set[str] | None = None,
     num_partitions: int = 1,
     partition_index: int = 0,
+    *,
+    near_native_only: bool = False,
 ) -> tuple[list, list]:
     """Pocket-level train/val plans over fold0-train pockets, capped per pocket.
 
@@ -122,9 +126,32 @@ def _build_pocket_plans(  # noqa: PLR0913
             "source_type",
             "cdonly_fold0",
             "receptor_pdb",
+            "label",
+            "ligand_sdf_gz",
         ],
     ).to_pandas()
     df = df[df["source_type"].isin(source_types)]
+    allowed_pairs: set[int] | None = None
+    if near_native_only:
+        # CrossDocked ships DOCKED poses, and most of them are decoys: of the
+        # 1,565,002 fold0-train rows only 19.4% are label==1, and the rest sit a
+        # median 5.39 A from the native pose. Worse, `label` is a property of the
+        # FILE -- a label==1 `*_docked.sdf.gz` still holds ~20 poses whose median
+        # spread is 4-7 A -- so keeping label==1 files alone is not enough. The
+        # `_min` files are the minimised single poses, which is why the VQ-VAE's
+        # own descriptor cache was built from `label==1 & _min`; this makes the
+        # LM corpus agree with it.
+        #
+        # Without this the LM is trained to emit docking decoys and does: it
+        # reaches clash-free 0.427 even on pockets it memorised, against a 0.800
+        # tokenizer round-trip floor.
+        keep = (df["label"] == 1) & df["ligand_sdf_gz"].str.contains("_min")
+        allowed_pairs = set(df.loc[keep, "pair_idx"].astype(int))
+        logger.info(
+            "near-native only: %d of %d pairs are label==1 & _min",
+            len(allowed_pairs),
+            len(df),
+        )
     if casf_pdbs:
         pdb = df["receptor_pdb"].str.extract(r"^([0-9a-zA-Z]{4})_")[0].str.lower()
         n_before = len(df)
@@ -134,6 +161,14 @@ def _build_pocket_plans(  # noqa: PLR0913
     train_pockets = sorted(
         df[df["cdonly_fold0"] == "train"]["complex_dir"].dropna().unique()
     )
+    if exclude_pockets:
+        n_before = len(train_pockets)
+        train_pockets = [p for p in train_pockets if p not in exclude_pockets]
+        logger.info(
+            "Pocket-excluded %d of %d train pockets (generation benchmark)",
+            n_before - len(train_pockets),
+            n_before,
+        )
     rng = np.random.default_rng(seed)
     perm = rng.permutation(len(train_pockets))
     n_val = int(len(train_pockets) * val_frac)
@@ -146,7 +181,10 @@ def _build_pocket_plans(  # noqa: PLR0913
             continue
         shard = torch.load(shard_dir / f"shard_{shard_idx:04d}.pt", weights_only=False)
         for local_idx, cplx in enumerate(shard):
-            pocket = pair_to_pocket.get(int(cplx["pair_idx"]))
+            pair = int(cplx["pair_idx"])
+            if allowed_pairs is not None and pair not in allowed_pairs:
+                continue
+            pocket = pair_to_pocket.get(pair)
             if pocket in pocket_split:
                 by_pocket[pocket].append((shard_idx, local_idx))
         del shard
@@ -209,6 +247,15 @@ def main() -> None:  # noqa: PLR0915
     )
     parser.add_argument("--pocket-val-frac", type=float, default=0.12)
     parser.add_argument("--max-per-pocket", type=int, default=32)
+    parser.add_argument(
+        "--pocket-order",
+        choices=("sequence", "distance"),
+        default="sequence",
+        help="order of pocket residues in the token stream. 'distance' puts "
+        "the residues nearest the ligand LAST, next to the ligand block, so "
+        "RoPE's decay agrees with spatial proximity. Changes the token stream, "
+        "so an LM trained on one ordering cannot read the other.",
+    )
     parser.add_argument("--split-seed", type=int, default=0)
     parser.add_argument(
         "--num-partitions",
@@ -226,7 +273,27 @@ def main() -> None:  # noqa: PLR0915
         default=None,
         help="Newline-separated CASF-2016 core PDB ids to hold out (leak-free).",
     )
+    parser.add_argument(
+        "--exclude-pockets",
+        type=Path,
+        default=None,
+        help="File of CrossDocked complex_dir names to keep out of training, "
+        "one per line (data/sbdd_bench_pockets.txt). Separate from --casf-pdbs "
+        "because the generation benchmark's split is keyed by POCKET, not by "
+        "PDB id, and it disagrees with cdonly_fold0: 54 of its 93 pockets are "
+        "labelled train, so without this the corpus contains half the "
+        "benchmark it is scored on. Costs 2.6%% of training poses.",
+    )
     parser.add_argument("--include-decoys", action="store_true")
+    parser.add_argument(
+        "--near-native-only",
+        action="store_true",
+        help="keep only label==1 & _min pairs -- the minimised near-native "
+        "poses. NOT the same as --include-decoys, which governs how the "
+        "descriptor CACHE is built and does nothing on this path: the plan "
+        "reads a prebuilt cache and never looked at label, so without this the "
+        "corpus is ~80%% docking decoys at a median 5.39 A from native.",
+    )
     parser.add_argument(
         "--splits", type=str, nargs="+", default=["train", "val", "test"]
     )
@@ -277,9 +344,7 @@ def main() -> None:  # noqa: PLR0915
     else:
         mean = dm.norm_stats["atom_mean"].numpy()
         std = dm.norm_stats["atom_std"].numpy()
-        module = AtomVQVAEModule.load_from_checkpoint(
-            args.ckpt, config=config, map_location=device
-        )
+        module = load_atom_vqvae(args.ckpt, device)
         module.eval()
         module.to(device)
         module.vqvae.set_normalization(
@@ -311,7 +376,13 @@ def main() -> None:  # noqa: PLR0915
             args.max_per_pocket,
             args.split_seed,
             casf_pdbs=casf_pdbs,
+            exclude_pockets=(
+                sbdd_bench_pockets(args.exclude_pockets)
+                if args.exclude_pockets
+                else None
+            ),
             num_partitions=args.num_partitions,
+            near_native_only=args.near_native_only,
             partition_index=args.partition_index,
         )
         plans = {"train": train_plan, "val": val_plan}

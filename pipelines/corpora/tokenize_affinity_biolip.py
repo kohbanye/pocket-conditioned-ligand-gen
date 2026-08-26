@@ -43,10 +43,10 @@ from tokenize_biolip import (
 from tokenize_decoys import _cd_test_pdbs, _RmsdWriter
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
@@ -182,9 +182,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
         vocab = AtomLMVocab(codebook_size=2 * args.codebook_size)
     else:
-        module = AtomVQVAEModule.load_from_checkpoint(
-            args.ckpt, config=cfg, map_location=device
-        )
+        module = load_atom_vqvae(args.ckpt, device)
         module.eval().to(device)
         norm = torch.load(args.norm_stats, weights_only=False)
         module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])

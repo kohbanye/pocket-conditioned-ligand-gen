@@ -29,7 +29,12 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
 from prolit.seeding import DEFAULT_SEED, torch_generator, worker_init_fn
-from prolit.tokenizers.lm_vocab import L_OPEN_ID, PAD_ID
+from prolit.tokenizers.lm_vocab import (
+    L_OPEN_ID,
+    P_CLOSE_ID,
+    P_OPEN_ID,
+    PAD_ID,
+)
 
 if TYPE_CHECKING:
     from prolit.config import CLMTrainingConfig
@@ -61,15 +66,25 @@ def _pack_blocks(doc_lengths: np.ndarray, block_size: int) -> np.ndarray:
 class PackedTokenDataset(Dataset[dict[str, Tensor]]):
     """Yields packed, padded ``block_size`` blocks with per-document structure."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         bin_path: Path,
         len_path: Path,
         block_size: int,
         *,
         mask_prompt: bool = False,
+        pocket_dropout: float = 0.0,
+        seed: int = 0,
     ) -> None:
         self.block_size = block_size
+        # Drop the pocket from this fraction of documents, leaving an empty
+        # ``<p></p>``. Without it the model has no unconditional branch, and
+        # classifier-free guidance at generation time extrapolates away from an
+        # input it has never seen -- measured, that made placement monotonically
+        # worse (0.619 A at w=1 to 0.709 A at w=5). The empty-pocket format is
+        # already legal: ligand-only corpora use it.
+        self.pocket_dropout = pocket_dropout
+        self.dropout_seed = seed
         # condition-only training: mask the ``<bos><p> pocket </p>`` prompt of
         # each doc from the loss (loss only on the generated ``<l>`` block).
         self.mask_prompt = mask_prompt
@@ -82,6 +97,30 @@ class PackedTokenDataset(Dataset[dict[str, Tensor]]):
 
     def __len__(self) -> int:
         return len(self.block_breaks) - 1
+
+    def _drop_pockets(
+        self, arr: np.ndarray, lengths: np.ndarray, index: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Blank the pocket of a random subset of this block's documents.
+
+        Dropping shortens the documents, so the block is rebuilt rather than
+        edited in place -- ``segment_ids`` and ``position_ids`` are derived
+        from ``lengths`` downstream and would otherwise disagree with ``arr``.
+        """
+        rng = np.random.default_rng((self.dropout_seed, index))
+        keep_parts, new_lengths = [], []
+        offset = 0
+        for length in lengths:
+            doc = arr[offset : offset + int(length)]
+            offset += int(length)
+            if rng.random() < self.pocket_dropout:
+                po = np.flatnonzero(doc == P_OPEN_ID)
+                pc = np.flatnonzero(doc == P_CLOSE_ID)
+                if po.size and pc.size and pc[0] > po[0]:
+                    doc = np.concatenate([doc[: int(po[0]) + 1], doc[int(pc[0]) :]])
+            keep_parts.append(doc)
+            new_lengths.append(len(doc))
+        return np.concatenate(keep_parts), np.asarray(new_lengths, dtype=np.int64)
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         s = int(self.block_breaks[index])
@@ -97,6 +136,8 @@ class PackedTokenDataset(Dataset[dict[str, Tensor]]):
         if total > len(arr):
             overflow = total - len(arr)
             lengths[-1] -= overflow
+        if self.pocket_dropout > 0.0:
+            arr, lengths = self._drop_pockets(arr, lengths, index)
 
         n = len(arr)
         segment = np.repeat(np.arange(len(lengths)), lengths).astype(np.int64)
@@ -163,6 +204,14 @@ class CLMTokenDataModule(L.LightningDataModule):
                     len_path,
                     self.config.block_size,
                     mask_prompt=getattr(self.config, "mask_prompt", False),
+                    # Validation must measure the conditional model, so the
+                    # dropout is training-only.
+                    pocket_dropout=(
+                        getattr(self.config, "pocket_dropout", 0.0)
+                        if split == "train"
+                        else 0.0
+                    ),
+                    seed=self._seed,
                 )
 
     def _loader(self, split: str, *, shuffle: bool) -> DataLoader:

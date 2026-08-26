@@ -14,13 +14,12 @@ molecule is known -- prefer carrying it through instead of re-perceiving it.
 from __future__ import annotations
 
 import contextlib
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import torch
 
 # Cordero covalent radii (A); covers every symbol in LIGAND_ELEMENT_VOCAB
@@ -32,6 +31,34 @@ _COVALENT_RADII: dict[str, float] = {
 }
 _BOND_TOLERANCE = 0.4
 _MIN_ATOMS_FOR_BOND = 2
+
+
+def read_heavy_atoms(pdb_path: str | Path) -> tuple[list[str], np.ndarray]:
+    """Heavy-atom elements and coordinates from a receptor PDB.
+
+    Every ``ATOM``/``HETATM`` record except hydrogens, so cofactors, metals and
+    ordered waters count as part of the wall a ligand must not walk through --
+    which is what the clash metrics compare against.
+    """
+    elements: list[str] = []
+    coords: list[tuple[float, float, float]] = []
+    for line in Path(pdb_path).read_text().splitlines():
+        if not line.startswith(("ATOM", "HETATM")):
+            continue
+        element = (line[76:78].strip() or line[12:16].strip()[:1]).capitalize()
+        if element == "H":
+            continue
+        try:
+            coords.append((float(line[30:38]), float(line[38:46]), float(line[46:54])))
+        except ValueError:
+            continue
+        elements.append(element)
+    return elements, np.asarray(coords, dtype=np.float64).reshape(-1, 3)
+
+
+def covalent_radius(element: str) -> float:
+    """Cordero covalent radius in A; 0.0 for anything not tabulated."""
+    return _COVALENT_RADII.get(element, 0.0)
 
 
 def infer_bonds(

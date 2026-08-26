@@ -157,7 +157,17 @@ def evaluate_target(
 
     # ---- composite hit flag ----
     df["hit"] = _hit_flags(df, ref_scores, cfg.hit)
-    return df, _summary(model, target, df, cfg, ref_scores)
+    summary = _summary(model, target, df, cfg, ref_scores)
+
+    # Bond-geometry distances live on the summary, not on df: they compare two
+    # DISTRIBUTIONS, so a single molecule has no value to carry. Scored against
+    # this target's own reference ligand, so a target whose chemistry is unusual
+    # is judged against its own bonds rather than a pooled average.
+    if ref_gm is not None and ref_gm.mol is not None:
+        summary.update(
+            pose.bond_w1([g.mol for g in gen if g.mol is not None], [ref_gm.mol])
+        )
+    return df, summary
 
 
 def _hit_flags(df: pd.DataFrame, ref_scores: dict, hit: dict) -> pd.Series:

@@ -71,6 +71,11 @@ def _metric_row(result, mod, ref, rec, eval_scope, is_protein, *, want_pb=False)
         m["lddt"] = metrics.lddt(ref, rec)
     if mod.modality == "ligand" and mod.extra.get("bonds"):
         m.update(metrics.bond_geometry(ref, rec, mod.extra["bonds"]))
+        # End-to-end columns, scored inside the reconstruction CLI because they
+        # need prolit's chemistry (see its ``end_to_end``). Absent for arms
+        # whose decoder has no chemistry heads, which leaves them NaN -- read
+        # as "did not take this test", not "scored zero".
+        m.update(mod.extra.get("end_to_end") or {})
         if want_pb:
             m.update(
                 pb.check(
@@ -266,6 +271,11 @@ def summarize(df: pd.DataFrame, *, fmt: bool = True) -> pd.DataFrame:
             "pb_valid", "pb_valid_ref",
             # Ligand-internal geometry, mean and worst-case per molecule.
             "bond_mae", "bond_max", "angle_mae", "angle_max",
+            # End-to-end: decoded chemistry only, no reference graph handed back.
+            "chem_element", "chem_charge", "chem_numH", "chem_determining",
+            "graph_exact", "graph_missing", "graph_extra",
+            "mol_buildable", "smiles_match", "smiles_match_true_graph",
+            "smiles_ref_buildable",
         )
         if c in ok.columns
     ]

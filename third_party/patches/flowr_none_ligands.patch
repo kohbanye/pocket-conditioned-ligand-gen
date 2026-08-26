@@ -1,0 +1,14 @@
+FLOWR: a sample that fails to build an RDKit mol reaches
+filter_diverse_ligands_bulk as None, and GetMorganFingerprintAsBitVect raises
+Boost.Python.ArgumentError on it, aborting the target. It appears only at
+larger --sample_n_molecules_per_target (10 was fine, 100 was not).
+
+Dropping them is what the surrounding code assumes -- they can be neither
+fingerprinted nor written -- but it also removes them from the output, so the
+patch prints the count. FLOWR's own pipeline already resamples for validity
+(--max_sample_iter), so this does not change what the model is asked to do; it
+does mean FLOWR's reported validity here is over the molecules it could build,
+and the dropped count belongs in the caption.
+
+Applied in place under third_party/flowr; see the "[patched]" marker in
+flowr/gen/generate_from_pdb.py::filter_diverse_ligands_bulk.

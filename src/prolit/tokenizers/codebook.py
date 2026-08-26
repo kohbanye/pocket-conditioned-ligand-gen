@@ -60,11 +60,19 @@ class EMACodebook(nn.Module):
     def forward(
         self,
         z: Tensor,
+        weights: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, dict[str, Tensor]]:
         """Quantize encoder output and compute commitment loss.
 
         Args:
             z: Encoder output of shape ``(B, code_dim)``.
+            weights: Optional ``(B,)`` per-vector weight for the EMA update.
+                The EMA moves a code's centroid once per vector assigned to it,
+                so with one book over two modalities the centroids follow
+                whichever modality contributes more vectors -- 8.3 protein atoms
+                per ligand atom in CrossDocked. Weighting the update lets a
+                caller decide that ratio instead of inheriting it from the data.
+                ``None`` means uniform, which is what every published run used.
 
         Returns:
             Tuple of (quantized, indices, commitment_loss, diagnostics).
@@ -83,7 +91,7 @@ class EMACodebook(nn.Module):
         num_restarted = torch.zeros((), device=z.device)
         if self.training:
             with torch.no_grad():
-                self._ema_update(z, indices)
+                self._ema_update(z, indices, weights)
                 num_restarted = self._restart_dead_codes(z)
 
         commitment_loss = self.commitment_cost * (z - quantized.detach()).pow(2).mean()
@@ -103,7 +111,9 @@ class EMACodebook(nn.Module):
 
         return quantized, indices, commitment_loss, diagnostics
 
-    def _ema_update(self, z: Tensor, indices: Tensor) -> None:
+    def _ema_update(
+        self, z: Tensor, indices: Tensor, weights: Tensor | None = None
+    ) -> None:
         """Update codebook embeddings via exponential moving average.
 
         Under DDP the codebook is a buffer updated in-place during forward, so
@@ -112,12 +122,19 @@ class EMACodebook(nn.Module):
         i.e. train the codebook on 1/N of the data). All-reducing the per-batch
         cluster sizes / embedding sums makes every rank update from the GLOBAL
         batch and stay in sync. No-op on a single process.
+
+        ``weights`` scales each vector's contribution to both accumulators, so a
+        weight of 2 counts a vector twice. Cluster size and embedding sum are
+        scaled by the same factor, leaving the centroid (their ratio) a proper
+        weighted mean.
         """
         one_hot = torch.zeros(
             indices.shape[0],
             self.num_codes,
             device=z.device,
         ).scatter_(1, indices.unsqueeze(1), 1.0)
+        if weights is not None:
+            one_hot = one_hot * weights.to(one_hot.dtype).unsqueeze(1)
 
         batch_cluster_size = one_hot.sum(dim=0)
         batch_embedding_sum = one_hot.t() @ z

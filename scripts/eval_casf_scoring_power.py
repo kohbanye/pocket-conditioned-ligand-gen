@@ -33,8 +33,8 @@ from prolit.config import (
 )
 from prolit.model.mlm_module import ProLITMLMModule
 from prolit.model.mlm_score import ligand_pll
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
@@ -116,9 +116,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     vq_cfg = AtomVQVAETrainingConfig()
     vq_cfg.atom.codebook_size = args.codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.vqvae_ckpt, config=vq_cfg, map_location=device
-    )
+    module = load_atom_vqvae(args.vqvae_ckpt, device)
     module.eval().to(device)
     norm = torch.load(args.norm_stats, weights_only=False)
     module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])

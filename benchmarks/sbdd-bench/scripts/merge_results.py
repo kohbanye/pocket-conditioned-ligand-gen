@@ -29,7 +29,17 @@ def per_model_table(per_target: pd.DataFrame) -> pd.DataFrame:
     cols = [c for c in [
         "n_targets", "validity", "connected", "pb_valid_rate", "clash_free_rate",
         "qed_mean", "sa_mean", "lipinski_frac", "vina_score_mean", "vina_min_mean",
-        "vina_dock_mean", "div_uniqueness", "div_novelty", "div_scaffold_diversity",
+        "vina_dock_mean",
+        # Medians alongside the means, because the means are not robust here:
+        # 7-11% of baseline molecules score positive on Vina and drag the mean
+        # by ~13 kcal/mol (TargetDiff reads +7.35 as a mean, -5.60 as a median,
+        # against -5.20 published). A table that shows only means reports the
+        # outlier rate, not the binding.
+        "vina_score_median", "vina_min_median", "vina_dock_median",
+        # Strain and the two bond-geometry distances complete the columns FLOWR
+        # reports; without them a strained-but-well-scoring model looks good.
+        "strain_median", "bond_length_w1", "bond_angle_w1",
+        "div_uniqueness", "div_novelty", "div_scaffold_diversity",
         "tanimoto_ref_mean", "hit_rate", "hit_scaffold_unique_rate",
     ] if c in agg.columns]
     return agg[cols].reset_index()

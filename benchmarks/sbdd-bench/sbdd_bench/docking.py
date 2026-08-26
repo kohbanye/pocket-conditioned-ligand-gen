@@ -80,14 +80,29 @@ def _run(cmd: list[str], timeout: int = 600) -> subprocess.CompletedProcess[str]
 
 
 def _parse_score(stdout: str) -> float | None:
+    """The affinity Vina printed, or ``None`` if it did not really produce one.
+
+    **An affinity of exactly 0.00000 is a failure, not a measurement.** Vina
+    prints it when it cannot place the ligand at all, and taking it at face
+    value puts a 0 into a column whose real values sit near -7. Measured on the
+    canonical 100: 99 of 9,961 molecules came back 0 for Score, Min *and* Dock
+    at once, all of them large (median 30 heavy atoms) and none of them
+    clashing -- a conversion or placement failure, recorded as a score. Three
+    coincident zeroes to five decimals is not a pose that happens to bind
+    neither well nor badly.
+    """
     m = _SCORE_RE.search(stdout)
-    return float(m.group(1)) if m else None
+    if not m:
+        return None
+    value = float(m.group(1))
+    return None if value == 0.0 else value
 
 
 def _best_dock_score(pdbqt: Path) -> float | None:
     if not pdbqt.exists():
         return None
     scores = [float(m.group(1)) for m in _VINA_RESULT_RE.finditer(pdbqt.read_text())]
+    scores = [s for s in scores if s != 0.0]  # see _parse_score
     return min(scores) if scores else None
 
 

@@ -43,10 +43,10 @@ import torch
 from tokenize_decoys import _RmsdWriter
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.pose_encoder import PoseEncoder
 
 logging.basicConfig(level=logging.INFO)
@@ -124,9 +124,7 @@ def main() -> None:  # noqa: PLR0915
 
     cfg = AtomVQVAETrainingConfig()
     cfg.atom.codebook_size = args.codebook_size
-    module = AtomVQVAEModule.load_from_checkpoint(
-        args.ckpt, config=cfg, map_location=device
-    )
+    module = load_atom_vqvae(args.ckpt, device)
     module.eval().to(device)
     norm = torch.load(args.norm_stats, weights_only=False)
     module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])

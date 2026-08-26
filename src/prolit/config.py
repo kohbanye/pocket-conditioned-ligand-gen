@@ -22,6 +22,18 @@ class HubDatasetConfig:
     # classifier negatives; training a *generative* model on them hurts molecule
     # fitness. Used by the all-atom pipeline.
     good_poses_only: bool = False
+    # When True, drop from train/val every complex whose receptor PDB id appears
+    # in an evaluation set that is NOT already handled by the fold split --
+    # the CASF-2016 core set and the sbdd-bench targets. The fold's own test
+    # side is excluded regardless, so it is not repeated here.
+    #
+    # This is off by default because turning it on changes which complexes a run
+    # trains on, and the published runs were trained without it: 169 of the 285
+    # CASF core-set entries sit on the CrossDocked *train* side of fold 0, so
+    # those runs saw them. New runs should set it.
+    exclude_eval_pdbs: bool = False
+    # Where the CASF core-set id list lives. Relative to the repository root.
+    casf_pdb_list: Path = Path("data/casf2016_pdbs.txt")
 
 
 @dataclass
@@ -44,6 +56,25 @@ class PocketExtractionConfig:
 
     distance_cutoff: float = 8.0
     max_residues: int = 128
+    #: Order of pocket residues in the token stream. "sequence" (default) is
+    #: chain/residue order and reproduces every existing checkpoint. "distance"
+    #: puts the residues nearest the ligand LAST, adjacent to the ligand block,
+    #: so RoPE's decay lines up with spatial proximity. Changing this changes
+    #: the token stream, so it invalidates LMs trained under the other setting.
+    pocket_order: str = "sequence"
+    #: Order the ligand's heavy atoms are emitted in. "file" is whatever the
+    #: SDF stored -- what every existing checkpoint was trained on --
+    #: and "buried_first" walks the bond graph outward from the pocket.
+    #: Changing it changes the token stream and invalidates checkpoints.
+    atom_order: str = "file"
+
+    #: Widen each LIGAND atom's knn SEARCH set to the pocket, so its empty
+    #: neighbour slots are filled by the nearest protein atoms. Descriptor width
+    #: is unchanged (33-D); False reproduces the original descriptor exactly.
+    #: Lives here rather than on the training config so it travels with the
+    #: pocket settings into the tar-streaming workers, which receive only
+    #: ``asdict(pocket_config)``.
+    pocket_context: bool = False
 
 
 def _default_atom_recon_weights() -> dict[str, float]:
@@ -64,6 +95,29 @@ def _default_atom_recon_weights() -> dict[str, float]:
         "aa": 0.5,
         "bb_sc": 0.1,
         "clash": 5.0,
+        # Only consumed when ``AtomVQVAEConfig.predict_knn_offsets`` is set.
+        "knn_offsets": 1.0,
+        # Only consumed when ``AtomVQVAEConfig.bond_distance_loss`` is set.
+        # Sized so each starts at roughly a fifth of ``coord``: the earlier
+        # attempt failed partly because the clash term sat at 5.0 x 0.007, an
+        # eighth of coord's contribution, and so never steered anything.
+        "bond12": 5.0,
+        "bond13": 2.0,
+        # Only consumed when ``AtomVQVAEConfig.distance_map_loss`` is set. 1.0,
+        # the same as ``coord``: it is the same quantity -- where the atoms are
+        # -- expressed as distances instead of positions, so there is no reason
+        # to prefer one over the other.
+        "dmap": 1.0,
+        # Only consumed when ``AtomVQVAEConfig.pair_distance_loss`` is set. 1.0,
+        # like ``coord``: one says where an atom is, the other what shape the
+        # atoms make, and there is no ground for preferring either. ``coord``
+        # cannot be dropped in its favour -- distances are invariant to rotation
+        # and translation, so nothing else fixes the pose in the pocket frame.
+        "pair": 1.0,
+        # Only consumed when ``AtomVQVAEConfig.local_distance_loss`` is set.
+        # 1.0, like ``coord`` and ``dmap``: three views of where the atoms are,
+        # at three scales, with no ground for ranking them.
+        "local": 1.0,
     }
 
 
@@ -94,6 +148,222 @@ class AtomVQVAEConfig:
         default_factory=_default_atom_recon_weights,
     )
 
+    # --- local-geometry supervision (R1) --------------------------------
+    #
+    # The descriptor carries K nearest-neighbour spherical displacements as an
+    # ENCODER INPUT but has no matching decoder head, so nothing ever asked the
+    # decoder to place an atom correctly *relative to its neighbours*. Measured
+    # consequence: the error vectors of two bonded atoms have cosine +0.37, i.e.
+    # they are nearly independent, and bond-length MAE stays at 0.15 A even with
+    # quantization switched off entirely.
+    #
+    # Adding the head creates parameters, so it is opt-in: a checkpoint trained
+    # without it has no such weights and would fail a strict load.
+    predict_knn_offsets: bool = False
+
+    # Penalise the 1-2 and 1-3 distances OF THE DECODED COORDINATES against the
+    # reference. Unlike ``predict_knn_offsets`` this constrains the coordinate
+    # head itself rather than adding a parallel output, which is why the first
+    # attempt at local-geometry supervision did nothing (see the 2026-08-04
+    # note). The bond graph is derived in the loss from the reference geometry
+    # by covalent radius, so no stored connectivity and no cache change.
+    bond_distance_loss: bool = False
+    #: Weight each categorical head's atoms by the inverse frequency of their
+    #: own class. Off by default because every existing checkpoint was trained
+    #: without it, and the constraint targets are calibrated to that scale.
+    balanced_chem_loss: bool = False
+    #: Train the decoder only: the encoder and the codebook keep the weights
+    #: they were loaded with, so the codes -- and every token stream and
+    #: language model built on them -- are unchanged.
+    freeze_encoder: bool = False
+
+    # Apply the 1-2 / 1-3 terms to PROTEIN atoms as well as ligand ones. They
+    # are ligand-only by default, which is measurably a mistake: lDDT is itself
+    # a local-distance score, and the arm that added the ligand-only term
+    # (joint_bond) came out BELOW the arm without it on protein backbone
+    # (TM 0.809 vs 0.826, lDDT 0.914 vs 0.925) -- the term pulled capacity to
+    # the ligand and gave the protein nothing back. Backbone geometry is more
+    # regular than a ligand's (N-CA 1.46, CA-C 1.52, C-N 1.33 A), so there is
+    # less to learn, not more.
+    #
+    # The clash term stays ligand-only either way: it forbids inventing contacts
+    # the crystal does not have, which is a generative failure mode, and a
+    # pocket's packing is dense enough that the same floor would fight real
+    # structure.
+    bond_distance_all_sources: bool = False
+
+    # Squared error on EVERY pairwise distance the reference keeps under
+    # ``distance_map_cutoff``, for protein atoms.
+    #
+    # Added because extending the bonded terms to the protein did nothing for
+    # backbone lDDT, and the arithmetic says why: a C-C bond is called at
+    # 0.76 + 0.76 + 0.4 = 1.92 A, while the CA-CA distances backbone lDDT
+    # actually scores sit at ~3.8 A. The 1-2 and 1-3 sets never contain a single
+    # pair that metric looks at. Run vq_pbond scored 3/8 against the rival set
+    # (TM 0.801, lDDT 0.911) -- below the arm without it.
+    #
+    # This term is on the same quantity at the scale that is measured. It is not
+    # metric-gaming: preserving local distances is what structural quality
+    # means, and unlike the per-atom coord loss it is frame-independent, so it
+    # cannot be satisfied by getting the canonical frame right and the shape
+    # wrong.
+    # One pairwise term in place of four. ``bond12``/``bond13``/``clash``/
+    # ``dmap`` differ only in which distances they look at and how hard they
+    # push, and the pushing was done with hand-set weights (5.0 / 2.0 / 5.0 /
+    # 1.0) that also forced the per-source split: the short-range terms ran on
+    # ligand rows and the long-range one on protein rows.
+    #
+    # Measuring the error RELATIVE to the reference distance removes the need
+    # for any of that. The same 0.1 A slip is a 7% error on a bond and a 0.7%
+    # error on a 14 A pair, so proximity is weighted by the form of the
+    # expression rather than by a constant. Measured on 237 real pockets and
+    # ligands, bonded pairs take 0.0085 of an unweighted absolute loss, 0.0371
+    # of the current hand-weighted one, and 0.0770 of this -- the emphasis the
+    # 5.0 was buying, arrived at without the 5.0.
+    #
+    # The clash floor goes too: putting a pair the crystal holds at 5 A onto
+    # 1 A is a relative error of 0.8, which this already punishes far harder
+    # than the hinge did. ``keep_clash`` exists to test that claim rather than
+    # assume it.
+    # Local geometry as ONE term instead of two. ``bond12`` and ``bond13``
+    # differ only in which pairs they cover (1-2 and 1-3) and how hard they push
+    # (5.0 and 2.0); scoring their union with a relative error removes the
+    # ratio, because a 1-2 pair at 1.5 A and a 1-3 pair at 2.5 A already differ
+    # in how much the same absolute slip costs.
+    #
+    # This keeps the local / long-range split that ``pair_distance_loss``
+    # removed, which was measured to be necessary: collapsing everything into
+    # one term over 15 A took bond MAE from 0.075 to 0.233 A and PB-valid from
+    # 0.685 to 0.084, because a 15 A neighbourhood holds thousands of pairs
+    # against a few dozen bonds and the bonds are simply outvoted.
+    local_distance_loss: bool = False
+    # Restrict the local term to ligand rows, as ``bond12``/``bond13`` were.
+    # Measured to matter: running it over every atom kept the protein side
+    # intact (TM 0.852, lDDT 0.952, both equal to the hand-weighted arm) but
+    # took ligand PB-valid from 0.685 to 0.124 and bond MAE from 0.075 to
+    # 0.189 A. CrossDocked supplies 9.3 protein atoms per ligand atom, so
+    # inside one term the ligand's bonds are simply outvoted -- the same shape
+    # as long-range outvoting local, one scale down. The per-source split is
+    # therefore not an arbitrary choice: it is what gives the ligand a budget.
+    local_distance_ligand_only: bool = False
+
+    pair_distance_loss: bool = False
+    # lDDT's own inclusion radius, so the term covers the pairs the metric
+    # covers. The only hand-set number left in the geometry objective.
+    pair_distance_cutoff: float = 15.0
+    # Floor on the reference distance in the denominator. Below any real bond,
+    # so it only guards against a degenerate pair, never against real geometry.
+    pair_distance_floor: float = 0.3
+    # Keep the clash hinge alongside the pairwise term. Off by default: the
+    # point of the pairwise term is that it subsumes it.
+    keep_clash: bool = False
+    # Drop the clash hinge outright. It carries the last hand-set weight in the
+    # geometry objective (5.0), so whether it is still needed once 1-2/1-3 are
+    # constrained is worth an experiment rather than an assumption.
+    drop_clash: bool = False
+
+    distance_map_loss: bool = False
+    # 15 A is lDDT's own inclusion radius (Mariani et al., 2013), so the term
+    # covers the pairs the metric covers rather than a radius someone picked.
+    distance_map_cutoff: float = 15.0
+
+    # How the per-head losses are combined. The hand-set ``recon_weights`` below
+    # could not be defended -- ``numH`` sat at 0.1 against ``bond12``'s 5.0, and
+    # the resulting 0.981 -> 0.930 drop in per-atom numH accuracy cost more at
+    # the molecule level (0.660 -> 0.299 SMILES recovery) than the geometry gain
+    # was worth -- so the balance should not be a number someone picked.
+    #
+    # ``"none"``   use ``recon_weights`` as written (every published run).
+    # ``"scale"``  divide each head by a detached running mean of itself, so the
+    #              heads contribute equally in RELATIVE terms. MEASURED TO
+    #              DIVERGE, for the same reason as "uncertainty" below: the
+    #              CONTRIBUTION is pinned near 1, but the WEIGHT is 1/mean, and
+    #              a head whose loss approaches zero therefore takes an
+    #              unbounded one. Run ``vq_scale`` (job 8369518) reached
+    #              aromatic=7.6e6, charge=1.2e6 and element=4.8e4 against
+    #              coord=0.012; the chemistry heads hit 0.99999 accuracy and
+    #              val/atom_coord sat at 85.8 where the control reached 0.0958.
+    #              Equal relative contribution is not the objective, and buying
+    #              it costs the objective entirely.
+    # ``"constrained"`` treat geometry as the objective and each chemistry head
+    #              as a CONSTRAINT at the level the control run reached, with a
+    #              Lagrange multiplier raised by dual ascent whenever the
+    #              constraint is violated. Unlike the two balancers this encodes
+    #              the actual goal -- improve geometry without regressing
+    #              chemistry -- which is not a balance: measured with "scale",
+    #              equalising the contributions hands ``coord`` (the largest raw
+    #              loss, and the one that matters) a weight of 0.017. Bounded by
+    #              construction -- the multiplier lives in [0, 1] -- so it cannot
+    #              end like "uncertainty" below.
+    # ``"uncertainty"`` homoscedastic uncertainty weighting (Kendall et al.,
+    #              CVPR 2018). MEASURED TO DIVERGE HERE: minimising
+    #              ``exp(-s)L + s/2`` puts the optimum at ``exp(-s) = 1/(2L)``,
+    #              so a head whose loss approaches zero takes an unbounded
+    #              weight. Run ``vq_uw`` reached charge=7.3e6 and bb_sc=4.0e6
+    #              while coord fell to 0.39, and val/atom_coord rose from 1.166
+    #              to 1.213. Kept for the record, not for use.
+    loss_balancing: str = "none"
+
+    # Decay of the running mean used by ``loss_balancing="scale"``.
+    loss_scale_decay: float = 0.99
+
+    # Constraint levels for ``loss_balancing="constrained"``: the per-head
+    # TRAINING losses run ``vq_ctrl_p3`` actually reached (job 8354545, 100
+    # epochs, CASF/sbdd held out). Measured, not chosen -- which is the point:
+    # the constraint says "do not do worse than the control did", and the
+    # control is a run that exists.
+    constraint_targets: dict[str, float] = field(
+        default_factory=lambda: {
+            "element": 0.002134,
+            "charge": 0.000750,
+            "hybrid": 0.004213,
+            "aromatic": 0.000741,
+            "ring": 0.012842,
+            "numH": 0.011291,
+            "aa": 0.000126,
+            "bb_sc": 0.000177,
+        }
+    )
+    # Dual-ascent step for the multipliers. The violation is divided by the
+    # target and clipped to +-1 before it is applied, so one rate serves heads
+    # whose targets span two orders of magnitude and a multiplier needs ~1/lr
+    # steps to cross its whole range rather than saturating on batch one.
+    constraint_lr: float = 0.01
+
+    # Floor (A) for the ligand pair term. The term fires only on pairs the
+    # REFERENCE keeps at least this far apart, so raising it cannot punish a
+    # bond or a ring's 1-3 contact -- it only forbids the decoder from inventing
+    # a close contact that the crystal does not have. At the historical 1.2 A
+    # the term is nearly inert: 68.5% of reconstructions still contain a
+    # non-bonded pair under 2.0 A.
+    clash_floor: float = 1.2
+
+    # --- codebook balance (R2) ------------------------------------------
+    #
+    # Weight applied to ligand atoms in both the reconstruction loss and the
+    # codebook's EMA update. CrossDocked gives 8.3 protein atoms per ligand
+    # atom, so at 1.0 the shared book's centroids are set by protein geometry:
+    # only 5 of 8192 codes end up ligand-exclusive, and ligand atoms quantized
+    # to a shared code are 24% less accurate than those on an exclusive one.
+    # 8.3 equalises the two modalities' influence; 1.0 reproduces every
+    # published run.
+    #
+    # This is the LOSS weight. ``ligand_ema_weight`` below splits off the other
+    # half, because the two are different mechanisms and only the split can say
+    # which one matters: the EMA weight decides how many codes the ligand gets,
+    # the loss weight decides how hard the encoder works to use them. Measured
+    # on CASP16, the separate-tokenizer ablation -- whose ligand owns a private
+    # 4096-code book -- reconstructs ligand chemistry at 0.9804 per atom against
+    # joint's 0.9370, so one of the two is costing the joint model real
+    # accuracy; which one is an open question this exists to answer.
+    ligand_source_weight: float = 1.0
+
+    # Weight applied to ligand atoms in the codebook's EMA update alone. None
+    # means "whatever ``ligand_source_weight`` is", which is how the two were
+    # coupled before they were separable -- so every existing run and every
+    # config that does not set this behaves exactly as it did.
+    ligand_ema_weight: float | None = None
+
 
 @dataclass
 class AtomVQVAETrainingConfig:
@@ -112,6 +382,7 @@ class AtomVQVAETrainingConfig:
     precision: str = "bf16-mixed"
     atom: AtomVQVAEConfig = field(default_factory=AtomVQVAEConfig)
     pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)
+
 
     # Seed for this run, recorded so a checkpoint remembers what it was trained
     # with. Safe to add: a dataclass field with a default is also a class
@@ -185,6 +456,37 @@ class CLMTrainingConfig:
     # for pretraining (protein-only / ligand-only), where loss on all tokens
     # teaches the marginals.
     mask_prompt: bool = False
+    #: Multiply the loss on the first ``anchor_loss_atoms`` ligand tokens of
+    #: each document by this. 1.0 = off (every existing checkpoint).
+    anchor_loss_weight: float = 1.0
+    #: Weight of an auxiliary head that regresses the ligand centroid from the
+    #: ``<l>`` hidden state. 0 = off. Needs ``code_mean_coords``.
+    centroid_loss_weight: float = 0.0
+    code_mean_coords: str = ""
+    #: Width (A) of the geometry-smoothed cross-entropy. 0 = plain CE, which
+    #: is what every existing checkpoint was trained with.
+    #:
+    #: Cross-entropy over a codebook treats every wrong code as equally wrong.
+    #: These codes are not symbols -- each one puts an atom somewhere, and the
+    #: table in ``code_mean_coords`` says where. Measured, the LM's
+    #: teacher-forced argmax lands atoms 2.52 A from the crystal against the
+    #: quantizer's own 0.35 A, so nearly all of the deployed pose error is the
+    #: LM picking a *geometrically distant* code rather than a near one -- a
+    #: distinction the loss it was trained with cannot see. At ``tau`` the
+    #: target becomes a Gaussian over the true code's neighbours in that table
+    #: instead of a one-hot, so a near miss costs less than a far one. Needs
+    #: ``code_mean_coords``.
+    code_geometry_tau: float = 0.0
+    #: How many neighbours the smoothed target spreads over.
+    code_geometry_k: int = 32
+    #: What the auxiliary head regresses: "centroid" (the molecule's centre) or
+    #: "anchor" (the first ligand atom, which is what the anchor token needs).
+    centroid_target: str = "centroid"
+    anchor_loss_atoms: int = 3
+    #: Fraction of TRAINING documents whose pocket is blanked to an empty
+    #: ``<p></p>``, giving the model an unconditional branch. Without one,
+    #: classifier-free guidance has nothing valid to extrapolate from.
+    pocket_dropout: float = 0.0
 
     learning_rate: float = 6e-4
     min_lr_ratio: float = 0.1
@@ -276,8 +578,19 @@ class MLMTrainingConfig:
     # token, remainder -> unchanged. Only codebook tokens are ever masked
     # (specials <p>/<l>/<bos>/... are excluded so structure markers stay intact).
     mask_prob: float = 0.15
+    #: Upper end of a per-example uniform mask rate. 0 keeps the fixed
+    #: ``mask_prob`` every existing checkpoint was trained with. Set it to 1.0
+    #: to span the whole schedule an iterative (MaskGIT-style) decoder walks
+    #: through, which starts from a fully masked ligand.
+    mask_prob_max: float = 0.0
     mask_replace_prob: float = 0.8
     mask_random_prob: float = 0.1
+    #: Path to an (n_codes, K) int16 table of each code's nearest neighbours in
+    #: codebook space. When set, the ``mask_random_prob`` share is drawn from
+    #: those neighbours instead of uniformly over the vocabulary, so the
+    #: corruption is a near miss rather than an obvious intruder. Empty = the
+    #: uniform draw every existing checkpoint was trained with.
+    code_neighbours: str = ""
     # When True, only ligand (``<l>..</l>``) tokens are masked -> the model learns
     # P(ligand | pocket) bidirectionally (a condition-only / rescoring-tuned MLM).
     ligand_only_masking: bool = False
@@ -453,6 +766,13 @@ class PoseRefinerConfig:
 
     # Physical auxiliary losses (mirror ``solve_ligand_coords`` + ``infer_bonds``).
     d_floor: float = 1.1  # angstrom, hard no-overlap floor
+    # Minimum separation (A) enforced only between pairs the CRYSTAL keeps at
+    # least that far apart, so the floor may exceed a bond length -- a bond, or
+    # a ring's 1-3 contact, excludes itself by its own reference distance. This
+    # is the term that can actually close invented contacts; ``d_floor`` alone
+    # has to stay under a bond length and barely fires. ``None`` keeps the
+    # historical behaviour.
+    nonbond_floor: float | None = None
     lambda_clash: float = 1.0  # intra-ligand steric
     lambda_pkt: float = 1.0  # ligand-pocket steric
     lambda_bond: float = 1.0  # bonded-distance anchor (anti-collapse / topology)
@@ -460,6 +780,32 @@ class PoseRefinerConfig:
     # Steps over which the steric/bond weights ramp in from 0 (learn the
     # reconstruction manifold first, then enforce sterics -> no early collapse).
     lambda_ramp_steps: int = 2000
+
+
+@dataclass
+class BondHeadTrainingConfig:
+    """Config for the bond head (:mod:`prolit.model.bond_head`).
+
+    The head replaces distance-based bond perception on the decoder's output,
+    where perception recovers 31% of the true graph. Its training data is a
+    pose-refine corpus: the LM's own decoded coordinates beside the crystal
+    molecule's true bonds.
+
+    Stored in the checkpoint as a plain dict rather than as a pickled instance,
+    so renaming or moving this class does not orphan the weights the way it
+    would for the Lightning modules.
+    """
+
+    data_dir: str = ""
+    max_epochs: int = 40
+    #: Molecules per optimiser step. A molecule contributes all of its atom
+    #: pairs, so this is not the number of training examples.
+    batch_molecules: int = 64
+    learning_rate: float = 2e-3
+    weight_decay: float = 1e-4
+    embedding_dim: int = 48
+    hidden_dim: int = 256
+    seed: int = DEFAULT_SEED
 
 
 @dataclass
@@ -497,6 +843,13 @@ class PoseRefineTrainingConfig:
     # pose it should leave alone -> val rmsd_gain went NEGATIVE), so keep a
     # sizable share of clean-placement examples.
     online_rigid_prob: float = 0.5
+    #: Push the pose toward the pocket's centre of mass by |N(0, this)| A.
+    #: The isotropic ``online_rigid_trans`` cannot express this: generated
+    #: poses are not randomly offset, they are uniformly ~0.36 A too deep
+    #: (median surface gap -0.467 A against reference ligands' -0.104), and
+    #: Vina charges for it through repulsion (7.50 vs FLOWR's 1.64) while every
+    #: attractive term is already better than FLOWR's.
+    online_press_sigma: float = 0.0
 
     learning_rate: float = 3e-4
     min_lr_ratio: float = 0.1

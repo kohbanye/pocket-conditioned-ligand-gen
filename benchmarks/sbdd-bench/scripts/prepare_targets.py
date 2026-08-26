@@ -45,6 +45,8 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from prolit.provenance import write_manifest  # noqa: E402
+
 from sbdd_bench import paths  # noqa: E402
 
 _STANDARD_AA = {
@@ -152,11 +154,40 @@ def write_pocket_pdb(receptor_pdb: Path, lig_xyz: np.ndarray, out_pocket: Path,
     return len({(ln[21], ln[22:27]) for ln in keep})
 
 
+def _drop_altlocs(receptor_pdb: Path) -> Path:
+    """Keep one conformer per atom and blank the altLoc column.
+
+    prepare_receptor emits a CORRUPT pdbqt for receptors carrying alternate
+    locations: adding hydrogens to an atom whose name already fills the field
+    ("HE2" + altLoc "A") overflows into the residue-name column, and every
+    coordinate on that line shifts. Vina then rejects the whole receptor --
+
+        PDBQT parsing error: Coordinate "6  24.48" is not valid.
+         > ATOM 620  HE2A1GLN X  64  -4.477  38.406  24.482 ...
+
+    -- and the target silently scores nothing. It cost 23 of the 97 generation
+    targets (24%), reference ligands included, so the table was quietly computed
+    on 74. exit status is 0 throughout; only the missing Vina column shows it.
+    """
+    out = receptor_pdb.with_suffix(".noalt.pdb")
+    lines = []
+    for ln in receptor_pdb.read_text().splitlines():
+        if ln.startswith(("ATOM", "HETATM")):
+            if ln[16:17] not in (" ", "A"):
+                continue
+            ln = ln[:16] + " " + ln[17:]
+        lines.append(ln)
+    out.write_text("\n".join(lines) + "\n")
+    return out
+
+
 def receptor_to_pdbqt(receptor_pdb: Path, out_pdbqt: Path) -> bool:
     # Success is judged by the output file, not the exit status: prepare_receptor
     # returns 0 on inputs it silently declines to convert.
-    _run([paths.PREPARE_RECEPTOR, "-r", receptor_pdb, "-o", out_pdbqt,
+    cleaned = _drop_altlocs(receptor_pdb)
+    _run([paths.PREPARE_RECEPTOR, "-r", cleaned, "-o", out_pdbqt,
           "-A", "checkhydrogens", "-U", "nphs_lps_waters_nonstdres"])
+    cleaned.unlink(missing_ok=True)
     if out_pdbqt.exists():
         return True
     print("  prepare_receptor failed; obabel fallback")
@@ -298,6 +329,14 @@ def main() -> None:
             by_id[out["target_id"]] = out
     index = list(by_id.values())
     index_path.write_text(json.dumps(index, indent=2))
+    # The target set is an input every number in the generation table rests on,
+    # and it is not in git. Record what built it beside it, the same way a
+    # training run records what produced its checkpoint. A second path into
+    # this directory once produced a 97-pocket set from a different receptor
+    # source, and nothing in the directory said so -- the mismatch surfaced
+    # only when the baselines' reference scores refused to line up. See
+    # docs/notes/2026-08-21_target_set_was_not_the_canonical_split.md.
+    write_manifest(paths.TARGETS_DIR, extra={"n_targets": len(index)})
     print(f"\nwrote {len(index)} targets -> {index_path}")
 
 

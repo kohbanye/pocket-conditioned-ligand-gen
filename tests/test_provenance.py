@@ -140,11 +140,20 @@ def test_callback_is_silent_off_rank_zero(tmp_path: Path) -> None:
 
 
 def test_every_training_script_records_provenance() -> None:
-    """The part that rots: a new trainer added without the callback."""
+    """The part that rots: a new trainer added without the callback.
+
+    Either route counts. ``RecordProvenance`` is the callback and wants a
+    ``ModelCheckpoint`` to tell it where the run lives; a script that writes no
+    checkpoints -- the weight search trains throwaway models -- has no such
+    directory and calls ``write_manifest`` on its own output dir instead. What
+    must not happen is a trainer that records neither.
+    """
     offenders = [
         p.name
         for p in sorted((REPO / "pipelines" / "train").glob("*.py"))
-        if "RecordProvenance(" not in p.read_text()
+        if not any(
+            call in p.read_text() for call in ("RecordProvenance(", "write_manifest(")
+        )
     ]
     assert not offenders, f"train without recording provenance: {offenders}"
 

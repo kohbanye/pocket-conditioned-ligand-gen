@@ -38,6 +38,7 @@ from prolit.data.descriptors import (
     _welford_update_batch,
     collate_molecules,
 )
+from prolit.data.holdout import evaluation_pdbs, pdb_id_from_receptor
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
@@ -47,6 +48,7 @@ from prolit.tokenizers.descriptor_schema import (
     ATOM_DESCRIPTOR_DIM,
     ATOM_LAYOUT,
     continuous_mask,
+    fields_by_name,
 )
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.protein import (
@@ -86,8 +88,8 @@ def _atom_worker_init(pocket_config_dict: dict) -> None:
     from prolit.config import PocketExtractionConfig  # noqa: PLC0415
 
     _w_prot_desc = ProteinAtomDescriptor()
-    _w_lig_desc = LigandAtomDescriptor()
     _w_pocket_config = PocketExtractionConfig(**pocket_config_dict)
+    _w_lig_desc = LigandAtomDescriptor(_w_pocket_config.atom_order)
 
 
 def _atom_process_pose(  # noqa: PLR0913
@@ -137,8 +139,21 @@ def _atom_process_pose(  # noqa: PLR0913
         raise ValueError(msg)
 
     prot_arr, _prot_meta = prot_desc.compute(pocket, receptor_feats, frame)
+    pkt_canonical = pkt_elements = None
+    # Read off pocket_config, not a separate argument: the tar-streaming
+    # workers receive only asdict(pocket_config), so a standalone keyword
+    # silently stayed False and the cache came out identical to the old one.
+    if getattr(pocket_config, "pocket_context", False):
+        # Pocket atoms expressed in the LIGAND's frame, so the two agree even in
+        # the `local` ablation where the ligand has a frame of its own.
+        lig_centroid, lig_rotation = lig_frame
+        pkt_canonical = (
+            pocket.atom_coords.astype(np.float64) - lig_centroid
+        ) @ lig_rotation.T
+        element_field = fields_by_name(ATOM_LAYOUT)["element"]
+        pkt_elements = prot_arr[:, element_field.start].astype(np.int64)
     lig_arr, elements, _lig_meta = lig_desc.compute(
-        mol["atoms"], mol["bonds"], lig_frame
+        mol["atoms"], mol["bonds"], lig_frame, pkt_canonical, pkt_elements
     )
     if len(lig_arr) == 0:
         return None
@@ -262,6 +277,48 @@ def _save_atom_shard_metadata(
     )
 
 
+def _fold_labels(
+    df: object,
+    hub_config: HubDatasetConfig,
+    fold: int,
+    available: set[str],
+) -> dict[int, str]:
+    """Map ``pair_idx`` to ``train`` / ``test`` / ``excluded``.
+
+    ``excluded`` is a third state the CrossDocked folds do not have: complexes
+    an evaluation set downstream of the tokenizer will be scored on, which the
+    fold knows nothing about. 169 of the 285 CASF-2016 core-set entries sit on
+    the fold-0 *train* side, so without this the tokenizer sees them.
+    """
+    excluded_pdbs: set[str] = set()
+    if getattr(hub_config, "exclude_eval_pdbs", False):
+        excluded_pdbs = evaluation_pdbs(
+            cd_manifest=None,  # the fold split already covers it
+            casf_list=Path(hub_config.casf_pdb_list),
+            include_sbdd=True,
+        )
+
+    fold_map: dict[int, str] = {}
+    n_excluded = 0
+    for row in df.itertuples(index=False):  # type: ignore[attr-defined]
+        col = f"{row.source_type}_fold{fold}"
+        label = getattr(row, col, None) if col in available else "train"
+        if excluded_pdbs:
+            pid = pdb_id_from_receptor(str(row.receptor_pdb))
+            if pid is not None and pid in excluded_pdbs:
+                label = "excluded"
+                n_excluded += 1
+        if label is not None:
+            fold_map[int(row.pair_idx)] = label
+    if excluded_pdbs:
+        logger.info(
+            "Held out %d manifest rows on %d evaluation PDB ids (CASF + sbdd)",
+            n_excluded,
+            len(excluded_pdbs),
+        )
+    return fold_map
+
+
 def _atom_fold_split_from_manifest(
     hub_config: HubDatasetConfig,
     random_state: int,
@@ -282,19 +339,16 @@ def _atom_fold_split_from_manifest(
     ]
     df = pq.read_table(
         manifest_path,
-        columns=["pair_idx", "source_type", *fold_cols],
+        columns=["pair_idx", "source_type", "receptor_pdb", *fold_cols],
     ).to_pandas()
     df = df[df["source_type"].isin(source_types)]
-    fold_map: dict[int, str] = {}
-    for row in df.itertuples(index=False):
-        col = f"{row.source_type}_fold{fold}"
-        label = getattr(row, col, None) if col in available else "train"
-        if label is not None:
-            fold_map[int(row.pair_idx)] = label
+
+    fold_map = _fold_labels(df, hub_config, fold, available)
 
     test_globals: list[int] = []
     trainval_globals: list[int] = []
     missing = 0
+    held_out = 0
     global_offset = 0
     for shard_idx, count in enumerate(shard_counts):
         shard = torch.load(shard_dir / f"shard_{shard_idx:04d}.pt", weights_only=False)
@@ -305,9 +359,13 @@ def _atom_fold_split_from_manifest(
                 test_globals.append(gi)
             elif label == "train":
                 trainval_globals.append(gi)
+            elif label == "excluded":
+                held_out += 1
             else:
                 missing += 1
         global_offset += count
+    if held_out:
+        logger.info("%d cached complexes held out as evaluation PDBs", held_out)
     if missing:
         logger.warning("%d entries missing fold-%d label; skipped", missing, fold)
 
@@ -332,6 +390,16 @@ def _atom_fold_split_from_manifest(
 # ---------------------------------------------------------------------------
 
 
+def _dist_rank_world() -> tuple[int, int]:
+    """This process's rank and the world size; ``(0, 1)`` outside DDP."""
+    dist = torch.distributed
+    if not dist.is_available():  # ty: ignore[possibly-missing-attribute]
+        return 0, 1
+    if not dist.is_initialized():  # ty: ignore[possibly-missing-attribute]
+        return 0, 1
+    return dist.get_rank(), dist.get_world_size()  # ty: ignore[possibly-missing-attribute]
+
+
 class AtomShardedDataset(IterableDataset):
     """Streams normalized atom sequences; each entry yields protein + ligand."""
 
@@ -344,6 +412,9 @@ class AtomShardedDataset(IterableDataset):
         *,
         shuffle: bool = False,
         keys: tuple[str, ...] = ("protein", "ligand"),
+        shard_by_rank: bool = True,
+        batch_size: int = 1,
+        num_workers: int = 0,
     ) -> None:
         super().__init__()
         self.shard_dir = shard_dir
@@ -351,11 +422,65 @@ class AtomShardedDataset(IterableDataset):
         self.mean = mean
         self.std = std
         self.shuffle = shuffle
+        # Captured in the parent process: a dataloader worker is forked and does
+        # not inherit the process group, so ``is_initialized()`` is False by the
+        # time __iter__ runs.
+        rank, world = _dist_rank_world()
+        # Splitting the stream across ranks is a TRAINING optimisation: it is
+        # what stops N GPUs doing the same work N times. Validation must not do
+        # it. Every run that split the val stream logged no ``val/atom_coord``
+        # at all -- b_ddp4fix, b_shard2, b_shard4, b_range4 -- so
+        # ``ModelCheckpoint(monitor="val/atom_coord")`` never fired and the run
+        # finished with last.ckpt and no best checkpoint. The runs that left the
+        # val stream whole (b_ddp2, b_ddp4, b_ddp4b) validated every epoch. The
+        # cost of validating the whole set on every rank is 4x redundant work on
+        # a tenth of the data; the cost of the split was silently losing model
+        # selection, which is not a trade.
+        self.shard_by_rank = shard_by_rank
+        self.rank, self.world_size = (rank, world) if shard_by_rank else (0, 1)
         # Which atom streams to emit per entry. ("protein","ligand") = joint;
         # a single-element tuple trains a single-modality (protein/ligand-only)
         # VQ-VAE on the SAME complexes (the ablation baseline tokenizers).
         self.keys = keys
-        self.length = len(keys) * sum(len(indices) for _, indices in shard_plan)
+        # Per-RANK length, and it has to be EXACT, not an estimate.
+        #
+        # Lightning ends a training epoch -- and only then runs validation -- on
+        # ``batch_idx + 1 == num_training_batches``, and it takes that count
+        # from ``len(dataloader)``, i.e. from here. Each worker forms and drops
+        # its own ragged tail, so the batches actually yielded are
+        # ``sum_w floor(items_w / B)``, which is at or below
+        # ``floor(sum_w items_w / B)``. Whenever it is strictly below, the
+        # equality never holds, the epoch ends by StopIteration instead, and
+        # **validation never runs at all**: no ``val/atom_coord`` is logged, so
+        # ``ModelCheckpoint`` never fires and the run finishes with last.ckpt
+        # and no best checkpoint. One GPU happened to make the two agree
+        # (1565 = 1565) which is why this survived; four made it 391 against a
+        # real 382 and silently cost model selection on every DDP run.
+        #
+        # Hence batch_size and num_workers: the true count depends on both, so
+        # a length computed without them cannot be right.
+        per_worker = self._worker_item_counts(batch_size, num_workers)
+        self.length = batch_size * sum(items // batch_size for items in per_worker)
+
+    def _worker_item_counts(self, batch_size: int, num_workers: int) -> list[int]:
+        """Items each dataloader worker will emit, in worker order."""
+        plan = [
+            (shard_idx, indices[self.rank :: self.world_size])
+            for shard_idx, indices in self.shard_plan
+        ]
+        if batch_size < 1:
+            msg = "batch_size must be >= 1"
+            raise ValueError(msg)
+        workers = max(1, num_workers)
+        return [
+            len(self.keys)
+            * sum(
+                len(indices)
+                for i, (_, indices) in enumerate(plan)
+                if i % workers == w
+            )
+            for w in range(workers)
+        ]
 
     def __len__(self) -> int:
         return self.length
@@ -363,8 +488,38 @@ class AtomShardedDataset(IterableDataset):
     def __iter__(self):  # noqa: ANN204
         import random as _random  # noqa: PLC0415
 
-        worker_info = torch.utils.data.get_worker_info()
+        # Split across DDP ranks by interleaving the entries INSIDE each shard,
+        # then split this rank's shards across its dataloader workers. An
+        # IterableDataset gets no DistributedSampler -- there is no sampler for
+        # Lightning to replace -- so without a rank split every rank reads every
+        # shard and N GPUs do the same work N times (measured: 4 GPUs took 24.9
+        # min against one GPU's 23.1 for the same 1565 steps).
+        #
+        # Every rank keeps all 35 shards, and that redundancy is not an
+        # oversight -- it is what makes the batch counts match. With
+        # ``num_workers`` > 0 each worker forms and drops its OWN ragged tail,
+        # so a rank emits sum_w floor(entries_w / B), not floor(entries / B).
+        # Ranks holding different numbers of shards therefore emit different
+        # numbers of batches, and DDP's epoch-end collective waits forever.
+        #
+        # Measured, four ranks, 16 workers:
+        #   entries interleaved in-shard -> 678 / 678 / 678 / 678 batches, 35
+        #       shards each. Works: 9.1 min for 4 epochs, 2.54x one GPU.
+        #   contiguous entry ranges      -> 680 / 680 / 682 / 683 batches, 12 /
+        #       10 / 9 / 7 shards. NCCL ALLREDUCE timed out after 30 min. It
+        #       would have cut per-rank I/O from 14.7 GB to ~4 GB -- shard
+        #       loading runs at 175 MB/s and is the whole 68 s fixed term in
+        #       T(N) = 279/N + 68 s/epoch -- but making the counts agree needs
+        #       a global truncation across every (rank, worker) pair.
+        #   whole shards round-robin     -> 77k-96k entries per rank. Deadlock.
         plan = self.shard_plan
+        if self.world_size > 1:
+            plan = [
+                (shard_idx, indices[self.rank :: self.world_size])
+                for shard_idx, indices in plan
+            ]
+
+        worker_info = torch.utils.data.get_worker_info()
         if worker_info is not None:
             plan = [
                 plan[i]
@@ -587,6 +742,7 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
         plan: list[tuple[int, list[int]]] | None,
         *,
         shuffle: bool,
+        shard_by_rank: bool,
     ) -> DataLoader:
         if plan is None:
             msg = "setup() must be called before creating dataloaders"
@@ -599,6 +755,9 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
             std=self.norm_stats["atom_std"].numpy(),
             shuffle=shuffle,
             keys=self._keys,
+            shard_by_rank=shard_by_rank,
+            batch_size=self.training_config.mol_batch_size,
+            num_workers=self.training_config.num_workers,
         )
         nw = self.training_config.num_workers
         return DataLoader(
@@ -607,19 +766,27 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
             num_workers=nw,
             persistent_workers=nw > 0,
             pin_memory=True,
+            # Ranks differ by up to 25 entries out of 351k after the in-shard
+            # split; dropping the ragged tail makes every rank emit exactly the
+            # same number of batches, which is what DDP's epoch-end collective
+            # requires. Unsharded loaders see identical data on every rank, so
+            # their counts already agree and the tail is only lost work.
+            drop_last=shard_by_rank,
             # torch types collate_fn as Callable[[list[_T]], Any] with _T
             # bound by nothing, so no function satisfies it.
             collate_fn=collate_molecules,  # ty: ignore[invalid-argument-type]
         )
 
     def train_dataloader(self) -> DataLoader:
-        return self._loader(self._train_plan, shuffle=True)
+        return self._loader(self._train_plan, shuffle=True, shard_by_rank=True)
 
     def val_dataloader(self) -> DataLoader:
-        return self._loader(self._val_plan, shuffle=False)
+        # Whole set on every rank -- see AtomShardedDataset.__init__ for why
+        # splitting it cost model selection outright.
+        return self._loader(self._val_plan, shuffle=False, shard_by_rank=False)
 
     def test_dataloader(self) -> DataLoader:
-        return self._loader(self._test_plan, shuffle=False)
+        return self._loader(self._test_plan, shuffle=False, shard_by_rank=False)
 
 
 __all__ = [

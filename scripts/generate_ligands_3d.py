@@ -34,13 +34,11 @@ from prolit.chem.pdb_io import (
     write_full_protein_pdb,
 )
 from prolit.config import (
-    AtomVQVAETrainingConfig,
     CLMTrainingConfig,
     PocketExtractionConfig,
 )
 from prolit.data.descriptors import read_mol_from_tar
 from prolit.model.clm_module import ProLITCLMModule
-from prolit.model.vqvae_module import AtomVQVAEModule
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     ProteinAtomDescriptor,
@@ -48,7 +46,9 @@ from prolit.tokenizers.atom import (
 )
 from prolit.tokenizers.descriptor_schema import (
     ATOM_LAYOUT,
+    LIGAND_CHARGE_VOCAB,
     LIGAND_ELEMENT_VOCAB,
+    LIGAND_NUMH_VOCAB,
     fields_by_name,
 )
 from prolit.tokenizers.geometry import spherical_to_cartesian_np
@@ -57,6 +57,7 @@ from prolit.tokenizers.lm_vocab import (
     PAD_ID,
     AtomLMVocab,
 )
+from prolit.tokenizers.loaders import load_atom_vqvae as _load_atom_vqvae
 from prolit.tokenizers.protein import (
     compute_canonical_frame,
     extract_pocket_atoms_from_candidates,
@@ -129,6 +130,27 @@ def _pocket_codes_atom(  # noqa: PLR0913
 
 
 @torch.no_grad()
+def _perceive_bonds(
+    bond_head: object | None,
+    canonical: np.ndarray,
+    lig_feat: np.ndarray,
+    elements: list[str],
+    device: torch.device,
+) -> list[tuple[int, int]]:
+    """The bond graph the refiner is given, from the head when there is one.
+
+    Distance perception recovers 31% of the true bonds at the error the decoder
+    makes; the head, reading the same atoms' decoded chemistry, recovers 72%
+    (:mod:`prolit.model.bond_head`). Falling back to distance keeps every
+    existing checkpoint runnable without one.
+    """
+    if bond_head is None:
+        return infer_bonds(elements, canonical)
+    from prolit.model.bond_head import bonds_from_head  # noqa: PLC0415
+
+    return bonds_from_head(bond_head, canonical, lig_feat, device=device)
+
+
 def _decode_ligand_atom(  # noqa: PLR0913
     codes: list[int],
     atom_vqvae: object,
@@ -138,8 +160,21 @@ def _decode_ligand_atom(  # noqa: PLR0913
     *,
     refiner: object | None = None,
     pocket_ctx: tuple | None = None,
-) -> tuple[np.ndarray, list[str]]:
-    """Decode generated ligand codes (all-atom VQ-VAE) to global coords + elements.
+    place_first: bool = False,
+    scoring_radii: bool = False,
+    refine_rounds: int = 1,
+    bond_head: object | None = None,
+) -> tuple[np.ndarray, list[str], list[int], list[int], list[bool], np.ndarray]:
+    """Decode codes to global coords, elements, charges, numH and aromaticity.
+
+    ``charge`` and ``numH`` come back alongside the elements because they are
+    what turns a bare connectivity graph into a molecule: the orders of atom
+    *i*'s bonds must sum to ``valence(element, charge) - numH(i)``, which is
+    exactly what :func:`prolit.chem.bond_orders.assign_bond_orders` solves.
+    Dropping them forces every bond to be written single, and an aromatic ring
+    written as a saturated one fails PoseBusters three separate ways -- its
+    bonds are 1.39 A where a single bond wants 1.53, its angles are 120 where
+    sp3 wants 109.5, and a ring declared non-aromatic must not be planar.
 
     The unified coord head is the same 4-D spherical ``(r, θ, sin φ, cos φ)`` in
     the pocket canonical frame as the ligand VQ-VAE, so reconstruction mirrors
@@ -147,6 +182,19 @@ def _decode_ligand_atom(  # noqa: PLR0913
     ``pocket_ctx`` (``(pocket canonical coords, pocket node features)``) are
     given, the E(3)-equivariant pose refiner cleans the pose before the global
     transform.
+
+    ``place_first`` slides the decoded ligand off the pocket wall as a rigid
+    body *before* handing it to the refiner. The refiner was trained on crystal
+    ligands with a local jitter, but the decoder hands it a chemically fine
+    molecule about 2 A out of place -- so without this it is asked to undo an
+    error it never saw. Removing the global part first puts its input back in
+    the distribution it was fitted on, and leaves it the local part it can
+    actually correct. See :mod:`prolit.chem.rigid_fit`.
+
+    ``refine_rounds`` repeats place-then-refine. Feeding a flow-matching model
+    its own output is normally out of distribution, but the placement in front
+    of each round is exactly what puts it back in -- so the question of whether
+    a second pass helps is an empirical one rather than a broken one.
     """
     idx = torch.tensor(codes, dtype=torch.long, device=device)
     outputs = atom_vqvae.decode_to_outputs(idx)
@@ -156,39 +204,81 @@ def _decode_ligand_atom(  # noqa: PLR0913
     coord_denorm = (outputs["coord"] * cstd + cmean).cpu().numpy()
     canonical = spherical_to_cartesian_np(coord_denorm)
     centroid, rotation = frame
-    if refiner is not None and pocket_ctx is not None:
-        from prolit.model.pose_refiner import (  # noqa: PLC0415
-            LIG_CHEM_HEADS,
-            ligand_feats_from_heads,
-            refine_ligand_canonical,
-        )
+    from prolit.model.pose_refiner import (  # noqa: PLC0415
+        LIG_CHEM_HEADS,
+        ligand_feats_from_heads,
+        refine_ligand_canonical,
+    )
 
-        chem = {h: outputs[h].argmax(dim=-1).cpu().numpy() for h in LIG_CHEM_HEADS}
-        lig_feat = ligand_feats_from_heads(chem, canonical.shape[0])
+    # The node-feature block is the decoder's six chemistry heads laid out the
+    # way both the refiner and the bond head read them. Built once here rather
+    # than inside the refiner branch, because the bond head needs it whether or
+    # not a refiner ran.
+    chem = {h: outputs[h].argmax(dim=-1).cpu().numpy() for h in LIG_CHEM_HEADS}
+    lig_feat = ligand_feats_from_heads(chem, canonical.shape[0])
+    if refiner is not None and pocket_ctx is not None:
         elems_r = [
             LIGAND_ELEMENT_VOCAB[i] if LIGAND_ELEMENT_VOCAB[i] != "OTHER" else "X"
             for i in chem["element"]
         ]
-        bonds_r = np.asarray(infer_bonds(elems_r, canonical), dtype=np.int64).reshape(
-            -1, 2
-        )
-        pkt_canon, pkt_feat = pocket_ctx
-        canonical = refine_ligand_canonical(
-            refiner,
-            canonical.astype(np.float32),
-            lig_feat,
-            pkt_canon,
-            pkt_feat,
-            bonds=bonds_r,
-            device=device,
-        )
+        pkt_canon, pkt_feat, *pkt_rest = pocket_ctx
+        place = None
+        if place_first and pkt_rest:
+            from prolit.chem.rigid_fit import (  # noqa: PLC0415
+                rigid_pocket_fit,
+                vdw_radii,
+            )
+
+            # Bondi radii make the objective zero 0.4 A inside the surface Vina
+            # rewards, and its gradient dies there -- so the fitter stops with
+            # every atom pressed too deep. Measured over 99 targets: Vina's
+            # repulsion term is 7.50 for these poses against 1.64 for FLOWR,
+            # while every attractive term is better than FLOWR's.
+            lig_radii = vdw_radii(elems_r, scoring=scoring_radii)
+            pkt_coords = np.asarray(pkt_canon, dtype=np.float64)
+            pkt_radii = pkt_rest[0]
+            if scoring_radii and len(pkt_rest) > 1:
+                pkt_radii = pkt_rest[1]
+
+            def place(xyz: np.ndarray) -> np.ndarray:
+                fit = rigid_pocket_fit(
+                    xyz.astype(np.float64), lig_radii, pkt_coords, pkt_radii
+                )
+                return fit.apply(xyz.astype(np.float64))
+
+        for _ in range(max(1, refine_rounds)):
+            if place is not None:
+                canonical = place(canonical)
+            bonds_r = np.asarray(
+                _perceive_bonds(bond_head, canonical, lig_feat, elems_r, device),
+                dtype=np.int64,
+            ).reshape(-1, 2)
+            canonical = refine_ligand_canonical(
+                refiner,
+                canonical.astype(np.float32),
+                lig_feat,
+                pkt_canon,
+                pkt_feat,
+                bonds=bonds_r,
+                device=device,
+            )
     coords = canonical @ rotation + centroid
     elem_idx = outputs["element"].argmax(dim=-1).cpu().numpy()
     elements = [
         LIGAND_ELEMENT_VOCAB[i] if LIGAND_ELEMENT_VOCAB[i] != "OTHER" else "X"
         for i in elem_idx
     ]
-    return coords, elements
+    charges = [
+        LIGAND_CHARGE_VOCAB[i] for i in outputs["charge"].argmax(dim=-1).cpu().numpy()
+    ]
+    num_h = [
+        LIGAND_NUMH_VOCAB[i] for i in outputs["numH"].argmax(dim=-1).cpu().numpy()
+    ]
+    # The aromatic head rides out with the rest. It used to stop at the
+    # refiner's node features, which is how a model that predicts aromaticity
+    # ended up emitting molecules whose median fsp3 was 1.00.
+    aromatic = [bool(i) for i in outputs["aromatic"].argmax(dim=-1).cpu().numpy()]
+    return coords, elements, charges, num_h, aromatic, lig_feat
 
 
 def load_atom_norm_stats(
@@ -206,22 +296,28 @@ def load_atom_vqvae(
     device: torch.device,
 ) -> object:
     """Load the frozen all-atom VQ-VAE (returns the inner TransformerVQVAE)."""
-    config = AtomVQVAETrainingConfig()
-    config.atom.codebook_size = codebook_size
-    module = (
-        AtomVQVAEModule.load_from_checkpoint(
-            str(ckpt), config=config, map_location=device
-        )
-        .eval()
-        .to(device)
-    )
+    module = _load_atom_vqvae(str(ckpt), device, codebook_size=codebook_size)
     return module.vqvae
 
 
 def load_atom_lm(ckpt: str, codebook_size: int, device: torch.device) -> object:
-    """Load an all-atom LM checkpoint over a single ``codebook_size`` range."""
+    """Load an all-atom LM checkpoint over a single ``codebook_size`` range.
+
+    A run trained with an auxiliary head (``--centroid-loss-weight``) carries
+    that head's weights in the checkpoint. Generation only ever uses
+    ``self.model``, so those keys are surplus rather than a mismatch -- but a
+    strict load rejects the whole file over them. The head is only built when
+    the config asks for it, so recreate it from what the checkpoint has.
+    """
     config = CLMTrainingConfig()
     config.model.atom_codebook_size = codebook_size
+    state = torch.load(ckpt, map_location="cpu", weights_only=False)
+    if any(k.startswith("centroid_head.") for k in state.get("state_dict", {})):
+        saved = state.get("hyper_parameters", {}).get("config")
+        config.centroid_loss_weight = float(
+            getattr(saved, "centroid_loss_weight", 1.0) or 1.0
+        )
+        config.code_mean_coords = str(getattr(saved, "code_mean_coords", "") or "")
     return (
         ProLITCLMModule.load_from_checkpoint(ckpt, config=config, map_location=device)
         .eval()
@@ -436,7 +532,7 @@ def main() -> None:  # noqa: PLR0915, C901
             if not codes:
                 logger.info("  s%d: EMPTY/invalid", k)
                 continue
-            coords, elems = decode_codes(codes, frame)
+            coords, elems, _charges, _num_h, _arom, _feat = decode_codes(codes, frame)
             bonds = infer_bonds(elems, coords)
             write_full_protein_pdb(
                 args.out_dir / f"{tag}_s{k}.pdb",

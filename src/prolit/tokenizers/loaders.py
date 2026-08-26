@@ -46,19 +46,14 @@ def load_tokenizer(
 
     Pass ``norm_stats`` to bake the normalization into the module, so callers
     can hand it raw descriptors.
-    """
-    from prolit.config import AtomVQVAETrainingConfig  # noqa: PLC0415
-    from prolit.model.vqvae_module import AtomVQVAEModule  # noqa: PLC0415
 
-    config = AtomVQVAETrainingConfig()
-    config.atom.codebook_size = codebook_size
-    module = (
-        AtomVQVAEModule.load_from_checkpoint(
-            str(ckpt), config=config, map_location=device
-        )
-        .eval()
-        .to(device)
-    )
+    Delegates to :func:`load_atom_vqvae` rather than building a config, because
+    this function used to build one and could therefore not open any checkpoint
+    trained with the constrained balancer -- which is all of them. That it is
+    the *documented public entry point* while the internal loader had the fix
+    is the wrong way round; see that function for what goes wrong.
+    """
+    module = load_atom_vqvae(ckpt, device, codebook_size=codebook_size)
     if norm_stats is not None:
         module.vqvae.set_normalization(norm_stats["atom_mean"], norm_stats["atom_std"])
     return module.vqvae
@@ -163,6 +158,36 @@ def load_scoring_head(
         .eval()
         .to(device)
     )
+
+
+def load_atom_vqvae(
+    ckpt: str | Path,
+    device: torch.device,
+    *,
+    codebook_size: int | None = None,
+) -> Any:  # noqa: ANN401
+    """Load an all-atom VQ-VAE from a checkpoint, using the checkpoint's config.
+
+    Passing a freshly built config instead is the mistake this exists to stop.
+    Lightning pickles the config INSTANCE into ``hyper_parameters``, and the
+    module registers buffers off it -- ``loss_balancing="constrained"`` adds one
+    ``_lam_`` per chemistry head -- so a default config builds a module whose
+    state_dict is missing exactly those keys and the load dies on "Unexpected
+    key(s)". Every corpus builder had its own copy of that bug, which meant no
+    checkpoint trained with a balancer could be tokenized with at all.
+
+    ``codebook_size`` is checked, not applied: it is what the caller believes it
+    asked for, and a mismatch means the wrong run was named. Silently honouring
+    it would build a vocabulary the weights do not match.
+    """
+    from prolit.model.vqvae_module import AtomVQVAEModule  # noqa: PLC0415
+
+    module = AtomVQVAEModule.load_from_checkpoint(str(ckpt), map_location=device)
+    found = module.config.atom.codebook_size
+    if codebook_size is not None and found != codebook_size:
+        msg = f"{ckpt} was trained with codebook_size {found}, not {codebook_size}"
+        raise ValueError(msg)
+    return module.eval().to(device)
 
 
 def load_pose_refiner(ckpt: str | Path, device: torch.device) -> Any:  # noqa: ANN401

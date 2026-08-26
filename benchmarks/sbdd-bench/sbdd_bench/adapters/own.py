@@ -57,12 +57,17 @@ class OwnAdapter(GenerativeModel):
                           else (_envp("SBDD_OWN_CACHE_DIR") or paths.OWN_DESCRIPTOR_CACHE))
         self.python = python or paths.OWN_PYTHON
         self.workdir = paths.OWN_MODEL_WORKDIR
+        self.place_first = bool(os.environ.get("SBDD_OWN_PLACE_FIRST"))
+        self.refine_rounds = int(os.environ.get("SBDD_OWN_REFINE_ROUNDS", "1"))
         self.batch_size = batch_size
         self.temperature = temperature
         self.top_p = top_p
         cb = codebook_size or os.environ.get("SBDD_OWN_CODEBOOK_SIZE")
         self.codebook_size = int(cb) if cb else None
         self.refine_ckpt = Path(refine_ckpt) if refine_ckpt else _envp("SBDD_OWN_REFINE_CKPT")
+        # The bond head replaces distance-based bond perception on the decoded
+        # atoms; unset, generation falls back to distance as every earlier run did.
+        self.bond_ckpt = _envp("SBDD_OWN_BOND_CKPT")
         # Sampling seed. The generator seeds torch with --seed (default 0), so
         # a second run with the same arguments reproduces the SAME molecules --
         # oversampled pools must vary this or they just duplicate pool 1.
@@ -71,6 +76,9 @@ class OwnAdapter(GenerativeModel):
         # constructor defaults are kept so existing callers are unaffected.
         self.temperature = float(os.environ.get("SBDD_OWN_TEMPERATURE", temperature))
         self.top_p = float(os.environ.get("SBDD_OWN_TOP_P", top_p))
+        self.scoring_radii = os.environ.get("SBDD_OWN_SCORING_RADII") == "1"
+        self.anchor_temperature = os.environ.get("SBDD_OWN_ANCHOR_TEMP")
+        self.anchor_atoms = int(os.environ.get("SBDD_OWN_ANCHOR_ATOMS", "3"))
         self.min_atoms_frac = float(os.environ.get("SBDD_OWN_MIN_ATOMS_FRAC", "0"))
         self.min_atoms_abs = int(os.environ.get("SBDD_OWN_MIN_ATOMS_ABS", "0"))
         self.norm_stats = Path(norm_stats) if norm_stats else _envp("SBDD_OWN_NORM_STATS")
@@ -111,7 +119,10 @@ class OwnAdapter(GenerativeModel):
                 "--separate-ligand-norm", str(Path(self.sep_ligand_norm).resolve()),
             ]
         elif self.mode == "allatom":
-            args += ["--all-atom", "--vqvae-ckpt", str(self.vqvae_ckpt.resolve())]
+            # No --all-atom flag: the generator made the all-atom path its
+            # default and dropped the switch, so passing it is now an
+            # unrecognized-argument error rather than a no-op.
+            args += ["--vqvae-ckpt", str(self.vqvae_ckpt.resolve())]
         else:  # legacy
             args += ["--vqvae-ckpt", str(self.vqvae_ckpt.resolve())]
         if self.codebook_size is not None:
@@ -120,12 +131,29 @@ class OwnAdapter(GenerativeModel):
             args += ["--norm-stats", str(Path(self.norm_stats).resolve())]
         if self.refine_ckpt is not None:
             args += ["--refine-ckpt", str(Path(self.refine_ckpt).resolve())]
+        if self.bond_ckpt is not None:
+            args += ["--bond-ckpt", str(Path(self.bond_ckpt).resolve())]
+        if self.place_first:
+            args += ["--place-before-refine"]
+        if self.refine_rounds != 1:
+            args += ["--refine-rounds", str(self.refine_rounds)]
         return args
 
     def generate(self, target: Target, n_samples: int, out_dir: Path) -> GenResult:
         self.setup()
         script = self.workdir / "scripts" / "generate_ligands_for_target.py"
-        env = dict(os.environ, PYTHONPATH=str(self.workdir))
+        # ``workdir/src`` first, and prepended rather than assigned. The venv
+        # holds an editable install of ``prolit`` that points at whichever
+        # checkout it was created from, so a worktree's own source loses to it
+        # unless it is put ahead on the path -- a generation run then silently
+        # exercises the other checkout's code. Overwriting PYTHONPATH outright
+        # also threw away whatever the caller had set, which is how a job that
+        # carefully exported the right path still ran the wrong module.
+        existing = os.environ.get("PYTHONPATH", "")
+        entries = [str(self.workdir / "src"), str(self.workdir)]
+        if existing:
+            entries.append(existing)
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(entries))
         cmd = [
             self.python, script,
             "--receptor", target.receptor_pdb,
@@ -138,13 +166,24 @@ class OwnAdapter(GenerativeModel):
             "--temperature", self.temperature,
             "--top-p", self.top_p,
             "--seed", self.seed,
+            *(["--scoring-radii"] if self.scoring_radii else []),
+            *(["--anchor-temperature", self.anchor_temperature,
+               "--anchor-atoms", self.anchor_atoms]
+              if self.anchor_temperature else []),
             "--min-atoms-frac", self.min_atoms_frac,
             "--min-atoms-abs", self.min_atoms_abs,
             *self._mode_args(),
         ]
         proc = self._run(cmd, cwd=self.workdir, env=env)
         sdf = out_dir / "generated.sdf"
-        if not sdf.exists():
+        # The exit code, not the file, decides. generate_ligands_for_target.py
+        # writes the *reference* ligand into generated.sdf before it samples
+        # anything, so the file exists from the first second of the run and its
+        # presence says nothing about whether sampling happened. A run that
+        # died on a missing refiner checkpoint once reported ok=True with
+        # n_generated=0 for all 100 targets on that alone, and the failure was
+        # only found by re-running a target by hand.
+        if proc.returncode != 0 or not sdf.exists():
             return GenResult(
                 self.name, target.target_id, ok=False, n_requested=n_samples,
                 error=(proc.stderr or proc.stdout or "")[-2000:],

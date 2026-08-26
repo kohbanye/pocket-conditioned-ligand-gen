@@ -35,11 +35,19 @@ coordinates rather than an error.
 
 from __future__ import annotations
 
+from prolit.chem.bond_orders import (
+    assign_bond_orders,
+    mol_from_decoded,
+    target_bond_sums,
+)
 from prolit.chem.mol2 import mol_to_dict, parse_mol2_multi
 from prolit.chem.pdb_io import (
     infer_bonds,
+    read_heavy_atoms,
     write_full_protein_pdb,
 )
+from prolit.chem.rigid_fit import rigid_pocket_fit, vdw_radii
+from prolit.chem.torsion_fit import torsion_pocket_fit
 from prolit.data.rescore_dataset import ligand_mask
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
@@ -93,6 +101,7 @@ __all__ = [
     "PocketAtomData",
     "PoseEncoder",
     "ProteinAtomDescriptor",
+    "assign_bond_orders",
     "atom_descriptor_to_coords",
     "compute_canonical_frame",
     "extract_pocket_atoms_from_candidates",
@@ -106,6 +115,7 @@ __all__ = [
     "load_scoring_head",
     "load_separate_tokenizer",
     "load_tokenizer",
+    "mol_from_decoded",
     "mol_to_dict",
     "parse_ligand_pdb_text",
     "parse_mol2_multi",
@@ -116,6 +126,11 @@ __all__ = [
     "precompute_receptor_atom_features",
     "precompute_receptor_atom_features_from_text",
     "random_rotation_matrix",
+    "read_heavy_atoms",
+    "rigid_pocket_fit",
     "rotate_atom_descriptor",
+    "target_bond_sums",
+    "torsion_pocket_fit",
+    "vdw_radii",
     "write_full_protein_pdb",
 ]
