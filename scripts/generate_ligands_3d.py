@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -66,6 +67,9 @@ from prolit.tokenizers.protein import (
 
 # Repository root, used only for default data/output locations. ``prolit`` is
 # an installed package, so nothing needs to be put on sys.path.
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -151,6 +155,92 @@ def _perceive_bonds(
     return bonds_from_head(bond_head, canonical, lig_feat, device=device)
 
 
+def _rigid_part(before: np.ndarray, after: np.ndarray) -> np.ndarray:
+    """Keep only the rigid part of the displacement the refiner predicted.
+
+    The refiner cannot compress what it is only allowed to move. Measured over
+    60 targets, every refiner in this family trades chemistry for contact:
+    bonds out of tolerance go 10.0% (no refiner) -> 48.1% (``refit_press0.6``)
+    / 50.3% (``refit_deploy``) while the clash rate goes 36.0% -> 25.0% /
+    28.3%. Both numbers are the same act -- a smaller molecule overlaps less --
+    and press corruption is not the cause, since the non-press refiner
+    compresses slightly harder.
+
+    This consults no objective function: it is a closed-form projection of the
+    model's own output onto SE(3), not an optimisation against Vina or a force
+    field. A rigid motion cannot change a bond length or angle, so the molecule
+    keeps the chemistry the decoder gave it and the placement the refiner
+    predicted.
+    """
+    from prolit.model.mlm_decode import kabsch_onto  # noqa: PLC0415
+
+    if before.shape != after.shape:
+        return after
+    return kabsch_onto(before, after).astype(np.float32)
+
+
+def _rigid_torsion_part(
+    before: np.ndarray, after: np.ndarray, bonds: np.ndarray
+) -> np.ndarray:
+    """Project the refiner's displacement onto rigid motion + tree torsions.
+
+    ``_rigid_part`` throws away everything the refiner said about internal
+    motion, and that is most of what it said: over 94 targets the SE(3) part
+    alone recovers 4.40 of ``refit_press0.6``'s 6.66 kcal. The remaining 2.26
+    is bought by breaking bonds -- but Vina's own local optimiser, which moves
+    nothing except translation, rotation and torsions, recovers 9.91 kcal from
+    these very poses. So the missing motion is *expressible* without touching a
+    bond; the free-displacement head simply does not express it that way.
+
+    Like ``_rigid_part`` this consults no objective function. The angles are
+    read off the model's own output in closed form -- the dihedral each
+    rotatable bond turned through between the pose the refiner was given and
+    the pose it returned -- and re-applied to the original. Bond lengths and
+    angles are unchanged by construction, so the molecule keeps the decoder's
+    chemistry while following the refiner's placement as far as a real molecule
+    can follow it.
+    """
+    from prolit.chem.torsions import rotatable_bonds, torsion_delta  # noqa: PLC0415
+    from prolit.model.mlm_decode import kabsch_onto  # noqa: PLC0415
+    from prolit.model.torsion_transform import apply_torsions  # noqa: PLC0415
+
+    if before.shape != after.shape:
+        return after
+    pairs, masks = rotatable_bonds(bonds, before.shape[0])
+    if len(pairs) == 0:
+        return _rigid_part(before, after)
+    # Torsions first, rigid second. Dihedrals are rotation-invariant, so the
+    # angles can be read straight off the pair; but superposing first would fit
+    # the rigid part to a difference the torsions have not yet removed, and the
+    # two motions would compose into neither.
+    angles = torsion_delta(before, after, bonds, pairs)
+    turned = (
+        apply_torsions(  # the training-time transform, so it speaks torch
+            torch.from_numpy(np.ascontiguousarray(before)).float(),
+            torch.from_numpy(np.ascontiguousarray(pairs)).long(),
+            torch.from_numpy(np.ascontiguousarray(masks)).bool(),
+            torch.from_numpy(np.ascontiguousarray(angles)).float(),
+        )
+        .numpy()
+        .astype(np.float64)
+    )
+    return kabsch_onto(turned, after).astype(np.float32)
+
+
+def _project_displacement(
+    mode: str,
+    before: np.ndarray,
+    after: np.ndarray,
+    bonds_of_before: Callable[[], np.ndarray],
+) -> np.ndarray:
+    """Dispatch to the requested projection of the refiner's displacement."""
+    if mode == "rigid":
+        return _rigid_part(before, after)
+    if mode == "torsion":
+        return _rigid_torsion_part(before, after, bonds_of_before())
+    return after
+
+
 def _decode_ligand_atom(  # noqa: PLR0913
     codes: list[int],
     atom_vqvae: object,
@@ -164,6 +254,9 @@ def _decode_ligand_atom(  # noqa: PLR0913
     scoring_radii: bool = False,
     refine_rounds: int = 1,
     bond_head: object | None = None,
+    reference_codes: list[int] | None = None,
+    reconcile_mode: str = "off",
+    refine_project: str = "none",
 ) -> tuple[np.ndarray, list[str], list[int], list[int], list[bool], np.ndarray]:
     """Decode codes to global coords, elements, charges, numH and aromaticity.
 
@@ -216,6 +309,7 @@ def _decode_ligand_atom(  # noqa: PLR0913
     # not a refiner ran.
     chem = {h: outputs[h].argmax(dim=-1).cpu().numpy() for h in LIG_CHEM_HEADS}
     lig_feat = ligand_feats_from_heads(chem, canonical.shape[0])
+    canonical_before = canonical.copy()
     if refiner is not None and pocket_ctx is not None:
         elems_r = [
             LIGAND_ELEMENT_VOCAB[i] if LIGAND_ELEMENT_VOCAB[i] != "OTHER" else "X"
@@ -262,6 +356,42 @@ def _decode_ligand_atom(  # noqa: PLR0913
                 bonds=bonds_r,
                 device=device,
             )
+    if refiner is not None and pocket_ctx is not None and refine_project != "none":
+        canonical = _project_displacement(
+            refine_project,
+            canonical_before,
+            canonical,
+            # Bonds are perceived on the pose the refiner was GIVEN, not the
+            # one it returned: a distorted output perceives a different bond
+            # graph (52.2% of molecules change SMILES under press0.6), and the
+            # projection has to move the molecule the decoder actually made.
+            lambda: np.asarray(
+                _perceive_bonds(
+                    bond_head, canonical_before, lig_feat, elems_r, device
+                ),
+                dtype=np.int64,
+            ).reshape(-1, 2),
+        )
+    if reference_codes is not None and reconcile_mode != "off":
+        # The decoder is contextual, so editing one code moves every atom. Only
+        # the edited atoms are meant to move (2.20 A); the rest drift 0.24 A.
+        from prolit.model.mlm_decode import reconcile  # noqa: PLC0415
+
+        ref_out = atom_vqvae.decode_to_outputs(
+            torch.tensor(reference_codes, dtype=torch.long, device=device)
+        )
+        ref_xyz = spherical_to_cartesian_np(
+            (ref_out["coord"] * cstd + cmean).cpu().numpy()
+        )
+        changed = [
+            i for i, (a, b) in enumerate(zip(reference_codes, codes, strict=False))
+            if a != b
+        ]
+        if changed and ref_xyz.shape == canonical.shape:
+            canonical = reconcile(
+                ref_xyz, canonical, changed, mode=reconcile_mode
+            ).astype(np.float32)
+
     coords = canonical @ rotation + centroid
     elem_idx = outputs["element"].argmax(dim=-1).cpu().numpy()
     elements = [

@@ -68,6 +68,14 @@ class OwnAdapter(GenerativeModel):
         # The bond head replaces distance-based bond perception on the decoded
         # atoms; unset, generation falls back to distance as every earlier run did.
         self.bond_ckpt = _envp("SBDD_OWN_BOND_CKPT")
+        # Iterative (bidirectional) decoding of the sampled ligand codes.
+        self.mlm_ckpt = _envp("SBDD_OWN_MLM_CKPT")
+        self.iter_rounds = int(os.environ.get("SBDD_OWN_ITER_ROUNDS", "2"))
+        self.iter_frac = float(os.environ.get("SBDD_OWN_ITER_FRAC", "0.05"))
+        self.reconcile = os.environ.get("SBDD_OWN_RECONCILE", "off")
+        self.iter_order = os.environ.get("SBDD_OWN_ITER_ORDER", "confidence")
+        self.iter_mode = os.environ.get("SBDD_OWN_ITER_MODE", "warm")
+        self.refine_project = os.environ.get("SBDD_OWN_REFINE_PROJECT", "none")
         # Sampling seed. The generator seeds torch with --seed (default 0), so
         # a second run with the same arguments reproduces the SAME molecules --
         # oversampled pools must vary this or they just duplicate pool 1.
@@ -133,6 +141,17 @@ class OwnAdapter(GenerativeModel):
             args += ["--refine-ckpt", str(Path(self.refine_ckpt).resolve())]
         if self.bond_ckpt is not None:
             args += ["--bond-ckpt", str(Path(self.bond_ckpt).resolve())]
+        if self.mlm_ckpt is not None:
+            args += [
+                "--mlm-ckpt", str(Path(self.mlm_ckpt).resolve()),
+                "--iter-rounds", str(self.iter_rounds),
+                "--iter-frac", str(self.iter_frac),
+                "--reconcile", self.reconcile,
+                "--iter-order", self.iter_order,
+                "--iter-mode", self.iter_mode,
+            ]
+        if self.refine_project != "none":
+            args += ["--refine-project", self.refine_project]
         if self.place_first:
             args += ["--place-before-refine"]
         if self.refine_rounds != 1:

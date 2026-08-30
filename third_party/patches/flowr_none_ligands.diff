@@ -1,0 +1,26 @@
+--- /tmp/gfp_orig.py	2026-08-27 11:04:52.961396904 +0900
++++ flowr/gen/generate_from_pdb.py	2026-08-27 11:05:08.000000000 +0900
+@@ -271,6 +271,23 @@
+     Returns:
+         list: Filtered list of diverse Chem.Mol objects.
+     """
++    # [patched] A sample that failed to build an RDKit mol arrives here as None,
++    # and GetMorganFingerprintAsBitVect raises Boost.Python.ArgumentError on it,
++    # aborting the whole target. It only shows up at larger
++    # --sample_n_molecules_per_target (10 was fine, 100 was not). Dropping them
++    # is what the surrounding code already assumes -- they can be neither
++    # fingerprinted nor written -- but it also removes them from the output, so
++    # the count is printed and belongs in the caption.
++    n_none = sum(1 for m in ligands if m is None)
++    if n_none:
++        print(f"[patched] dropped {n_none} unbuildable ligand(s) before filtering")
++        if pdbs is not None and len(pdbs) == len(ligands):
++            keep = [(m, q) for m, q in zip(ligands, pdbs) if m is not None]
++            ligands = [m for m, _ in keep]
++            pdbs = [q for _, q in keep]
++        else:
++            ligands = [m for m in ligands if m is not None]
++
+     # Compute Morgan fingerprints (with radius 2)
+     fps = get_fingerprints(ligands, radius=2, length=4096, chiral=True, sanitize=False)
+     n = len(fps)
