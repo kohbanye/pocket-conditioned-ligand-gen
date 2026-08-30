@@ -276,4 +276,4 @@ class TorsionRefinerModule(L.LightningModule):
         not ``lr``, and writing it out again here is how the first submitted run
         died at optimiser setup.
         """
-        return build_refiner_optimizers(self)
+        return build_refiner_optimizers(self, self.config)

@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+from torch import nn
 
 from prolit.tokenizers.lm_vocab import NUM_SPECIAL
 
@@ -49,7 +50,7 @@ MIN_ANCHOR_ATOMS = 3
 
 
 @torch.no_grad()
-def _logits(model: object, ids: np.ndarray, device: torch.device) -> torch.Tensor:
+def _logits(model: nn.Module, ids: np.ndarray, device: torch.device) -> torch.Tensor:
     t = torch.from_numpy(ids[None]).to(device=device, dtype=torch.long)
     out = model(input_ids=t, attention_mask=torch.ones_like(t))
     return out.logits[0] if hasattr(out, "logits") else out[0]
@@ -57,7 +58,7 @@ def _logits(model: object, ids: np.ndarray, device: torch.device) -> torch.Tenso
 
 @torch.no_grad()
 def refine_codes(  # noqa: PLR0913
-    model: object,
+    model: nn.Module,
     mask_token_id: int,
     protein_codes: Sequence[int],
     ligand_codes: Sequence[int],
@@ -140,7 +141,7 @@ def refine_codes(  # noqa: PLR0913
 
 
 def cold_decode(  # noqa: PLR0913
-    model: object,
+    model: nn.Module,
     mask_token_id: int,
     protein_codes: Sequence[int],
     n_ligand: int,
@@ -283,7 +284,7 @@ def _align_on(
     return (mc @ rot.T) + target[keep].mean(0)
 
 
-def load_mlm(ckpt: str, device: torch.device) -> tuple[object, int]:
+def load_mlm(ckpt: str, device: torch.device) -> tuple[nn.Module, int]:
     """Load a complex MLM and its ``<mask>`` id."""
     from prolit.model.mlm_module import ProLITMLMModule  # noqa: PLC0415
 

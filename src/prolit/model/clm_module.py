@@ -106,6 +106,15 @@ def _geometry_targets(
 class ProLITCLMModule(L.LightningModule):
     """Trains a dense Qwen3 LM on packed VQ-VAE token blocks (loss on all tokens)."""
 
+    # Declared here, not only assigned in __init__: LightningModule inherits
+    # nn.Module's __getattr__, which widens every attribute to `Tensor | Module`
+    # and loses the concrete type. The buffers below are registered
+    # conditionally, so without these the type checker sees a Module where the
+    # code indexes a table or compares a float.
+    geo_idx: Tensor
+    geo_w: Tensor
+    code_xyz: Tensor
+
     def __init__(self, config: CLMTrainingConfig) -> None:
         super().__init__()
         self.config: CLMTrainingConfig = config
@@ -139,7 +148,7 @@ class ProLITCLMModule(L.LightningModule):
             self.register_buffer("code_xyz", t, persistent=False)
 
         # Geometry-smoothed cross-entropy.
-        self.geo_tau = float(getattr(config, "code_geometry_tau", 0.0))
+        self.geo_tau: float = float(getattr(config, "code_geometry_tau", 0.0))
         if self.geo_tau > 0.0:
             table = getattr(config, "code_mean_coords", "")
             if not table:
@@ -210,6 +219,9 @@ class ProLITCLMModule(L.LightningModule):
 
     def _centroid_loss(self, ids: Tensor, hidden: Tensor) -> Tensor | None:
         """Predict each document's ligand centroid from its ``<l>`` state."""
+        head = self.centroid_head
+        if head is None:
+            return None
         preds, targets = [], []
         opens = (ids == L_OPEN_ID).nonzero(as_tuple=False).tolist()
         closes = (ids == L_CLOSE_ID).nonzero(as_tuple=False)
@@ -236,7 +248,7 @@ class ProLITCLMModule(L.LightningModule):
             )
         if not preds:
             return None
-        p = self.centroid_head(torch.stack(preds))
+        p = head(torch.stack(preds))
         t = torch.stack(targets).to(p.dtype)
         return nn.functional.smooth_l1_loss(p, t)
 

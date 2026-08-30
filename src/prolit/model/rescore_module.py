@@ -98,9 +98,7 @@ class ComplexRescoreModule(L.LightningModule):
             self.print(f"Rescorer parameters: {count_parameters(self) / 1e6:.1f}M")
             self._logged: bool = True
 
-    def _listwise_loss(
-        self, pred: Tensor, rmsd: Tensor, groups: Tensor, topk: int = 0
-    ) -> Tensor:
+    def _listwise_loss(self, pred: Tensor, rmsd: Tensor, groups: Tensor) -> Tensor:
         """ListNet cross-entropy within each complex: match the softmax over the
         predicted scores to a softmax over ``-rmsd``.
 
@@ -110,6 +108,16 @@ class ComplexRescoreModule(L.LightningModule):
         6 A vs 8 A pairs nobody cares about). A soft label temperature of a few
         tenths of an angstrom puts the whole loss on the near-native end while
         the model stays a per-pose scorer at inference.
+
+        A top-k variant of this term was tried and dropped (PR #14). Restricting
+        the softmax to the k poses the head ranks highest measured 90.5 -> 89.5
+        on CASF: it won 10 of the 24 targets whose answer sat at rank 2-5, which
+        is what it was for, but lost 13 that the full-set term had been ordering
+        correctly -- with no gradient left for the far poses, the global ranking
+        decays. Selecting the k by *label* instead was worse still (87.7 when
+        added to the full-set term), the more weight it carried the worse it
+        got, which is the signature of a self-referential target rather than of
+        a gradient budget.
         """
         tau_l = self.config.listwise_label_tau
         total = pred.new_zeros(())
@@ -119,49 +127,6 @@ class ComplexRescoreModule(L.LightningModule):
             p, r = pred[m], rmsd[m]
             if p.numel() < 2:  # noqa: PLR2004
                 continue
-            k = topk
-            if k and p.numel() > k:
-                if self.config.listwise_topk_by_label:
-                    # Pick the k poses that ARE best, not the k the head thinks
-                    # are. Selecting on the head's own output is self-referential:
-                    # early in training it picks the wrong five and then sharpens
-                    # itself on them. Measured on CASF, model-side selection cost
-                    # 90.5 -> 89.5 replacing the full-set term and 87.7 added to
-                    # it -- the more weight the self-selected term carried, the
-                    # worse it got, which is the signature of that feedback and
-                    # not of a gradient budget. The label is only used to choose
-                    # the comparison set during training; inference is unchanged.
-                    sel = torch.topk(r, k, largest=False).indices
-                    p, r = p[sel], r[sel]
-                    # A separate, sharper temperature for this term. The five
-                    # poses it compares span a median 0.30 A, and at the shared
-                    # tau of 0.5 a softmax over that range is nearly flat -- the
-                    # term asks the head to rank them while barely preferring
-                    # one. Narrowing the set instead (k=3) raised the 0-0.5 A
-                    # count 58 -> 62 but cost DP@2A 91.2 -> 89.5, because the
-                    # poses dropped from the set stop being ordered at all.
-                    # Sharpening keeps all five in play and widens the target
-                    # gaps between them.
-                    tl = self.config.listwise_topk_tau or tau_l
-                    target = torch.softmax(-r.float() / tl, dim=0)
-                    logp = torch.log_softmax(
-                        -p.float() / self.config.listwise_pred_tau, dim=0
-                    )
-                    total = total - (target * logp).sum()
-                    n += 1
-                    continue
-                # Restrict the softmax to the poses the head currently ranks
-                # highest. Measured on CASF, the head's top-10 overlaps
-                # RTMScore's by 6 of 10 on the targets it loses -- the same
-                # overlap it has on the targets it wins. It finds the right
-                # candidates and mis-orders the top of them: on 1mq6 its top
-                # five are 2.1, 1.0, 0.5, 0.8, 0.7 A. A softmax over all ~80
-                # poses spends most of its gradient separating the 8 A decoys
-                # nobody confuses, so the contest that actually decides docking
-                # power gets a vanishing share of it. Taking the top k makes
-                # every term a comparison the benchmark could turn on.
-                sel = torch.topk(p.detach(), k, largest=False).indices
-                p, r = p[sel], r[sel]
             target = torch.softmax(-r.float() / tau_l, dim=0)
             logp = torch.log_softmax(-p.float() / self.config.listwise_pred_tau, dim=0)
             total = total - (target * logp).sum()
@@ -178,17 +143,8 @@ class ComplexRescoreModule(L.LightningModule):
         if self.config.listwise_loss_weight > 0 and "group_ids" in batch:
             lw = self._listwise_loss(pred, rmsd, batch["group_ids"])
             loss = loss + self.config.listwise_loss_weight * lw
-        if self.config.listwise_topk_weight > 0 and "group_ids" in batch:
-            # ADDED to the full-set term, never replacing it. Replacing it
-            # measured 90.5 -> 89.5 on CASF: restricting the softmax to the top
-            # 5 did win 10 of the 24 targets whose answer sat at rank 2-5, which
-            # is what it was for, but it lost 13 others that the full-set term
-            # had been ordering correctly -- with no gradient left for the far
-            # poses, the global ranking decays. The two terms do different jobs.
-            lwk = self._listwise_loss(
-                pred, rmsd, batch["group_ids"], topk=self.config.listwise_topk
-            )
-            loss = loss + self.config.listwise_topk_weight * lwk
+            # Logged here, not in the dropped top-k branch it used to sit in,
+            # where it only reached the logs when that term was switched on.
             self.log(f"{stage}/list", lw, prog_bar=True, sync_dist=sync)
         self.log(f"{stage}/loss", loss, prog_bar=True, sync_dist=sync)
         self.log(

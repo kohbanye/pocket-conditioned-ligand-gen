@@ -480,14 +480,18 @@ class PoseRefinerModule(L.LightningModule):
         return x
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
-        return build_refiner_optimizers(self)
+        return build_refiner_optimizers(self, self.config)
 
 
-def build_refiner_optimizers(module: L.LightningModule) -> OptimizerLRSchedulerConfig:
+def build_refiner_optimizers(
+    module: L.LightningModule, cfg: PoseRefineTrainingConfig
+) -> OptimizerLRSchedulerConfig:
     """AdamW + warmup-then-cosine, shared by every refiner module.
 
     It lives outside the class because ``TorsionRefinerModule`` needs the same
-    schedule without inheriting the free-displacement head. The
+    schedule without inheriting the free-displacement head. ``cfg`` is passed
+    rather than read off the module because Lightning's ``__getattr__`` widens
+    every attribute to ``Tensor | Module``, which loses the config's fields. The
     first torsion run died at optimiser setup after its own copy of this read
     ``config.lr`` instead of ``config.learning_rate`` -- a field name the tests
     never touched because they never built an optimiser. One implementation
@@ -498,7 +502,6 @@ def build_refiner_optimizers(module: L.LightningModule) -> OptimizerLRSchedulerC
         if not param.requires_grad:
             continue
         (decay if param.ndim >= 2 else no_decay).append(param)  # noqa: PLR2004
-    cfg = module.config
     opt = torch.optim.AdamW(
         [
             {"params": decay, "weight_decay": cfg.weight_decay},

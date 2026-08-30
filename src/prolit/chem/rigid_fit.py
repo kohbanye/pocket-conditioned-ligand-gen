@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.optimize import minimize
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -161,7 +161,7 @@ class _Overlap:
         ligand_radii: np.ndarray,
         form: str = "overlap",
     ) -> None:
-        self._tree = cKDTree(receptor_coords)
+        self._tree = KDTree(receptor_coords)
         self._coords = receptor_coords
         self._radii = receptor_radii
         self._ligand_radii = ligand_radii
