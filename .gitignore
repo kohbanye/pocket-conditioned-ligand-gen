@@ -231,9 +231,16 @@ wget-log
 /results*/
 benchmarks/*/results*/
 
-# Notes, frozen result records and figure sources. They describe artifacts that
-# are themselves local (weights, caches, dumps), so they live beside them.
-/docs/
+# Result dumps and their derived tables: regenerable from a run, and large
+# (6.0M of json, 4.9M of csv against 908K of prose). The notes and figures that
+# read them ARE tracked -- they were kept out because they described artifacts
+# that lived only on this machine, and the weights are published now, so the
+# reason expired. What a number means belongs in git; the bytes it was computed
+# from belong beside the run that produced them.
+/docs/**/*.json
+/docs/**/*.csv
+/docs/**/*.parquet
+/docs/_build/
 
 # Cluster job scripts: what to run is in pipelines/, how to submit it is
 # site-specific. jobs/submit.py generates them; the generated and previously-run
@@ -260,7 +267,6 @@ notebooks/*.html
 # These exist as *symlinks* in git worktrees, and a trailing-slash rule only
 # matches directories -- so the worktree offered to commit the link itself,
 # which points at one machine's checkout. Match both forms.
-/docs
 /pocket-ligand-vqvae
 /pocket-ligand-lm
 /pocket-ligand-mlm
