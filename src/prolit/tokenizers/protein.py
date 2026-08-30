@@ -190,11 +190,28 @@ def extract_pocket_atoms_from_candidates(
 
     order = np.argsort(min_dists[within])
     selected = within[order][: config.max_residues]
-    sort_keys = [
-        (precomputed.chain_ids[i], precomputed.residue_indices[i]) for i in selected
-    ]
-    final_order = sorted(range(len(selected)), key=lambda k: sort_keys[k])
-    selected = selected[final_order].tolist()
+    if getattr(config, "pocket_order", "sequence") == "distance":
+        # Residues ordered FARTHEST first, so the ones nearest the ligand end up
+        # last -- immediately before the ligand block in the token stream.
+        #
+        # Sequence order (the default below) throws the spatial structure away:
+        # the LM sees ~210 pocket tokens whose position in the stream says
+        # nothing about where they are, and has to recover geometry through
+        # attention alone. RoPE decays with stream distance, so putting the
+        # closest residues adjacent to the ligand makes that decay agree with
+        # spatial proximity instead of fighting it.
+        #
+        # The ordering key is the ligand-to-CA distance already used to SELECT
+        # the pocket, so it introduces no information the pocket definition did
+        # not already carry.
+        selected = within[order][: config.max_residues][::-1].tolist()
+    else:
+        sort_keys = [
+            (precomputed.chain_ids[i], precomputed.residue_indices[i])
+            for i in selected
+        ]
+        final_order = sorted(range(len(selected)), key=lambda k: sort_keys[k])
+        selected = selected[final_order].tolist()
 
     ca_coords = precomputed.ca_coords[selected]
     residue_ids = [

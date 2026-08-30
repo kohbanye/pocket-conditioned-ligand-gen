@@ -39,20 +39,15 @@ _VDW = {
 # Protein–ligand steric clashes
 # --------------------------------------------------------------------------
 def read_protein_heavy(pdb_path: str | Path) -> tuple[list[str], np.ndarray]:
-    """Heavy-atom elements + coords from a receptor PDB (ATOM/HETATM, no H)."""
-    elements, coords = [], []
-    for ln in Path(pdb_path).read_text().splitlines():
-        if not ln.startswith(("ATOM", "HETATM")):
-            continue
-        elem = (ln[76:78].strip() or ln[12:16].strip()[:1]).capitalize()
-        if elem == "H":
-            continue
-        try:
-            coords.append((float(ln[30:38]), float(ln[38:46]), float(ln[46:54])))
-        except ValueError:
-            continue
-        elements.append(elem)
-    return elements, np.asarray(coords, dtype=np.float64).reshape(-1, 3)
+    """Heavy-atom elements + coords from a receptor PDB (ATOM/HETATM, no H).
+
+    Delegates to :func:`prolit.api.read_heavy_atoms` so the clash metric here
+    and the rigid steric relief in ``scripts/`` read the receptor identically;
+    a difference between the two would show up as a fix that does not fix.
+    """
+    from prolit.api import read_heavy_atoms
+
+    return read_heavy_atoms(pdb_path)
 
 
 def clash_count(
@@ -123,14 +118,41 @@ def strain_energy(mol, *, max_iters: int = 200) -> float | None:
 # PoseBusters PB-validity (batched)
 # --------------------------------------------------------------------------
 def _reconstruct_for_pb(gen_mols) -> dict[int, object]:
-    """Largest sanitized fragment per generated mol, rebuilt via Open Babel from
-    coordinates (with Hs) so PoseBusters sees filled valences."""
+    """One sanitized molecule per generated mol, for PoseBusters to bust.
+
+    **The model's own bonds win when it has any.** A model that writes a bond
+    block has committed to a chemistry, and that commitment is what the table
+    should score -- it is already what ``validity``, the SMILES, QED and SA are
+    computed from (``molio.load_generated`` sanitizes it and only falls back).
+    Re-perceiving those coordinates with Open Babel instead scored the two
+    halves of the table on two different molecules, and the perceived half was
+    the worse one: on 808 ProLIT ligands it turned 26% of them into structures
+    RDKit could not even convert to InChI (``inchi_convertible`` 0.965 -> 0.704,
+    PB-validity 0.589 -> 0.510), typically by handing a nitrogen a fourth bond.
+
+    Perception stays as the fallback, unchanged, for the coordinate-only models
+    -- the rule is the same for every model, and a model that emits valid bonds
+    is genuinely better at that than one that leaves them to be guessed. It is
+    also the convention the published numbers use: MiDi, FLOWR and TargetDiff
+    all bust their own predicted bonds.
+
+    Hydrogens are left however each path produced them; PoseBusters' ``mol``
+    checks were measured to return bit-identical results with and without them.
+    """
     from rdkit import Chem
 
     from sbdd_bench.molio import REAL_ELEMENTS
 
-    frames = []
+    mols: dict[int, object] = {}
+    needs_perception = []
     for g in gen_mols:
+        if getattr(g, "mol", None) is not None:
+            mols[g.idx] = g.mol
+        else:
+            needs_perception.append(g)
+
+    frames = []
+    for g in needs_perception:
         syms = [str(e) for e in g.elements]
         if len(syms) < 2 or any(e not in REAL_ELEMENTS for e in syms):
             continue
@@ -139,7 +161,6 @@ def _reconstruct_for_pb(gen_mols) -> dict[int, object]:
             for e, c in zip(syms, np.asarray(g.coords), strict=True)
         )
         frames.append(f"{len(syms)}\n{g.idx}\n{body}\n")
-    mols: dict[int, object] = {}
     if not frames:
         return mols
     with tempfile.TemporaryDirectory() as tmp:
@@ -185,3 +206,102 @@ def pb_validity(gen_mols, *, chunk: int = 1000, max_workers: int = 4) -> dict[in
         for j, i in enumerate(batch_idx):
             out[i] = bool(passed[j]) if j < len(passed) else False
     return out
+
+
+# --- bond-geometry distances against the reference ligands ---------------------
+#
+# FLOWR and the MiDi line of work report Wasserstein-1 distances between the
+# generated molecules' bond-length and bond-angle distributions and the test
+# set's, because a model can put every atom in a plausible place and still get
+# the local geometry systematically wrong -- and PoseBusters only answers
+# pass/fail, not by how much.
+#
+# Conditioned on bond type (element pair + order) and on the central atom for
+# angles, NOT pooled. Pooling would let a shift in composition masquerade as a
+# geometry error: a model that draws more C-C and fewer C=O moves the pooled
+# histogram without any individual bond being wrong. Per-type distances are then
+# averaged weighted by how often the REFERENCE uses each type, so the summary is
+# "how wrong is a typical bond of the kind real ligands contain".
+#
+# The absolute value is only comparable across papers when their conditioning
+# matches; against arms measured here it is comparable by construction.
+
+
+def _bond_key(bond) -> str:
+    a, b = bond.GetBeginAtom().GetSymbol(), bond.GetEndAtom().GetSymbol()
+    return f"{min(a, b)}-{max(a, b)}:{bond.GetBondTypeAsDouble():g}"
+
+
+def bond_geometry(mol) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+    """Bond lengths and bond angles of one molecule, keyed by type."""
+    conf = mol.GetConformer()
+    pos = conf.GetPositions()
+    lengths: dict[str, list[float]] = {}
+    for bond in mol.GetBonds():
+        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        lengths.setdefault(_bond_key(bond), []).append(
+            float(np.linalg.norm(pos[i] - pos[j]))
+        )
+    angles: dict[str, list[float]] = {}
+    for atom in mol.GetAtoms():
+        nb = [n.GetIdx() for n in atom.GetNeighbors()]
+        c = atom.GetIdx()
+        for x in range(len(nb)):
+            for y in range(x + 1, len(nb)):
+                u = pos[nb[x]] - pos[c]
+                v = pos[nb[y]] - pos[c]
+                nu, nv = np.linalg.norm(u), np.linalg.norm(v)
+                if nu < 1e-6 or nv < 1e-6:
+                    continue
+                cos = float(np.clip(np.dot(u, v) / (nu * nv), -1.0, 1.0))
+                angles.setdefault(atom.GetSymbol(), []).append(
+                    float(np.degrees(np.arccos(cos)))
+                )
+    return lengths, angles
+
+
+def _w1(a: list[float], b: list[float]) -> float:
+    """Wasserstein-1 between two samples, by quantile matching."""
+    if not a or not b:
+        return float("nan")
+    n = max(len(a), len(b), 64)
+    q = (np.arange(n) + 0.5) / n
+    return float(np.mean(np.abs(np.quantile(a, q) - np.quantile(b, q))))
+
+
+def bond_w1(gen_mols, ref_mols) -> dict[str, float]:
+    """Reference-frequency-weighted W1 for bond lengths (A) and angles (deg).
+
+    ``nan`` when the reference supplies no bonds at all, which is a missing
+    reference rather than a perfect model, and must not average in as zero.
+    """
+    def collect(mols):
+        L: dict[str, list[float]] = {}
+        A: dict[str, list[float]] = {}
+        for m in mols:
+            if m is None or m.GetNumConformers() == 0:
+                continue
+            ll, aa = bond_geometry(m)
+            for k, v in ll.items():
+                L.setdefault(k, []).extend(v)
+            for k, v in aa.items():
+                A.setdefault(k, []).extend(v)
+        return L, A
+
+    gl, ga = collect(gen_mols)
+    rl, ra = collect(ref_mols)
+
+    def weighted(gen: dict, ref: dict) -> float:
+        total = sum(len(v) for v in ref.values())
+        if not total:
+            return float("nan")
+        acc = 0.0
+        for key, rv in ref.items():
+            gv = gen.get(key)
+            if not gv:
+                continue  # the model never drew this type; absence is a
+                # composition error, which the length/angle metric does not score
+            acc += (len(rv) / total) * _w1(gv, rv)
+        return acc
+
+    return {"bond_length_w1": weighted(gl, rl), "bond_angle_w1": weighted(ga, ra)}

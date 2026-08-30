@@ -47,7 +47,10 @@ def load_own(workdir: Path):
     """Put the own repo on the path and import the pieces this CLI needs."""
     if str(workdir) not in sys.path:
         sys.path.insert(0, str(workdir))
+    from prolit.chem.bond_orders import mol_from_decoded
+    from prolit.chem.pdb_io import infer_bonds
     from prolit.config import PocketExtractionConfig
+    from prolit.model.pose_refiner import refine_ligand_canonical
     from prolit.model.vqvae_module import AtomVQVAEModule
     from prolit.tokenizers.atom import (
         LigandAtomDescriptor,
@@ -66,6 +69,7 @@ def load_own(workdir: Path):
         spherical_to_cartesian_np,
     )
     from prolit.tokenizers.ligand import parse_sdf
+    from prolit.tokenizers.loaders import load_pose_refiner
     from prolit.tokenizers.protein import (
         compute_canonical_frame,
         extract_pocket_atoms_from_candidates,
@@ -73,6 +77,8 @@ def load_own(workdir: Path):
     )
 
     return dict(
+        refine_ligand_canonical=refine_ligand_canonical,
+        load_pose_refiner=load_pose_refiner,
         PocketExtractionConfig=PocketExtractionConfig,
         AtomVQVAEModule=AtomVQVAEModule,
         LigandAtomDescriptor=LigandAtomDescriptor,
@@ -86,6 +92,9 @@ def load_own(workdir: Path):
         cartesian_to_spherical_np=cartesian_to_spherical_np,
         spherical_to_cartesian_np=spherical_to_cartesian_np,
         parse_sdf=parse_sdf,
+        infer_bonds=infer_bonds,
+        mol_from_decoded=mol_from_decoded,
+        Chem=__import__("rdkit.Chem", fromlist=["Chem"]),
         compute_canonical_frame=compute_canonical_frame,
         extract_pocket_atoms_from_candidates=extract_pocket_atoms_from_candidates,
         precompute_pocket_atom_candidates=precompute_pocket_atom_candidates,
@@ -235,9 +244,108 @@ def load_side(own, device, ckpt: str | None, norm: str | None, kind: str):
     }
 
 
+#: Categorical heads whose argmax is the decoder's answer for an atom's
+#: chemistry. Dumped alongside the coordinates because a reconstruction scored
+#: against the REFERENCE bond graph only ever measures geometry: it hands the
+#: model back the molecule it was supposed to recover. The end-to-end question
+#: -- is what came out the same molecule -- needs these.
+_CHEM_HEADS = ("element", "charge", "hybrid", "aromatic", "ring", "numH")
+
+#: The heads that actually determine the molecule. hybrid / aromatic / ring are
+#: consequences RDKit re-derives while sanitising, so they are reported for
+#: diagnosis but never fed into the build.
+_DETERMINING = ("element", "charge", "numH")
+
+#: Descriptor charge slot -> formal charge; the inverse of the encoder's table.
+_CHARGE_VALUES = (-2, -1, 0, 1, 2)
+
+
+def _smiles(own, mol):
+    Chem = own["Chem"]
+    if mol is None:
+        return ""
+    try:
+        return Chem.MolToSmiles(Chem.RemoveHs(mol))
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def end_to_end(own, prep, lig_rec, lig_chem):
+    """Is what the decoder emitted the same MOLECULE, not just the same shape?
+
+    Every other column in this bench rebuilds the ligand on the REFERENCE bond
+    graph with reconstructed coordinates. That isolates geometry, but it also
+    hands the tokenizer back the molecule it was supposed to recover -- a model
+    that decoded every atom as carbon would score the same. Here nothing about
+    the reference is used except as the answer: connectivity comes from distance
+    perception over the decoded elements, and bond orders from valence.
+
+    Computed in this process rather than in the bench because it needs
+    ``prolit``, which lives in the source repo's environment; the bench's own
+    venv holds a forked ``transformers`` for ESM3 and cannot import it.
+    """
+    fields = own["fields_by_name"](own["ATOM_LAYOUT"])
+    ldesc = prep["ldesc"]
+    ref_slots = {
+        name: ldesc[:, fields[name].start].astype(np.int64)
+        for name in _CHEM_HEADS
+        if name in fields
+    }
+    if not all(h in lig_chem and h in ref_slots for h in _DETERMINING):
+        return {}
+
+    out = {}
+    agree = None
+    for name in _CHEM_HEADS:
+        if name not in lig_chem or name not in ref_slots:
+            continue
+        same = lig_chem[name] == ref_slots[name]
+        out[f"chem_{name}"] = np.float64(same.mean())
+        if name in _DETERMINING:
+            agree = same if agree is None else (agree & same)
+    out["chem_determining"] = np.float64(agree.mean())
+
+    charge = lambda slots: [  # noqa: E731
+        _CHARGE_VALUES[int(s)] if 0 <= int(s) < len(_CHARGE_VALUES) else 0
+        for s in slots
+    ]
+    dec_elements = [own["LIGAND_ELEMENT_VOCAB"][int(i)] for i in lig_chem["element"]]
+    ref_elements = [str(e) for e in prep["ligand_elements"]]
+    lig_ref = prep["ligand_ref"]
+
+    true_bonds = sorted({tuple(sorted((int(a), int(b)))) for a, b, _ in prep["ligand_bonds"]})
+    got_bonds = sorted({tuple(sorted(b)) for b in own["infer_bonds"](dec_elements, lig_rec)})
+    out["graph_exact"] = np.float64(got_bonds == true_bonds)
+    out["graph_missing"] = np.float64(len(set(true_bonds) - set(got_bonds)))
+    out["graph_extra"] = np.float64(len(set(got_bonds) - set(true_bonds)))
+
+    build = own["mol_from_decoded"]
+    # The reference molecule as THIS pipeline expresses it. Comparing against a
+    # target the pipeline cannot reach would score the comparison, not the model.
+    target = _smiles(own, build(ref_elements, charge(ref_slots["charge"]),
+                                ref_slots["numH"], lig_ref, true_bonds))
+    out["smiles_ref_buildable"] = np.float64(bool(target))
+    if not target:
+        return out
+    got = build(dec_elements, charge(lig_chem["charge"]), lig_chem["numH"],
+                lig_rec, got_bonds)
+    out["mol_buildable"] = np.float64(got is not None)
+    out["smiles_match"] = np.float64(_smiles(own, got) == target)
+    # Same molecule but handed the true connectivity: separates "the decoder got
+    # the chemistry wrong" from "distance perception got the graph wrong".
+    fixed = build(dec_elements, charge(lig_chem["charge"]), lig_chem["numH"],
+                  lig_rec, true_bonds)
+    out["smiles_match_true_graph"] = np.float64(_smiles(own, fixed) == target)
+    return out
+
+
 def encode_decode(own, side, desc_np, meta, frame=None):
-    """Descriptors -> tokens -> 3D coordinates. ``frame`` overrides the frame the
-    decoded canonical coordinates are mapped back through."""
+    """Descriptors -> tokens -> 3D coordinates plus decoded per-atom chemistry.
+
+    ``frame`` overrides the frame the decoded canonical coordinates are mapped
+    back through. The chemistry dict is empty for decoders that have no such
+    heads (the grid baseline predicts only coordinates and element).
+    """
     import torch
 
     coord_f = own["fields_by_name"](own["ATOM_LAYOUT"])["coord"]
@@ -250,7 +358,12 @@ def encode_decode(own, side, desc_np, meta, frame=None):
     recon = np.zeros((desc_np.shape[0], own["ATOM_DESCRIPTOR_DIM"]), dtype=np.float32)
     recon[:, coord_f.start : coord_f.end] = coord.cpu().numpy()
     coords = own["atom_descriptor_to_coords"](recon, meta, pocket_frame=frame)
-    return coords, indices.cpu().numpy()
+    chem = {
+        name: outs[name].argmax(-1).cpu().numpy().astype(np.int64)
+        for name in _CHEM_HEADS
+        if name in outs
+    }
+    return coords, indices.cpu().numpy(), chem
 
 
 def load_receptor(own, receptor: Path, cache_dir: Path | None):
@@ -374,9 +487,65 @@ def prepare_pair(task):
     }
 
 
-def encode_prepared(own, arm, sides, prep):
+#: The refiner's node features, in the order its corpus recorded them
+#: (``feature_fields`` in the pose-refine meta.json).
+_REFINER_FIELDS = (
+    "source", "element", "charge", "hybrid", "aromatic", "ring", "numH", "aa", "bb_sc",
+)
+
+
+def _node_feats(own, desc, chem=None):
+    """The refiner's 9 int features per atom, from a descriptor row block.
+
+    ``chem`` overrides the six chemistry fields with the DECODED values, which
+    is what a generator would have: the reference descriptor still supplies
+    ``source`` / ``aa`` / ``bb_sc``, because those are not decoder heads for a
+    ligand (``aa`` and ``bb_sc`` are scored on protein rows only) and the
+    placeholders have to match the vocabulary the refiner was trained against.
+    """
+    fields = own["fields_by_name"](own["ATOM_LAYOUT"])
+    cols = []
+    for name in _REFINER_FIELDS:
+        if chem is not None and name in chem:
+            cols.append(np.asarray(chem[name], dtype=np.int64))
+        else:
+            cols.append(desc[:, fields[name].start].astype(np.int64))
+    return np.stack(cols, axis=1)
+
+
+def _refine(own, refiner, prep, lig_rec, lig_chem):
+    """Repair the decoded ligand geometry in the pocket it was decoded into.
+
+    The pocket passed in is the REFERENCE one, not the reconstructed one: it is
+    the conditioning input, known at inference in both reconstruction and
+    generation, and feeding the decoder's own protein error back in would make
+    the ligand's repair depend on how well the protein happened to come back.
+    """
+    # Read off the module rather than threaded through: the refiner was already
+    # placed on a device when it was loaded, and a second copy of that decision
+    # is a second thing that can disagree with it.
+    device = next(refiner.parameters()).device
+    return np.asarray(
+        own["refine_ligand_canonical"](
+            refiner,
+            np.asarray(lig_rec, dtype=np.float32),
+            _node_feats(own, prep["ldesc"], lig_chem),
+            np.asarray(prep["protein_ref"], dtype=np.float32),
+            _node_feats(own, prep["pdesc"]),
+            device=device,
+            bonds=np.asarray(
+                [(int(a), int(b)) for a, b, _ in prep["ligand_bonds"]], dtype=np.int64
+            ).reshape(-1, 2),
+        ),
+        dtype=np.float64,
+    )
+
+
+def encode_prepared(own, arm, sides, prep, refiner=None):
     """GPU half: quantize the prepared descriptors and assemble the NPZ payload."""
-    prot_rec, prot_idx = encode_decode(own, sides["protein"], prep["pdesc"], prep["pmeta"])
+    prot_rec, prot_idx, _ = encode_decode(
+        own, sides["protein"], prep["pdesc"], prep["pmeta"]
+    )
     if arm["ligand_frame"] == "local":
         box_origin = prep["protein_ref"].min(axis=0)
         box_size = float((prep["protein_ref"].max(axis=0) - box_origin).max())
@@ -384,11 +553,16 @@ def encode_prepared(own, arm, sides, prep):
             prep["lmeta"]["centroid"], prep["lmeta"]["rotation"],
             box_origin, box_size, arm["pose_bits"],
         )
-        lig_rec, lig_idx = encode_decode(
+        lig_rec, lig_idx, lig_chem = encode_decode(
             own, sides["ligand"], prep["ldesc"], prep["lmeta"], frame=placed
         )
     else:
-        lig_rec, lig_idx = encode_decode(own, sides["ligand"], prep["ldesc"], prep["lmeta"])
+        lig_rec, lig_idx, lig_chem = encode_decode(
+            own, sides["ligand"], prep["ldesc"], prep["lmeta"]
+        )
+
+    if refiner is not None:
+        lig_rec = _refine(own, refiner, prep, lig_rec, lig_chem)
 
     keep = (
         "protein_ref", "protein_elements", "protein_atom_names",
@@ -397,6 +571,10 @@ def encode_prepared(own, arm, sides, prep):
     )
     return {
         **{k: prep[k] for k in keep},
+        # Scored here, not in the bench: the comparison needs prolit's chemistry
+        # and the bench's venv cannot import it. Scalars, so the NPZ does not
+        # grow a per-atom array per head.
+        **{f"e2e_{k}": v for k, v in end_to_end(own, prep, lig_rec, lig_chem).items()},
         "protein_rec": np.asarray(prot_rec, dtype=np.float64),
         "ligand_rec": np.asarray(lig_rec, dtype=np.float64),
         "n_tokens_protein": np.int64(len(prot_idx)),
@@ -455,6 +633,12 @@ def main() -> None:
         for side in ("protein", "ligand")
     }
 
+    refiner = (
+        own["load_pose_refiner"](arm["refiner_ckpt"], device)
+        if arm.get("refiner_ckpt")
+        else None
+    )
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
     pairs = json.loads(args.pairs.read_text())
     tasks = [
@@ -491,7 +675,7 @@ def main() -> None:
             try:
                 # Quantization runs in the parent: the tokenizer lives on one GPU
                 # and is far too fast to be worth distributing.
-                out = encode_prepared(own, arm, sides, prep)
+                out = encode_prepared(own, arm, sides, prep, refiner)
             except Exception as exc:  # noqa: BLE001 - one bad complex must not stop the run
                 summary.append({"id": tag, "ok": False, "error": repr(exc)})
                 print(f"[own-allatom] skip {tag}: {exc}", file=sys.stderr)

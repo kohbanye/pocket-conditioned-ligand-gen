@@ -44,13 +44,13 @@ import torch
 # script's own directory on sys.path[0], so this resolves from any cwd.
 from tokenize_biolip import (
     _bucket_code,
-    _cd_test_pdbs,
     _load_ccd_smiles,
     _parse_biolip_txt,
     _read_needed,
 )
 from tokenize_decoys import _perturb
 
+from prolit.data.holdout import evaluation_pdbs
 from prolit.model.pose_refiner import (
     FEATURE_FIELDS,
     LIG_CHEM_HEADS,
@@ -77,10 +77,6 @@ from prolit.tokenizers.protein import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# sbdd-bench evaluation targets (kept out of training, like CASF).
-SBDD_PDBS = frozenset({"1iep", "2ity", "3pbl"})
-
 
 # ---------------------------------------------------------------------------
 # Ligand codecs: descriptor + VQ round-trip, one per deployment decoder.
@@ -131,6 +127,46 @@ class _LigandCodec:
         chem = {h: out[h].argmax(dim=-1).cpu().numpy() for h in LIG_CHEM_HEADS}
         return x0, chem
 
+    @torch.no_grad()
+    def roundtrip_clm(
+        self,
+        lig_desc: np.ndarray,
+        pkt_desc: np.ndarray,
+        lm: object,
+        vocab: object,
+    ) -> np.ndarray:
+        """Round-trip through the *language model's* codes, not the ligand's.
+
+        The refiner is trained on the error it will meet, and at generation
+        time that error is not the quantizer's. Encoding a crystal ligand and
+        decoding it back moves atoms by RMSD 0.35 A, 54% of it a rigid shift.
+        The deployed path decodes codes the LM chose, and that error is 1.86 A
+        with 1.52 A of it *internal* -- a different magnitude and a different
+        shape. Teacher-forcing the LM over the true sequence and taking its
+        argmax at every ligand position reproduces the second error while
+        keeping the crystal pose as a target, which sampled molecules cannot
+        offer because they have no ground truth.
+        """
+        z = torch.from_numpy((lig_desc - self.mean) / self.std).float().to(self.device)
+        lcodes = self.vq.encode(z).detach().cpu().tolist()
+        zp = torch.from_numpy((pkt_desc - self.mean) / self.std).float().to(self.device)
+        pcodes = self.vq.encode(zp).detach().cpu().tolist()
+        seq = vocab.build_sequence(pcodes, lcodes)
+        logits = lm(torch.tensor([seq], dtype=torch.long, device=self.device)).logits[0]
+        # <bos><p> ... </p><l> -- the first ligand code sits that far in, and
+        # position j is predicted by the logits one step earlier.
+        start = 2 + len(pcodes) + 2
+        off, nc = vocab.offset, self.codebook_size
+        pred = [
+            int(logits[start + j - 1][off : off + nc].argmax().item())
+            for j in range(len(lcodes))
+        ]
+        out = self.vq.decode_to_outputs(
+            torch.tensor(pred, dtype=torch.long, device=self.device)
+        )
+        coord = out["coord"].cpu().numpy() * self.cstd + self.cmean
+        return spherical_to_cartesian_np(coord).astype(np.float32)
+
 
 class _AtomCodec(_LigandCodec):
     """The deployed all-atom decoder."""
@@ -138,16 +174,22 @@ class _AtomCodec(_LigandCodec):
     def __init__(
         self, ckpt: Path, norm_stats: Path, codebook_size: int, device: torch.device
     ) -> None:
-        from prolit.config import AtomVQVAETrainingConfig  # noqa: PLC0415
         from prolit.model.vqvae_module import AtomVQVAEModule  # noqa: PLC0415
 
-        cfg = AtomVQVAETrainingConfig()
-        cfg.atom.codebook_size = codebook_size
-        module = (
-            AtomVQVAEModule.load_from_checkpoint(ckpt, config=cfg, map_location=device)
-            .eval()
-            .to(device)
-        )
+        # The checkpoint's OWN config, not a fresh one. Lightning pickles the
+        # config instance into hyper_parameters, and the module registers
+        # buffers from it -- constrained balancing adds one _lam_ per chemistry
+        # head -- so a default-constructed config produces a module whose
+        # state_dict is missing exactly those keys and the load fails. Only
+        # codebook_size is overridden, and only when the caller asked.
+        module = AtomVQVAEModule.load_from_checkpoint(ckpt, map_location=device)
+        if codebook_size and module.config.atom.codebook_size != codebook_size:
+            msg = (
+                f"checkpoint was trained with codebook_size "
+                f"{module.config.atom.codebook_size}, not {codebook_size}"
+            )
+            raise SystemExit(msg)
+        module = module.eval().to(device)
         norm = torch.load(norm_stats, weights_only=False)
         module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
         self.vq = module.vqvae
@@ -163,14 +205,41 @@ class _AtomCodec(_LigandCodec):
 # Corruption
 # ---------------------------------------------------------------------------
 def _augment(
-    x0: np.ndarray, scale: float, rng: np.random.Generator, sigma_max: float
+    x0: np.ndarray,
+    scale: float,
+    rng: np.random.Generator,
+    sigma_max: float,
+    rigid_scale: float = 0.25,
 ) -> np.ndarray:
-    """Graded corruption on top of the VQ round-trip (capped rigid + jitter)."""
+    """Graded corruption on top of the VQ round-trip: rigid displacement, and
+    optionally isotropic jitter.
+
+    **Rigid is the corruption that matches deployment.** The LM's error is a
+    coherent molecule put in the wrong place, not a scrambled one: measured
+    against crystal ligands, rigidly displacing them reproduces the LM's clash
+    almost exactly --
+
+        rigid    clash-free   mean clashes
+        0.00 A     0.880         1.20
+        1.34 A     0.240         4.39
+        2.00 A     0.170         8.24
+        LM         0.103-0.117   7.3-8.5
+
+    -- so the LM is off by the equivalent of a ~2 A rigid misplacement. The
+    default ``rigid_scale`` of 0.25 caps the translation near 1.1 A, which is
+    only half of that, and is why the shipped refiner under-corrects.
+
+    ``sigma_max`` adds per-atom Gaussian jitter, which does NOT preserve bond
+    lengths or angles. Set it to 0 when the point is to teach re-placement: a
+    refiner trained on geometry-destroying corruption learns to bend ligands
+    rather than move them (code resampling did exactly that, trading
+    PB-validity 0.858 -> 0.463 for its clash gain).
+    """
     if scale <= 0:
         return x0
-    # small rigid perturbation (0.25 factor caps it at ~22 deg / 1.5 A so the
-    # binding mode is preserved) + isotropic jitter (more VQ-like local error).
-    x = _perturb(x0, rng, scale * 0.25)[0]
+    x = _perturb(x0, rng, scale * rigid_scale)[0]
+    if sigma_max <= 0:
+        return x
     return x + rng.normal(0.0, scale * sigma_max, size=x.shape)
 
 
@@ -252,6 +321,20 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser.add_argument(
         "--casf-pdbs", type=Path, default=Path("data/casf2016_pdbs.txt")
     )
+    parser.add_argument(
+        "--exclude-pdb-prefixes",
+        type=str,
+        default="",
+        help="Drop BioLiP sites whose PDB id starts with any of these "
+        "characters, e.g. '89'. PDB ids are assigned in order, so the leading "
+        "character bounds a deposition vintage: 8xxx begins around 2022 and "
+        "9xxx around 2024. This exists for CASP16, which the reconstruction "
+        "bench evaluates on and whose ligand targets are 2024 -- BioLiP runs "
+        "to 9xim, and the bench indexes those complexes by CASP target with no "
+        "PDB id to match against, so they cannot be excluded by name. Bounding "
+        "the vintage excludes them by construction instead. Costs ~23%% of "
+        "BioLiP at '89'.",
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("data/pose_refine"))
     parser.add_argument("--max-residues", type=int, default=50)
     parser.add_argument("--n-complexes", type=int, default=12000)
@@ -268,11 +351,38 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Max jitter std (A) at corruption scale 1.",
     )
     parser.add_argument(
+        "--rigid-scale",
+        type=float,
+        default=0.25,
+        help="rigid displacement magnitude; translation reaches "
+        "scale*rigid_scale*6 A. Default 0.25 caps near 1.1 A; the LM's error is "
+        "equivalent to ~2 A, so ~0.6 matches deployment (see _augment).",
+    )
+    parser.add_argument(
         "--resample-frac",
         type=float,
         default=0.0,
         help="Max fraction of ligand VQ codes resampled before decode (LM-like "
         "intramolecular corruption). 0 = jitter-only (legacy behaviour).",
+    )
+    parser.add_argument(
+        "--lm-ckpt",
+        type=Path,
+        default=None,
+        help="ProLIT-CLM checkpoint. Given, the corruption becomes the LM's "
+        "own teacher-forced argmax decode instead of the quantizer round-trip "
+        "-- the error the refiner actually meets (RMSD 1.86 A, 1.52 A of it "
+        "internal, vs the quantizer's 0.35 A which is mostly a rigid shift).",
+    )
+    parser.add_argument(
+        "--shard",
+        type=str,
+        default=None,
+        metavar="I/N",
+        help="build only every N-th BioLiP bucket, offset I, into --out-dir. "
+        "Sharding is by bucket rather than by complex so each shard opens a "
+        "disjoint set of tarballs instead of all of them N times. Merge the "
+        "shard directories with merge_pose_refine.py.",
     )
     parser.add_argument("--min-heavy", type=int, default=6)
     parser.add_argument("--max-heavy", type=int, default=50)
@@ -291,14 +401,48 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     codec = _AtomCodec(args.ckpt, args.norm_stats, args.codebook_size, device)
 
+    lm = lm_vocab = None
+    if args.lm_ckpt is not None:
+        import sys  # noqa: PLC0415
+
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+        from generate_ligands_3d import load_atom_lm  # noqa: PLC0415
+
+        from prolit.api import AtomLMVocab  # noqa: PLC0415
+
+        lm = load_atom_lm(args.lm_ckpt, args.codebook_size, device)
+        lm_vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        logger.info("corruption source: ProLIT-CLM teacher-forced argmax")
+
     prot_desc_fn = ProteinAtomDescriptor()
     pocket_cfg = PocketExtractionConfig(max_residues=args.max_residues)
 
     sites = _parse_biolip_txt(args.biolip_dir / "BioLiP.txt.gz")
     ccd_smiles = _load_ccd_smiles(args.biolip_dir / "ligand.tsv.gz")
-    excluded = _cd_test_pdbs(args.cd_manifest) | set(SBDD_PDBS)
-    if args.casf_pdbs.exists():
-        excluded |= {p.lower() for p in args.casf_pdbs.read_text().split() if p.strip()}
+    excluded = evaluation_pdbs(
+        cd_manifest=args.cd_manifest,
+        casf_list=args.casf_pdbs,
+        include_sbdd=True,
+    )
+    prefixes = tuple(args.exclude_pdb_prefixes)
+    if prefixes:
+        before = len(sites)
+        sites = [s for s in sites if not s[0].lower().startswith(prefixes)]
+        logger.info(
+            "Vintage bound: dropped %d of %d BioLiP sites whose PDB id starts "
+            "with one of %r (CASP16 overlap cannot be excluded by name)",
+            before - len(sites),
+            before,
+            args.exclude_pdb_prefixes,
+        )
+    n_excluded_sites = sum(1 for s in sites if s[0] in excluded)
+    logger.info(
+        "Excluding %d PDB ids (CrossDocked test + CASF-2016 + sbdd targets); "
+        "%d of %d BioLiP sites drop out",
+        len(excluded),
+        n_excluded_sites,
+        len(sites),
+    )
     rng = np.random.default_rng(args.seed)
     seen: set = set()
     uniq = []
@@ -325,6 +469,54 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     }
     val_pdbs = {s[0] for s in uniq[: int(len(uniq) * args.val_frac)]}
 
+    def _write_meta(n_ok: int) -> None:
+        """Rewrite meta.json for the corpus *as it stands*.
+
+        The binaries are flushed as the build goes, but without meta.json the
+        loaders cannot say how many records are in them, so a walltime kill
+        used to throw a whole build away. Called periodically, the corpus on
+        disk is loadable at whatever size it has reached.
+        """
+        meta = {
+            "source": "biolip2_clm_bridge" if lm is not None else "biolip2_vq_bridge",
+            "decoder": "atom",
+            "n_corrupt": args.n_corrupt,
+            # Recorded because it is the difference between a corpus the
+            # refiner can learn from and one it cannot: at 0 the corruption
+            # ladder tops out at 0.93 A RMSD while deployment is several times
+            # worse, and nothing in the corpus says which you built.
+            "resample_frac": args.resample_frac,
+            "rigid_scale": args.rigid_scale,
+            "sigma_max": args.sigma_max,
+            "lm_ckpt": str(args.lm_ckpt) if args.lm_ckpt else None,
+            "feature_fields": [name for name, _ in FEATURE_FIELDS],
+            "complexes_used": n_ok,
+            # Recorded so a corpus on disk can be checked for leakage without
+            # re-deriving what the builder happened to exclude that day. A set
+            # of 4272 complexes with no such record is not verifiable after
+            # the fact.
+            "held_out": {
+                "n_pdb_ids": len(excluded),
+                "n_sites_dropped": n_excluded_sites,
+                "sources": [
+                    "crossdocked_fold0_test",
+                    "casf2016_core",
+                    "sbdd_bench",
+                ],
+                "pdb_id_prefixes_dropped": args.exclude_pdb_prefixes,
+            },
+            "splits": {
+                split: {
+                    "num_complexes": w.n_complexes,
+                    "num_records": w.n_records,
+                }
+                for split, w in writers.items()
+            },
+        }
+        for fh in (f for w in writers.values() for f in w._f.values()):  # noqa: SLF001
+            fh.flush()
+        (args.out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
     by_bucket: dict[str, list[tuple]] = {}
     for s in uniq:
         by_bucket.setdefault(_bucket_code(s[0]), []).append(s)
@@ -333,7 +525,12 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     from tqdm import tqdm  # noqa: PLC0415
 
     n_ok = 0
-    for code in tqdm(sorted(by_bucket), desc="buckets"):
+    codes = sorted(by_bucket)
+    if args.shard:
+        i, n = (int(v) for v in args.shard.split("/"))
+        codes = codes[i::n]
+        logger.info("shard %d/%d: %d of %d buckets", i, n, len(codes), len(by_bucket))
+    for code in tqdm(codes, desc="buckets"):
         site_list = by_bucket[code]
         needed_rec = {f"{p}{rc}.pdb" for p, rc, _c, _l, _s in site_list}
         needed_lig = {f"{p}_{cc}_{lc}_{s}.pdb" for p, _rc, cc, lc, s in site_list}
@@ -386,6 +583,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 if desc.shape[0] != len(heavy_idx):
                     continue
                 x0_base, chem = codec.roundtrip(desc)
+                if lm is not None:
+                    x0_base = codec.roundtrip_clm(desc, prot_desc, lm, lm_vocab)
                 n = x0_base.shape[0]
                 if n != len(heavy_idx):
                     continue
@@ -415,34 +614,29 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                     scale = k / args.n_corrupt
                     # codebook-resampled decode (LM-like intramolecular errors)
                     # + a light rigid/jitter on top for placement diversity.
-                    if args.resample_frac > 0:
+                    if lm is not None:
+                        # The LM decode is already the deployment error; the
+                        # graded records only widen its placement support.
+                        x0_k = x0_base
+                    elif args.resample_frac > 0:
                         x0_k = codec.roundtrip(desc, scale * args.resample_frac, rng)[0]
                     else:
                         x0_k = x0_base
-                    x0_k = _augment(x0_k, scale * 0.5, rng, args.sigma_max)
+                    x0_k = _augment(
+                        x0_k, scale * 0.5, rng, args.sigma_max, args.rigid_scale
+                    )
                     w.add_record(cid, x0_k.astype(np.float32), scale)
                 n_ok += 1
+                if n_ok % 500 == 0:
+                    _write_meta(n_ok)
             except Exception:
                 logger.exception("failed %s_%s", pdb, ccd)
                 continue
 
-    meta = {
-        "source": "biolip2_vq_bridge",
-        "decoder": "atom",
-        "n_corrupt": args.n_corrupt,
-        "sigma_max": args.sigma_max,
-        "feature_fields": [name for name, _ in FEATURE_FIELDS],
-        "complexes_used": n_ok,
-        "splits": {},
-    }
+    _write_meta(n_ok)
     for split, w in writers.items():
-        meta["splits"][split] = {
-            "num_complexes": w.n_complexes,
-            "num_records": w.n_records,
-        }
         logger.info("%s: %d complexes, %d records", split, w.n_complexes, w.n_records)
         w.close()
-    (args.out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     logger.info("wrote pose-refine set to %s", args.out_dir)
 
 

@@ -14,7 +14,6 @@ same on a login node, a GPU node, or someone else's checkout. The guiding split:
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 # This bench's own directory (its weights/, data/, outputs/, results/ live here).
@@ -28,6 +27,7 @@ THIRD_PARTY = MONOREPO_ROOT / "third_party"
 # ProLIT itself is no longer a submodule -- it is this repository.
 OWN_MODEL_REPO = MONOREPO_ROOT
 DIFFSBDD_REPO = THIRD_PARTY / "DiffSBDD"
+FLOWR_REPO = THIRD_PARTY / "flowr"
 TARGETDIFF_REPO = THIRD_PARTY / "targetdiff"
 DIFFGUI_REPO = THIRD_PARTY / "DiffGui"
 
@@ -41,10 +41,19 @@ RESULTS_DIR = Path(os.environ.get("SBDD_RESULTS_DIR", REPO_ROOT / "results"))
 # --- system tools (live outside any venv) ------------------------------------
 # AutoDock Vina + Open Babel power docking and ligand prep; ADFRsuite's
 # prepare_receptor builds the receptor pdbqt. None is a Python package, so where
-# they live is a property of the machine: the env var wins, then PATH, then the
-# bare name so the failure surfaces at call time with the command in it.
+# they live is a property of the machine.
+#
+# Resolution is delegated to :mod:`prolit.external_tools` so a job that points
+# at Open Babel once points at it for the whole run. Having a second, private
+# lookup here was a real trap: ``PROLIT_OBABEL`` satisfied the library and the
+# benchmark still went looking for a bare ``obabel``, so two batches of scoring
+# jobs died several minutes in, past the point where the failure was cheap. The
+# ``SBDD_*`` names still win where they are set, so an existing environment
+# keeps working.
 def _tool(env: str, name: str) -> str:
-    return os.environ.get(env) or shutil.which(name) or name
+    from prolit.external_tools import find_tool
+
+    return os.environ.get(env) or find_tool(name) or name
 
 
 VINA = _tool("SBDD_VINA", "vina")
@@ -82,6 +91,16 @@ DIFFSBDD_PYTHON = os.environ.get(
     "SBDD_DIFFSBDD_PYTHON", str(REPO_ROOT / "envs" / "diffsbdd" / "bin" / "python")
 )
 # CrossDocked conditional full-atom checkpoint (the published SBDD model).
+# FLOWR (Cremer et al. 2025). Trained on SPINDR rather than CrossDocked -- the
+# test set and the scorer are what the comparison holds fixed, not the training
+# data, and the paper has to say so.
+FLOWR_PYTHON = os.environ.get(
+    "SBDD_FLOWR_PYTHON", "/gs/bs/tga-ohuelab/sakano/envs/flowr/bin/python"
+)
+FLOWR_CKPT = Path(
+    os.environ.get("SBDD_FLOWR_CKPT", WEIGHTS_DIR / "flowr" / "flowr_noHs.ckpt")
+)
+
 DIFFSBDD_CKPT = Path(
     os.environ.get("SBDD_DIFFSBDD_CKPT", WEIGHTS_DIR / "diffsbdd" / "crossdocked_fullatom_cond.ckpt")
 )

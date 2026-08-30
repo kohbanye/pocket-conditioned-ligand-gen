@@ -56,6 +56,25 @@ class PocketExtractionConfig:
 
     distance_cutoff: float = 8.0
     max_residues: int = 128
+    #: Order of pocket residues in the token stream. "sequence" (default) is
+    #: chain/residue order and reproduces every existing checkpoint. "distance"
+    #: puts the residues nearest the ligand LAST, adjacent to the ligand block,
+    #: so RoPE's decay lines up with spatial proximity. Changing this changes
+    #: the token stream, so it invalidates LMs trained under the other setting.
+    pocket_order: str = "sequence"
+    #: Order the ligand's heavy atoms are emitted in. "file" is whatever the
+    #: SDF stored -- what every existing checkpoint was trained on --
+    #: and "buried_first" walks the bond graph outward from the pocket.
+    #: Changing it changes the token stream and invalidates checkpoints.
+    atom_order: str = "file"
+
+    #: Widen each LIGAND atom's knn SEARCH set to the pocket, so its empty
+    #: neighbour slots are filled by the nearest protein atoms. Descriptor width
+    #: is unchanged (33-D); False reproduces the original descriptor exactly.
+    #: Lives here rather than on the training config so it travels with the
+    #: pocket settings into the tar-streaming workers, which receive only
+    #: ``asdict(pocket_config)``.
+    pocket_context: bool = False
 
 
 def _default_atom_recon_weights() -> dict[str, float]:
@@ -149,6 +168,14 @@ class AtomVQVAEConfig:
     # note). The bond graph is derived in the loss from the reference geometry
     # by covalent radius, so no stored connectivity and no cache change.
     bond_distance_loss: bool = False
+    #: Weight each categorical head's atoms by the inverse frequency of their
+    #: own class. Off by default because every existing checkpoint was trained
+    #: without it, and the constraint targets are calibrated to that scale.
+    balanced_chem_loss: bool = False
+    #: Train the decoder only: the encoder and the codebook keep the weights
+    #: they were loaded with, so the codes -- and every token stream and
+    #: language model built on them -- are unchanged.
+    freeze_encoder: bool = False
 
     # Apply the 1-2 / 1-3 terms to PROTEIN atoms as well as ligand ones. They
     # are ligand-only by default, which is measurably a mistake: lDDT is itself
@@ -356,6 +383,7 @@ class AtomVQVAETrainingConfig:
     atom: AtomVQVAEConfig = field(default_factory=AtomVQVAEConfig)
     pocket: PocketExtractionConfig = field(default_factory=PocketExtractionConfig)
 
+
     # Seed for this run, recorded so a checkpoint remembers what it was trained
     # with. Safe to add: a dataclass field with a default is also a class
     # attribute, so checkpoints pickled before it existed still read
@@ -428,6 +456,37 @@ class CLMTrainingConfig:
     # for pretraining (protein-only / ligand-only), where loss on all tokens
     # teaches the marginals.
     mask_prompt: bool = False
+    #: Multiply the loss on the first ``anchor_loss_atoms`` ligand tokens of
+    #: each document by this. 1.0 = off (every existing checkpoint).
+    anchor_loss_weight: float = 1.0
+    #: Weight of an auxiliary head that regresses the ligand centroid from the
+    #: ``<l>`` hidden state. 0 = off. Needs ``code_mean_coords``.
+    centroid_loss_weight: float = 0.0
+    code_mean_coords: str = ""
+    #: Width (A) of the geometry-smoothed cross-entropy. 0 = plain CE, which
+    #: is what every existing checkpoint was trained with.
+    #:
+    #: Cross-entropy over a codebook treats every wrong code as equally wrong.
+    #: These codes are not symbols -- each one puts an atom somewhere, and the
+    #: table in ``code_mean_coords`` says where. Measured, the LM's
+    #: teacher-forced argmax lands atoms 2.52 A from the crystal against the
+    #: quantizer's own 0.35 A, so nearly all of the deployed pose error is the
+    #: LM picking a *geometrically distant* code rather than a near one -- a
+    #: distinction the loss it was trained with cannot see. At ``tau`` the
+    #: target becomes a Gaussian over the true code's neighbours in that table
+    #: instead of a one-hot, so a near miss costs less than a far one. Needs
+    #: ``code_mean_coords``.
+    code_geometry_tau: float = 0.0
+    #: How many neighbours the smoothed target spreads over.
+    code_geometry_k: int = 32
+    #: What the auxiliary head regresses: "centroid" (the molecule's centre) or
+    #: "anchor" (the first ligand atom, which is what the anchor token needs).
+    centroid_target: str = "centroid"
+    anchor_loss_atoms: int = 3
+    #: Fraction of TRAINING documents whose pocket is blanked to an empty
+    #: ``<p></p>``, giving the model an unconditional branch. Without one,
+    #: classifier-free guidance has nothing valid to extrapolate from.
+    pocket_dropout: float = 0.0
 
     learning_rate: float = 6e-4
     min_lr_ratio: float = 0.1
@@ -519,8 +578,19 @@ class MLMTrainingConfig:
     # token, remainder -> unchanged. Only codebook tokens are ever masked
     # (specials <p>/<l>/<bos>/... are excluded so structure markers stay intact).
     mask_prob: float = 0.15
+    #: Upper end of a per-example uniform mask rate. 0 keeps the fixed
+    #: ``mask_prob`` every existing checkpoint was trained with. Set it to 1.0
+    #: to span the whole schedule an iterative (MaskGIT-style) decoder walks
+    #: through, which starts from a fully masked ligand.
+    mask_prob_max: float = 0.0
     mask_replace_prob: float = 0.8
     mask_random_prob: float = 0.1
+    #: Path to an (n_codes, K) int16 table of each code's nearest neighbours in
+    #: codebook space. When set, the ``mask_random_prob`` share is drawn from
+    #: those neighbours instead of uniformly over the vocabulary, so the
+    #: corruption is a near miss rather than an obvious intruder. Empty = the
+    #: uniform draw every existing checkpoint was trained with.
+    code_neighbours: str = ""
     # When True, only ligand (``<l>..</l>``) tokens are masked -> the model learns
     # P(ligand | pocket) bidirectionally (a condition-only / rescoring-tuned MLM).
     ligand_only_masking: bool = False
@@ -567,13 +637,17 @@ class RescoreTrainingConfig:
     # ranking) and losses beyond ~this add noise.
     rmsd_cap: float = 8.0
 
+    # Pairwise ranking loss (docking power is a ranking task, not regression).
+    # When > 0, batches are grouped by complex (native pose has RMSD 0.0 marks
+    # each group boundary) and a margin loss pushes pred(lower-RMSD) below
+    # pred(higher-RMSD) within each complex, added to the regression loss.
+    ranking_loss_weight: float = 0.0
+    ranking_margin: float = 0.5
+
     # ListNet-style listwise loss over the poses of one complex: softmax(-pred)
-    # is matched to softmax(-rmsd / tau). It spends its gradient on the
-    # near-native end (which pose wins) rather than on every pose pair equally,
-    # and the model stays a per-pose scorer. A pairwise margin loss was the
-    # alternative and was measured: it cuts the total number of band-crossing
-    # inversions 3.8x but leaves the number of targets carrying at least one
-    # unchanged (6 of 95 either way), and that count is what DP@2A reads.
+    # is matched to softmax(-rmsd / tau). Unlike the pairwise margin loss it
+    # spends its gradient on the near-native end (which pose wins) instead of
+    # weighting every pose pair equally, and the model stays a per-pose scorer.
     # Cap the number of TRAIN docs (0 = all). Prefix of the corpus, so it takes
     # whole complexes; used to compare corpora at matched size.
     max_docs: int = 0
@@ -582,21 +656,11 @@ class RescoreTrainingConfig:
     # near-native specialist for the top-1 tie-break.
     max_label: float = 0.0
 
+    # Weight of the per-ligand-atom displacement auxiliary loss (needs a corpus
+    # with .disp/.dlen sidecars from tokenize_decoys).
+    atom_aux_weight: float = 0.0
+
     listwise_loss_weight: float = 0.0
-    #: Restrict the listwise softmax to the k poses the head ranks best
-    #: (0 = all). See :meth:`ComplexRescoreModule._listwise_loss`.
-    listwise_topk: int = 0
-    #: Weight of the EXTRA top-k listwise term, added to the full-set one.
-    listwise_topk_weight: float = 0.0
-    #: Choose the top-k comparison set by RMSD label instead of by the head's
-    #: own ranking. Avoids the self-reinforcement described in
-    #: :meth:`ComplexRescoreModule._listwise_loss`.
-    listwise_topk_by_label: bool = False
-    #: Label temperature for the top-k term only (0 = share ``listwise_label_tau``).
-    listwise_topk_tau: float = 0.0
-    #: Drop the exact-RMSD-0 crystal pose from every complex. See
-    #: :class:`prolit.data.rescore_dataset.RescoreDataset`.
-    drop_native_pose: bool = False
     listwise_label_tau: float = 0.4
     listwise_pred_tau: float = 0.4
     complexes_per_batch: int = 8
@@ -605,10 +669,36 @@ class RescoreTrainingConfig:
     # 0 = take the whole group (pose corpus: ~20 poses/complex).
     max_per_group: int = 0
 
+    # Ligand-token pooling for the head. "mean" averages (a single bad-contact
+    # atom is washed out); "meanmax" concatenates mean + max so the worst atom
+    # -- the strongest wrong-pose signal -- survives to the head.
+    pooling: str = "mean"
+
+    # Freeze the pretrained encoder and train only the pooling + head. Cuts the
+    # trainable capacity from 99M to ~1M so a ranking loss can't memorize the
+    # small affinity corpus; the head re-weights fixed features instead.
+    freeze_encoder: bool = False
+
     # Regress ligand efficiency (label / heavy-atom count) instead of the raw
     # label. For the affinity head this decorrelates the target from molecular
     # size; eval multiplies the prediction back by size to recover pK.
     label_divide_by_size: bool = False
+
+    # Number of interaction channels for the "pairsum" pooling (sum of learned
+    # ligand-pocket pair energies). Each channel adds one feature to the head.
+    pair_heads: int = 16
+
+    # Trainable transformer layers inserted over the token states before pooling
+    # (0 = none). Gives the head capacity to re-model the interface from the
+    # tokens without touching the tokenizer.
+    head_interaction_layers: int = 0
+
+    # Masked-LM auxiliary loss during affinity fine-tuning: keeps the encoder's
+    # structure knowledge intact (regularizer) while a ranking loss adapts it to
+    # affinity, so the ranking objective can't collapse/memorize the small corpus
+    # the way it did head-only. 0 = off.
+    mlm_aux_weight: float = 0.0
+    mlm_aux_mask_prob: float = 0.15
 
     learning_rate: float = 1e-4  # low: the encoder is pretrained
     min_lr_ratio: float = 0.1
@@ -693,6 +783,32 @@ class PoseRefinerConfig:
 
 
 @dataclass
+class BondHeadTrainingConfig:
+    """Config for the bond head (:mod:`prolit.model.bond_head`).
+
+    The head replaces distance-based bond perception on the decoder's output,
+    where perception recovers 31% of the true graph. Its training data is a
+    pose-refine corpus: the LM's own decoded coordinates beside the crystal
+    molecule's true bonds.
+
+    Stored in the checkpoint as a plain dict rather than as a pickled instance,
+    so renaming or moving this class does not orphan the weights the way it
+    would for the Lightning modules.
+    """
+
+    data_dir: str = ""
+    max_epochs: int = 40
+    #: Molecules per optimiser step. A molecule contributes all of its atom
+    #: pairs, so this is not the number of training examples.
+    batch_molecules: int = 64
+    learning_rate: float = 2e-3
+    weight_decay: float = 1e-4
+    embedding_dim: int = 48
+    hidden_dim: int = 256
+    seed: int = DEFAULT_SEED
+
+
+@dataclass
 class PoseRefineTrainingConfig:
     """Config for training the e3nn pose refiner (flow-matching, x1-prediction).
 
@@ -727,6 +843,23 @@ class PoseRefineTrainingConfig:
     # pose it should leave alone -> val rmsd_gain went NEGATIVE), so keep a
     # sizable share of clean-placement examples.
     online_rigid_prob: float = 0.5
+    #: Push the pose toward the pocket's centre of mass by |N(0, this)| A.
+    #: The isotropic ``online_rigid_trans`` cannot express this: generated
+    #: poses are not randomly offset, they are uniformly ~0.36 A too deep
+    #: (median surface gap -0.467 A against reference ligands' -0.104), and
+    #: Vina charges for it through repulsion (7.50 vs FLOWR's 1.64) while every
+    #: attractive term is already better than FLOWR's.
+    online_press_sigma: float = 0.0
+    #: Std (radians) of the random torsion applied to each rotatable bond when
+    #: corrupting a pose. A torsion-output refiner whose training corruption has
+    #: no torsional component learns to emit zero angles -- the head has nothing
+    #: to undo -- which collapses it to a rigid-only refiner, and rigid alone is
+    #: measured to stop at 16.5% clash against FLOWR's 9.7%.
+    online_torsion_sigma: float = 0.0
+    #: Weight on DIRECT supervision of the torsion angles (the corruption angle
+    #: is known, so it need not be inferred through a coordinate loss). 0 keeps
+    #: the coordinate-only objective.
+    torsion_angle_weight: float = 0.0
 
     learning_rate: float = 3e-4
     min_lr_ratio: float = 0.1

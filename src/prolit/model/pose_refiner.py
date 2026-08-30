@@ -320,23 +320,40 @@ class PoseRefinerModule(L.LightningModule):
     def _physical_losses(
         self, x: Tensor, batch: dict[str, Tensor]
     ) -> tuple[Tensor, Tensor, Tensor]:
-        """Clash (intra-ligand + ligand-pocket) and bond-length losses on ``x``."""
-        d_floor = self.config.model.d_floor
-        # intra-ligand clash over ligand-ligand edges (bonded pairs sit at
-        # ~1.2-1.5 A > d_floor, so they never trip the floor -- no bond mask needed)
+        """Clash (intra-ligand + ligand-pocket) and bond-length losses on ``x``.
+
+        ``d_floor`` alone has to sit below a bond length, which makes the term
+        nearly inert: measured on held-out reconstructions, 68.5% still hold a
+        non-bonded pair under 2.0 A and the refiner only lifts the closest
+        non-bonded contact to 2.10 A where a force field reaches 2.29 A.
+
+        ``nonbond_floor`` lifts that ceiling by scoring only the pairs the
+        CRYSTAL (``pos1``) already keeps at least that far apart. A bond, or a
+        1-3 contact inside a ring, is excluded by its own reference distance,
+        so no bond graph is needed and the floor may exceed a bond length. The
+        term then reads "do not invent a contact the crystal does not have".
+        """
+        m = self.config.model
+        d_floor = m.d_floor
+        nonbond = getattr(m, "nonbond_floor", None)
+        ref = batch["pos1"]
+
+        def _hinge(idx: Tensor) -> Tensor:
+            d = (x[idx[0]] - x[idx[1]]).norm(dim=1)
+            if nonbond is None:
+                return F.relu(d_floor - d).pow(2).mean()
+            d_ref = (ref[idx[0]] - ref[idx[1]]).norm(dim=1)
+            keep = d_ref >= nonbond
+            if not bool(keep.any()):
+                return x.new_zeros(())
+            return F.relu(nonbond - d[keep]).pow(2).mean()
+
+        # intra-ligand clash over ligand-ligand edges
         ll = batch["ll_edge"]  # (2, E_ll) undirected pairs (i < j)
-        if ll.shape[1] > 0:
-            d = (x[ll[0]] - x[ll[1]]).norm(dim=1)
-            clash = F.relu(d_floor - d).pow(2).mean()
-        else:
-            clash = x.new_zeros(())
+        clash = _hinge(ll) if ll.shape[1] > 0 else x.new_zeros(())
         # ligand-pocket clash over close ligand-pocket pairs
         lp = batch["lp_edge"]  # (2, E_lp): row0 ligand, row1 pocket
-        if lp.shape[1] > 0:
-            d = (x[lp[0]] - x[lp[1]]).norm(dim=1)
-            pkt = F.relu(d_floor - d).pow(2).mean()
-        else:
-            pkt = x.new_zeros(())
+        pkt = _hinge(lp) if lp.shape[1] > 0 else x.new_zeros(())
         # bonded-distance anchor (topology / anti-collapse)
         bd = batch["bond_edge"]  # (2, B)
         if bd.shape[1] > 0:
@@ -463,37 +480,51 @@ class PoseRefinerModule(L.LightningModule):
         return x
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
-        decay, no_decay = [], []
-        for param in self.parameters():
-            if not param.requires_grad:
-                continue
-            (decay if param.ndim >= 2 else no_decay).append(param)  # noqa: PLR2004
-        opt = torch.optim.AdamW(
-            [
-                {"params": decay, "weight_decay": self.config.weight_decay},
-                {"params": no_decay, "weight_decay": 0.0},
-            ],
-            lr=self.config.learning_rate,
-            betas=(self.config.adam_beta1, self.config.adam_beta2),
-        )
-        total = int(self.trainer.estimated_stepping_batches)
-        warmup = max(1, min(self.config.warmup_steps, total - 1))
-        sched = SequentialLR(
-            opt,
-            schedulers=[
-                LinearLR(opt, start_factor=1e-3, end_factor=1.0, total_iters=warmup),
-                CosineAnnealingLR(
-                    opt,
-                    T_max=max(1, total - warmup),
-                    eta_min=self.config.learning_rate * self.config.min_lr_ratio,
-                ),
-            ],
-            milestones=[warmup],
-        )
-        return {
-            "optimizer": opt,
-            "lr_scheduler": {"scheduler": sched, "interval": "step"},
-        }
+        return build_refiner_optimizers(self, self.config)
+
+
+def build_refiner_optimizers(
+    module: L.LightningModule, cfg: PoseRefineTrainingConfig
+) -> OptimizerLRSchedulerConfig:
+    """AdamW + warmup-then-cosine, shared by every refiner module.
+
+    It lives outside the class because ``TorsionRefinerModule`` needs the same
+    schedule without inheriting the free-displacement head. ``cfg`` is passed
+    rather than read off the module because Lightning's ``__getattr__`` widens
+    every attribute to ``Tensor | Module``, which loses the config's fields. The
+    first torsion run died at optimiser setup after its own copy of this read
+    ``config.lr`` instead of ``config.learning_rate`` -- a field name the tests
+    never touched because they never built an optimiser. One implementation
+    means that divergence cannot happen again.
+    """
+    decay, no_decay = [], []
+    for param in module.parameters():
+        if not param.requires_grad:
+            continue
+        (decay if param.ndim >= 2 else no_decay).append(param)  # noqa: PLR2004
+    opt = torch.optim.AdamW(
+        [
+            {"params": decay, "weight_decay": cfg.weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=cfg.learning_rate,
+        betas=(cfg.adam_beta1, cfg.adam_beta2),
+    )
+    total = int(module.trainer.estimated_stepping_batches)
+    warmup = max(1, min(cfg.warmup_steps, total - 1))
+    sched = SequentialLR(
+        opt,
+        schedulers=[
+            LinearLR(opt, start_factor=1e-3, end_factor=1.0, total_iters=warmup),
+            CosineAnnealingLR(
+                opt,
+                T_max=max(1, total - warmup),
+                eta_min=cfg.learning_rate * cfg.min_lr_ratio,
+            ),
+        ],
+        milestones=[warmup],
+    )
+    return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
 
 
 @torch.no_grad()

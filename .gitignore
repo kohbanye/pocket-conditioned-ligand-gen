@@ -221,6 +221,7 @@ wget-log
 /pocket-ligand-mlm/
 /pocket-ligand-rescore/
 /pocket-ligand-refine/
+/pocket-ligand-bond/
 /runs/
 
 # Results and artifacts. Only code is tracked: anything a run reproduces --
@@ -255,3 +256,24 @@ notebooks/*.html
 # SGE/TSUBAME job stdout/stderr (name.e<jobid> / name.o<jobid>[.<taskid>])
 *.e[0-9]*
 *.o[0-9]*
+
+# These exist as *symlinks* in git worktrees, and a trailing-slash rule only
+# matches directories -- so the worktree offered to commit the link itself,
+# which points at one machine's checkout. Match both forms.
+/docs
+/pocket-ligand-vqvae
+/pocket-ligand-lm
+/pocket-ligand-mlm
+/pocket-ligand-rescore
+/pocket-ligand-refine
+/pocket-ligand-bond
+
+# git worktrees create these as symlinks into the primary checkout. Committing
+# one turns it self-referential when it lands back in the primary tree, and the
+# checkout replaces the real directory with the broken link -- which is how the
+# whole sbdd-bench outputs/data/weights tree was lost on 2026-08-27. Match the
+# link as well as the directory.
+/benchmarks/sbdd-bench/outputs
+/benchmarks/sbdd-bench/data
+/benchmarks/sbdd-bench/weights
+/benchmarks/sbdd-bench/results_*

@@ -82,6 +82,29 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--pocket-context",
+        action="store_true",
+        help="widen each ligand atom's knn SEARCH set to the pocket, filling "
+        "its empty neighbour slots with the nearest protein atoms (33-D "
+        "unchanged). The cache records this choice; do not mix.",
+    )
+    parser.add_argument(
+        "--atom-order",
+        choices=["file", "buried_first"],
+        default="file",
+        help="order the ligand's heavy atoms are emitted in. 'file' is "
+        "whatever the SDF stored; 'buried_first' walks the bond graph outward "
+        "from the pocket, so the sequence is a property of the molecule rather "
+        "than of the file. Changing it invalidates existing checkpoints.",
+    )
+    parser.add_argument(
+        "--pocket-order",
+        choices=("sequence", "distance"),
+        default="sequence",
+        help="order of pocket residues; 'distance' puts those nearest the "
+        "ligand LAST, adjacent to the ligand block.",
+    )
+    parser.add_argument(
         "--ligand-frame",
         type=str,
         default="pocket",
@@ -110,6 +133,9 @@ def main() -> None:
     pocket_config = PocketExtractionConfig(
         distance_cutoff=args.distance_cutoff,
         max_residues=args.max_residues,
+        pocket_order=args.pocket_order,
+        pocket_context=args.pocket_context,
+        atom_order=args.atom_order,
     )
     total, counts = prepare_atom_descriptors_from_tars(
         repo_dir=args.repo_dir,

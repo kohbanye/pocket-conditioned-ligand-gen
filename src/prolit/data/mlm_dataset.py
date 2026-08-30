@@ -50,8 +50,10 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
         base_vocab_size: int,
         mask_token_id: int,
         mask_prob: float = 0.15,
+        mask_prob_max: float = 0.0,
         mask_replace_prob: float = 0.8,
         mask_random_prob: float = 0.1,
+        code_neighbours: Path | None = None,
         ligand_only_masking: bool = False,
         seed: int = DEFAULT_SEED,
     ) -> None:
@@ -66,9 +68,24 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
         self.base_vocab_size = base_vocab_size
         self.mask_token_id = mask_token_id
         self.mask_prob = mask_prob
+        #: Upper end of a per-example uniform draw. 0 (default) keeps the fixed
+        #: rate every existing checkpoint was trained with.
+        self.mask_prob_max = mask_prob_max
         self.mask_replace_prob = mask_replace_prob
         self.mask_random_prob = mask_random_prob
         self.ligand_only_masking = ligand_only_masking
+        # A uniformly random code is an obvious intruder -- it decodes somewhere
+        # unrelated, so spotting it teaches outlier detection rather than
+        # repair. The errors this model has to repair are near misses: measured
+        # on reference ligands, the CLM's own top-1 code lands a median 0.63 A
+        # from the true one and the true code sits at rank 9 of 8192. Drawing
+        # the corruption from each code's nearest neighbours in codebook space
+        # puts the training noise in that same regime.
+        self.code_neighbours = None
+        if code_neighbours is not None:
+            self.code_neighbours = np.asarray(
+                torch.load(code_neighbours, map_location="cpu"), dtype=np.int64
+            )
 
         self.tokens = np.memmap(bin_path, dtype=np.uint16, mode="r")
         self.doc_lengths = np.fromfile(len_path, dtype=np.uint16).astype(np.int64)
@@ -113,7 +130,18 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
 
         maskable = self._maskable_positions(arr)
         if maskable.size > 0:
-            k = max(1, round(self.mask_prob * maskable.size))
+            # A fixed 15% teaches infilling, not generation. Iterative decoding
+            # starts from an all-masked ligand and has to place the first atoms
+            # with nothing but the pocket -- a rate the model never saw. Drawing
+            # the rate per example instead spans the whole schedule the decoder
+            # walks through, which is what MaskGIT-style sampling needs.
+            # Measured before this existed: decoding a 15%-trained MLM from a
+            # fully masked ligand gave RMSD 7.67 A against the causal model's
+            # 1.06, and got 0.000 of the codes right.
+            rate = self.mask_prob
+            if self.mask_prob_max > self.mask_prob:
+                rate = float(rng.uniform(self.mask_prob, self.mask_prob_max))
+            k = max(1, round(rate * maskable.size))
             chosen = rng.choice(maskable, size=k, replace=False)
             labels[chosen] = arr[chosen]
 
@@ -126,9 +154,22 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
             input_ids[chosen[replace]] = self.mask_token_id
             n_rand = int(random_tok.sum())
             if n_rand > 0:
-                input_ids[chosen[random_tok]] = rng.integers(
-                    NUM_SPECIAL, self.base_vocab_size, size=n_rand
-                )
+                pos = chosen[random_tok]
+                if self.code_neighbours is not None:
+                    codes = input_ids[pos].astype(np.int64) - NUM_SPECIAL
+                    ok = (codes >= 0) & (codes < len(self.code_neighbours))
+                    slot = rng.integers(0, self.code_neighbours.shape[1], size=n_rand)
+                    safe = np.clip(codes, 0, len(self.code_neighbours) - 1)
+                    near = np.where(
+                        ok,
+                        self.code_neighbours[safe, slot] + NUM_SPECIAL,
+                        rng.integers(NUM_SPECIAL, self.base_vocab_size, size=n_rand),
+                    )
+                    input_ids[pos] = near
+                else:
+                    input_ids[pos] = rng.integers(
+                        NUM_SPECIAL, self.base_vocab_size, size=n_rand
+                    )
 
         return {
             "input_ids": torch.from_numpy(input_ids),
@@ -180,8 +221,14 @@ class MLMTokenDataModule(L.LightningDataModule):
                     base_vocab_size=model.base_vocab_size,
                     mask_token_id=model.mask_token_id,
                     mask_prob=self.config.mask_prob,
+                    mask_prob_max=getattr(self.config, "mask_prob_max", 0.0),
                     mask_replace_prob=self.config.mask_replace_prob,
                     mask_random_prob=self.config.mask_random_prob,
+                    code_neighbours=(
+                        Path(self.config.code_neighbours)
+                        if self.config.code_neighbours
+                        else None
+                    ),
                     ligand_only_masking=self.config.ligand_only_masking,
                     seed=self._seed,
                 )
