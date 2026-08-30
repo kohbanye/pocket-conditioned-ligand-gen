@@ -131,13 +131,24 @@ def main() -> None:  # noqa: PLR0915
     ap.add_argument("--mlm-ckpt", required=True)
     ap.add_argument("--codebook-size", type=int, default=8192)
     ap.add_argument("--limit", type=int, default=300)
-    ap.add_argument("--rounds", type=int, default=8)
-    ap.add_argument("--warm-frac", type=float, default=0.25)
+    ap.add_argument(
+        "--rounds",
+        default="8",
+        help="comma-separated round counts to sweep, e.g. '4,8,16'",
+    )
+    ap.add_argument(
+        "--warm-frac",
+        default="0.25",
+        help="comma-separated re-mask fractions to sweep, e.g. '0.1,0.25,0.5'. "
+        "How much of the molecule the MLM is allowed to reconsider each round.",
+    )
     ap.add_argument("--out", type=Path, required=True)
     add_seed_argument(ap, default=0)
     a = ap.parse_args()
     seed_from_args(a)
 
+    rounds_grid = [int(v) for v in str(a.rounds).split(",")]
+    frac_grid = [float(v) for v in str(a.warm_frac).split(",")]
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     vq = load_atom_vqvae(a.vqvae_ckpt, a.codebook_size, dev)
     lm = load_atom_lm(a.lm_ckpt, a.codebook_size, dev)
@@ -173,17 +184,25 @@ def main() -> None:  # noqa: PLR0915
             .cpu()
             .numpy()
         )
-        cold = _cold(mlm, doc, lo, hi, mask_id, dev, a.codebook_size, a.rounds)
-        warm = _warm(
-            mlm, doc, lo, hi, causal, mask_id, dev, a.codebook_size,
-            a.rounds, a.warm_frac,
-        )
-
         ref = _decode_xyz(vq, true, cmean, cstd, dev)
         row = {"n_atoms": int(len(true))}
-        for tag, codes in (("causal", causal), ("cold", cold), ("warm", warm)):
-            row[f"{tag}_rmsd"] = _rmsd(_decode_xyz(vq, codes, cmean, cstd, dev), ref)
-            row[f"{tag}_exact"] = float((codes == true).mean())
+        row["causal_rmsd"] = _rmsd(_decode_xyz(vq, causal, cmean, cstd, dev), ref)
+        row["causal_exact"] = float((causal == true).mean())
+        for r in rounds_grid:
+            cold = _cold(mlm, doc, lo, hi, mask_id, dev, a.codebook_size, r)
+            row[f"cold_r{r}_rmsd"] = _rmsd(
+                _decode_xyz(vq, cold, cmean, cstd, dev), ref
+            )
+            row[f"cold_r{r}_exact"] = float((cold == true).mean())
+            for fr in frac_grid:
+                warm = _warm(
+                    mlm, doc, lo, hi, causal, mask_id, dev, a.codebook_size, r, fr
+                )
+                key = f"warm_r{r}_f{fr}"
+                row[f"{key}_rmsd"] = _rmsd(
+                    _decode_xyz(vq, warm, cmean, cstd, dev), ref
+                )
+                row[f"{key}_exact"] = float((warm == true).mean())
         rows.append(row)
         n += 1
         if n >= a.limit:
@@ -191,20 +210,24 @@ def main() -> None:  # noqa: PLR0915
 
     a.out.parent.mkdir(parents=True, exist_ok=True)
     a.out.write_text(json.dumps(rows))
+    base = np.array([x["causal_rmsd"] for x in rows])
     print(f"=== コード選択のやり方と復号ポーズの誤差 (n={n}) ===")
-    print(f"{'方式':28s} {'RMSD 中央':>10s} {'平均':>8s} {'コード一致':>10s}")
-    for tag, label in (
-        ("causal", "自己回帰 (現行)"),
-        ("cold", "反復・全マスクから"),
-        ("warm", "反復・自己回帰を修正"),
-    ):
-        r = np.array([x[f"{tag}_rmsd"] for x in rows])
-        e = np.array([x[f"{tag}_exact"] for x in rows])
-        print(f"{label:28s} {np.median(r):10.3f} {r.mean():8.3f} {e.mean():10.3f}")
-    for tag in ("cold", "warm"):
-        d = np.array([x[f"{tag}_rmsd"] - x["causal_rmsd"] for x in rows])
-        print(f"  {tag:6s} 対 causal: 差の中央 {np.median(d):+.3f}  "
-              f"良い分子 {(d < 0).mean():.1%}")
+    print(f"{'方式':30s} {'RMSD 中央':>10s} {'コード一致':>10s} {'差':>8s} {'良い分子':>9s}")
+    print(
+        f"{'自己回帰 (現行)':30s} {np.median(base):10.3f} "
+        f"{np.mean([x['causal_exact'] for x in rows]):10.3f} {'':>8s} {'':>9s}"
+    )
+    keys = [k[: -len("_rmsd")] for k in rows[0] if k.endswith("_rmsd")]
+    for key in keys:
+        if key == "causal":
+            continue
+        r = np.array([x[f"{key}_rmsd"] for x in rows])
+        e = np.array([x[f"{key}_exact"] for x in rows])
+        d = r - base
+        print(
+            f"{key:30s} {np.median(r):10.3f} {e.mean():10.3f} "
+            f"{np.median(d):+8.3f} {(d < 0).mean():9.1%}"
+        )
 
 
 if __name__ == "__main__":
