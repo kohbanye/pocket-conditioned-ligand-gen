@@ -480,37 +480,48 @@ class PoseRefinerModule(L.LightningModule):
         return x
 
     def configure_optimizers(self) -> OptimizerLRSchedulerConfig:
-        decay, no_decay = [], []
-        for param in self.parameters():
-            if not param.requires_grad:
-                continue
-            (decay if param.ndim >= 2 else no_decay).append(param)  # noqa: PLR2004
-        opt = torch.optim.AdamW(
-            [
-                {"params": decay, "weight_decay": self.config.weight_decay},
-                {"params": no_decay, "weight_decay": 0.0},
-            ],
-            lr=self.config.learning_rate,
-            betas=(self.config.adam_beta1, self.config.adam_beta2),
-        )
-        total = int(self.trainer.estimated_stepping_batches)
-        warmup = max(1, min(self.config.warmup_steps, total - 1))
-        sched = SequentialLR(
-            opt,
-            schedulers=[
-                LinearLR(opt, start_factor=1e-3, end_factor=1.0, total_iters=warmup),
-                CosineAnnealingLR(
-                    opt,
-                    T_max=max(1, total - warmup),
-                    eta_min=self.config.learning_rate * self.config.min_lr_ratio,
-                ),
-            ],
-            milestones=[warmup],
-        )
-        return {
-            "optimizer": opt,
-            "lr_scheduler": {"scheduler": sched, "interval": "step"},
-        }
+        return build_refiner_optimizers(self)
+
+
+def build_refiner_optimizers(module: L.LightningModule) -> OptimizerLRSchedulerConfig:
+    """AdamW + warmup-then-cosine, shared by every refiner module.
+
+    It lives outside the class because ``TorsionRefinerModule`` needs the same
+    schedule without inheriting the free-displacement head. The
+    first torsion run died at optimiser setup after its own copy of this read
+    ``config.lr`` instead of ``config.learning_rate`` -- a field name the tests
+    never touched because they never built an optimiser. One implementation
+    means that divergence cannot happen again.
+    """
+    decay, no_decay = [], []
+    for param in module.parameters():
+        if not param.requires_grad:
+            continue
+        (decay if param.ndim >= 2 else no_decay).append(param)  # noqa: PLR2004
+    cfg = module.config
+    opt = torch.optim.AdamW(
+        [
+            {"params": decay, "weight_decay": cfg.weight_decay},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=cfg.learning_rate,
+        betas=(cfg.adam_beta1, cfg.adam_beta2),
+    )
+    total = int(module.trainer.estimated_stepping_batches)
+    warmup = max(1, min(cfg.warmup_steps, total - 1))
+    sched = SequentialLR(
+        opt,
+        schedulers=[
+            LinearLR(opt, start_factor=1e-3, end_factor=1.0, total_iters=warmup),
+            CosineAnnealingLR(
+                opt,
+                T_max=max(1, total - warmup),
+                eta_min=cfg.learning_rate * cfg.min_lr_ratio,
+            ),
+        ],
+        milestones=[warmup],
+    )
+    return {"optimizer": opt, "lr_scheduler": {"scheduler": sched, "interval": "step"}}
 
 
 @torch.no_grad()

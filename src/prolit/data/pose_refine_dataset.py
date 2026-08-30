@@ -33,6 +33,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
+from prolit.chem.torsions import rotatable_bonds
 from prolit.model.pose_refiner import NUM_FEATURE_FIELDS
 from prolit.seeding import DEFAULT_SEED, rng_for, torch_generator, worker_init_fn
 
@@ -63,6 +64,7 @@ class PoseRefineDataset(Dataset[dict]):
         rigid_rot_deg: float = 0.0,
         rigid_prob: float = 1.0,
         press_sigma: float = 0.0,
+        torsion_sigma: float = 0.0,
         seed: int = DEFAULT_SEED,
     ) -> None:
         self.jitter_sigma = jitter_sigma
@@ -70,6 +72,7 @@ class PoseRefineDataset(Dataset[dict]):
         self.rigid_rot_deg = rigid_rot_deg
         self.rigid_prob = rigid_prob
         self.press_sigma = press_sigma
+        self.torsion_sigma = torsion_sigma
         # Named stream so the jitter is reproducible and does not correlate
         # with anything else seeded from the same run seed.
         self.seed = seed
@@ -113,11 +116,45 @@ class PoseRefineDataset(Dataset[dict]):
     def __len__(self) -> int:
         return int(self.record_cid.shape[0])
 
+    def _twist(self, x0: np.ndarray, bonds: np.ndarray) -> np.ndarray:
+        """Rotate each rotatable bond by a random angle.
+
+        This is the corruption a torsion-output refiner can actually invert.
+        Without it the torsion head sees no torsional error in training and
+        learns to emit zero, leaving a rigid-only model.
+        """
+        pairs, masks = rotatable_bonds(bonds, x0.shape[0])
+        if len(pairs) == 0:
+            self._last_twist = np.zeros(0, dtype=np.float32)
+            return x0
+        out = x0.astype(np.float64).copy()
+        applied = []
+        for (i, j), m in zip(pairs, masks, strict=True):
+            ang = float(self._rng.normal(0.0, self.torsion_sigma))
+            applied.append(ang)
+            axis = out[j] - out[i]
+            n = float(np.linalg.norm(axis))
+            if n < _NEGLIGIBLE_DIRECTION:
+                continue
+            a = axis / n
+            v = out[m] - out[j]
+            out[m] = out[j] + (
+                v * np.cos(ang)
+                + np.cross(a, v) * np.sin(ang)
+                + a * (v @ a)[:, None] * (1 - np.cos(ang))
+            )
+        # The angle that undoes this is exactly -applied. Keeping it lets the
+        # head be supervised DIRECTLY, which separates "the pose does not
+        # determine the angle" from "coordinate MSE hedges to the mean".
+        self._last_twist = -np.asarray(applied, dtype=np.float32)
+        return out.astype(np.float32)
+
     def __getitem__(self, index: int) -> dict:
         c = int(self.record_cid[index])
         nl, npk, nb = int(self.n_lig[c]), int(self.n_pkt[c]), int(self.n_bonds[c])
         lo, po, bo = int(self.lig_off[c]), int(self.pkt_off[c]), int(self.bond_off[c])
         x0o = int(self.x0_off[index])
+        twist = np.zeros(0, dtype=np.float32)
         x0 = np.asarray(self.lig_x0[x0o : x0o + nl], dtype=np.float32)
         if self.jitter_sigma > 0:  # intramolecular distortion for the net to repair
             x0 = x0 + self._rng.normal(0.0, self.jitter_sigma, x0.shape).astype(
@@ -148,6 +185,10 @@ class PoseRefineDataset(Dataset[dict]):
                 x0 = ((x0 - cen) @ rot.T.astype(np.float32)) + cen
             if self.rigid_trans > 0:
                 x0 = x0 + self._rng.normal(0.0, self.rigid_trans, 3).astype(np.float32)
+        if self.torsion_sigma > 0:
+            lig_bonds = np.asarray(self.lig_bonds[bo : bo + nb]).reshape(-1, 2)
+            x0 = self._twist(x0, lig_bonds)
+            twist = self._last_twist
         if self.press_sigma > 0:
             # PRESSED-IN corruption, which the isotropic translation above
             # cannot express because it has no preferred direction.
@@ -178,6 +219,7 @@ class PoseRefineDataset(Dataset[dict]):
             "pkt_x": np.asarray(self.pkt_x[po : po + npk], dtype=np.float32),
             "pkt_feat": np.asarray(self.pkt_feat[po : po + npk], dtype=np.int64),
             "scale": float(self.record_scale[index]),
+            "twist": twist,
         }
 
 
@@ -224,6 +266,45 @@ def _sample_edges(
     return ll, lp, iu, ju  # iu/ju unused downstream but cheap to return
 
 
+def _add_torsions(  # noqa: PLR0913
+    sample: dict,
+    n_lig: int,
+    off: int,
+    pairs: list,
+    masks: list,
+    ptr: list,
+    starts: list,
+    sizes: list,
+    twists: list,
+) -> None:
+    """Append this sample's rotatable bonds, in GLOBAL node indices."""
+    tp, tm = rotatable_bonds(sample["bonds"].reshape(-1, 2), n_lig)
+    if len(tp):
+        pairs.append(tp + off)
+        masks.append(tm)
+        tw = sample.get("twist")
+        twists.append(
+            np.asarray(tw, dtype=np.float32)
+            if tw is not None and len(tw) == len(tp)
+            else np.zeros(len(tp), dtype=np.float32)
+        )
+    ptr.append(ptr[-1] + len(tp))
+    starts.append(off)
+    sizes.append(n_lig)
+
+
+def _pad_masks(masks: list[np.ndarray], width: int) -> np.ndarray:
+    """Stack per-ligand torsion masks into one (K_total, width) array."""
+    if not masks or width <= 0:
+        return np.zeros((0, max(width, 1)), dtype=bool)
+    out = np.zeros((sum(m.shape[0] for m in masks), width), dtype=bool)
+    r = 0
+    for m in masks:
+        out[r : r + m.shape[0], : m.shape[1]] = m
+        r += m.shape[0]
+    return out
+
+
 def make_collate(cutoff: float, max_pkt: int, knn: int) -> Callable:
     """Build a collate_fn that assembles a flat batched graph.
 
@@ -237,6 +318,10 @@ def make_collate(cutoff: float, max_pkt: int, knn: int) -> Callable:
         pos0, pos1, feat, movable, bvec = [], [], [], [], []
         esrc, edst, ebond = [], [], []
         ll_e, lp_e, bond_e, bond_ref, angle_t = [], [], [], [], []
+        # Torsion degrees of freedom for the torsion-output refiner. Built here
+        # from the bond list rather than stored, so no cache rebuild is needed.
+        t_pairs, t_masks, t_ptr, lig_start, lig_size = [], [], [0], [], []
+        t_twist: list = []
         off = 0
         for b, s in enumerate(batch):
             nl, npk = s["x0"].shape[0], s["pkt_x"].shape[0]
@@ -247,6 +332,10 @@ def make_collate(cutoff: float, max_pkt: int, knn: int) -> Callable:
             mv[:nl] = True
             movable.append(mv)
             bvec.append(np.full(nl + npk, b, dtype=np.int64))
+
+            _add_torsions(
+                s, nl, off, t_pairs, t_masks, t_ptr, lig_start, lig_size, t_twist
+            )
 
             lig_g = off  # ligand block starts at off; pocket block at off+nl
             pkt_g = off + nl
@@ -321,6 +410,20 @@ def make_collate(cutoff: float, max_pkt: int, knn: int) -> Callable:
                 if angle_t
                 else np.zeros((3, 0), dtype=np.int64)
             ).long(),
+            "tors_pairs": torch.from_numpy(
+                np.concatenate(t_pairs) if t_pairs else np.zeros((0, 2), dtype=np.int64)
+            ).long(),
+            # Padded to the widest ligand in the batch; each row is sliced back
+            # to its own ligand's width when the transform is applied.
+            "tors_masks": torch.from_numpy(
+                _pad_masks(t_masks, max(lig_size) if lig_size else 0)
+            ),
+            "tors_twist": torch.from_numpy(
+                np.concatenate(t_twist) if t_twist else np.zeros(0, dtype=np.float32)
+            ).float(),
+            "tors_ptr": torch.tensor(t_ptr, dtype=torch.long),
+            "lig_start": torch.tensor(lig_start, dtype=torch.long),
+            "lig_size": torch.tensor(lig_size, dtype=torch.long),
             "num_graphs": len(batch),
         }
 
@@ -356,6 +459,7 @@ class PoseRefineDataModule(L.LightningDataModule):
                 rigid_rot_deg=self.config.online_rigid_rot_deg,
                 rigid_prob=self.config.online_rigid_prob,
                 press_sigma=getattr(self.config, "online_press_sigma", 0.0),
+                torsion_sigma=getattr(self.config, "online_torsion_sigma", 0.0),
                 seed=self._seed,
             )
 

@@ -850,6 +850,16 @@ class PoseRefineTrainingConfig:
     #: Vina charges for it through repulsion (7.50 vs FLOWR's 1.64) while every
     #: attractive term is already better than FLOWR's.
     online_press_sigma: float = 0.0
+    #: Std (radians) of the random torsion applied to each rotatable bond when
+    #: corrupting a pose. A torsion-output refiner whose training corruption has
+    #: no torsional component learns to emit zero angles -- the head has nothing
+    #: to undo -- which collapses it to a rigid-only refiner, and rigid alone is
+    #: measured to stop at 16.5% clash against FLOWR's 9.7%.
+    online_torsion_sigma: float = 0.0
+    #: Weight on DIRECT supervision of the torsion angles (the corruption angle
+    #: is known, so it need not be inferred through a coordinate loss). 0 keeps
+    #: the coordinate-only objective.
+    torsion_angle_weight: float = 0.0
 
     learning_rate: float = 3e-4
     min_lr_ratio: float = 0.1

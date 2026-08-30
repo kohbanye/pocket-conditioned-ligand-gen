@@ -31,6 +31,7 @@ from lightning.pytorch.loggers import WandbLogger
 from prolit.config import PoseRefinerConfig, PoseRefineTrainingConfig
 from prolit.data.pose_refine_dataset import PoseRefineDataModule
 from prolit.model.pose_refiner import PoseRefinerModule
+from prolit.model.torsion_refiner import TorsionRefinerModule
 from prolit.provenance import RecordProvenance
 from prolit.seeding import add_seed_argument, seed_from_args
 
@@ -41,6 +42,18 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", type=str, default=None)
     parser.add_argument("--run-name", type=str, default=None)
+    parser.add_argument(
+        "--torsion",
+        action="store_true",
+        help="predict (translation, rotation, torsions) instead of a free "
+        "per-atom displacement. A rigid motion and a bond rotation cannot "
+        "change a bond length or angle, so the refiner cannot buy receptor "
+        "contact by shrinking the molecule -- which every free-displacement "
+        "refiner here does (bonds out of tolerance 10.0%% without one, 48.1%% "
+        "with refit_press0.6, costing PoseBusters 0.73 -> 0.43). Measured "
+        "ceiling for the space: atoms deeper than 0.5 A go 29.4%% -> 10.0%% "
+        "against FLOWR's 7.3%%.",
+    )
     parser.add_argument("--max-epochs", type=int, default=None)
     parser.add_argument("--micro-batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
@@ -73,6 +86,24 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     parser.add_argument("--online-jitter-sigma", type=float, default=None)
     parser.add_argument("--online-rigid-trans", type=float, default=None)
+    parser.add_argument(
+        "--torsion-angle-weight",
+        type=float,
+        default=None,
+        help="weight on direct supervision of the torsion angles. Under the "
+        "coordinate loss alone the torsion head decays to 1-6%% of the "
+        "corruption in every setting tried; this hands it the known angle to "
+        "separate 'the pose does not determine it' from 'MSE hedges'.",
+    )
+    parser.add_argument(
+        "--online-torsion-sigma",
+        type=float,
+        default=None,
+        help="std (radians) of a random rotation applied to each rotatable bond "
+        "when corrupting the pose. Required with --torsion: without a torsional "
+        "component in the corruption the torsion head has nothing to undo and "
+        "learns to emit zero, collapsing to a rigid-only refiner.",
+    )
     parser.add_argument(
         "--online-press-sigma",
         type=float,
@@ -145,6 +176,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.online_rigid_trans = args.online_rigid_trans
     if args.online_press_sigma is not None:
         config.online_press_sigma = args.online_press_sigma
+    if args.online_torsion_sigma is not None:
+        config.online_torsion_sigma = args.online_torsion_sigma
+    if args.torsion_angle_weight is not None:
+        config.torsion_angle_weight = args.torsion_angle_weight
     if args.online_rigid_rot_deg is not None:
         config.online_rigid_rot_deg = args.online_rigid_rot_deg
     if args.online_rigid_prob is not None:
@@ -182,7 +217,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         )
 
     dm = PoseRefineDataModule(config)
-    module = PoseRefinerModule(config)
+    module = (
+        TorsionRefinerModule(config) if args.torsion else PoseRefinerModule(config)
+    )
     if args.init_from:
         state = torch.load(args.init_from, map_location="cpu", weights_only=False)
         sd = state.get("state_dict", state)
