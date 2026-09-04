@@ -27,16 +27,35 @@ exists to share one book between two sources and there is nothing to share here.
 
 ## Against ESM3 on the protein side
 
-All three flip sign between the mean and the paired test, and the reason is
-visible: on the 47 complexes where ESM3 drops below 0.90 lDDT it averages 0.809
-against ProLIT's 0.990, and on the remaining 256 ESM3 leads 0.978 to 0.952.
-**The protein claim is robustness, not accuracy.**
+**Re-measured 2026-09-04 after fixing how the bench fed multi-chain targets to
+ESM3** (`docs/results/2026-09-04_esm3_chain_handling.md`). The 47 sub-0.90-lDDT
+complexes that used to carry this block were 57 two-chain targets handed to ESM3
+as one butt-joined sequence, with author residue numbering that collided across
+chains; they were our adapter, not ESM3. Numbers below are the corrected ones,
+from `casp16_esm3_chainfix.parquet`.
 
 | metric | rival | ProLIT | rival | mean diff | 95% CI | win rate | mean favours | paired test favours | Holm p |
 |---|---|---|---|---|---|---|---|---|---|
-| TM-score | ESM3 | 0.881 | 0.811 | +0.070 | [+0.044, +0.098] | 31.4% | ProLIT | ESM3 ⚠ | 1.9e-03 |
-| lDDT | ESM3 | 0.964 | 0.952 | +0.012 | [+0.003, +0.021] | 28.8% | ProLIT | ESM3 ⚠ | 6.3e-04 |
-| Kabsch RMSD (A) | ESM3 | 0.417 | 1.159 | -0.743 | [-0.996, -0.510] | 32.7% | ProLIT | ESM3 ⚠ | 1.4e-03 |
+| TM-score | ESM3 | 0.881 | 0.855 | +0.026 | [+0.008, +0.046] | 28.4% | ProLIT | ESM3 ⚠ | 1.4e-04 |
+| lDDT | ESM3 | 0.964 | 0.965 | -0.001 | [-0.007, +0.006] | 27.7% | ESM3 | ESM3 | 2.1e-06 |
+| Kabsch RMSD (A) | ESM3 | 0.417 | 0.611 | -0.194 | [-0.298, -0.101] | 29.7% | ProLIT | ESM3 ⚠ | 1.4e-04 |
+
+Previously reported (superseded): ESM3 TM 0.811, lDDT 0.952, Kabsch 1.159.
+**The lDDT mean win is gone**; TM and Kabsch keep a mean win but lose ~63% and
+~75% of it and stay ⚠ — still carried by a minority.
+
+That minority is now one identifiable failure mode. Splitting on whether the
+pocket straddles a chain interface separates it perfectly:
+
+| pocket | n | ProLIT Kabsch | ESM3 Kabsch | ProLIT wins | ProLIT lDDT | ESM3 lDDT | wins |
+|---|---|---|---|---|---|---|---|
+| within one chain | 260 | 0.457 | **0.344** | 18.1% | 0.955 | **0.983** | 15.8% |
+| across two chains | 43 | **0.277** | 1.983 | **100.0%** | **0.996** | 0.876 | **100.0%** |
+
+`StructureTokenDecoder.decode` forces `chain_id = zeros` ("not supported for
+now", `esm/models/vqvae.py:375`), so ESM3 has no channel for relative chain
+placement. **The protein claim is now: no chain-assembly failure mode, on ~24
+near-duplicate dimer targets — not accuracy, and not general robustness.**
 
 ## The frame axis
 
