@@ -27,6 +27,7 @@ import functools
 import gzip
 import json
 import logging
+import signal
 import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -797,6 +798,112 @@ def _emit_stapled(  # noqa: PLR0913
     return 1 if wrote else 0
 
 
+class _SiteBudget:
+    """Abandon one ligand rather than the shard it is in.
+
+    A single pathological molecule can wedge a whole shard: RDKit's
+    ``GetSubstructMatches`` over a highly symmetric ligand explores a factorial
+    space, and ``maxMatches`` caps the results it keeps, not the search it
+    does. One shard spun a core for eleven hours that way and produced nothing
+    after its first six.
+
+    SIGALRM, not a process pool, because this loop is single-threaded and a
+    pool would restructure the file. The limit of that choice is worth being
+    explicit about: a Python signal handler runs between bytecodes, so a call
+    that stays inside C for hours is **not** interrupted by this. It catches
+    the interruptible majority; the meta checkpoint after every bucket is what
+    covers the rest, by making a wedged shard's finished work readable anyway.
+
+    The raised ``TimeoutError`` is an ``OSError``, so the per-site
+    ``except Exception`` already skips the complex -- this only has to make
+    the clock run.
+    """
+
+    def __init__(self, seconds: int) -> None:
+        self.seconds = seconds
+        self.hit = 0
+        if seconds > 0:
+            signal.signal(signal.SIGALRM, self._raise)
+
+    def arm(self) -> None:
+        if self.seconds > 0:
+            signal.setitimer(signal.ITIMER_REAL, self.seconds)
+
+    def disarm(self) -> None:
+        if self.seconds > 0:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _raise(self, _signum: int, _frame: object) -> None:
+        self.hit += 1
+        msg = f"complex exceeded its {self.seconds}s budget"
+        raise TimeoutError(msg)
+
+
+def _write_meta(  # noqa: PLR0913
+    out_dir: Path,
+    args: argparse.Namespace,
+    vocab: Any,  # noqa: ANN401
+    stapled: Any,  # noqa: ANN401
+    n_ok: int,
+    tally: dict[str, int],
+    writers: dict[str, Any],
+) -> dict:
+    """Describe what is on disk right now, and put it there.
+
+    Called after every bucket, not only at the end. A shard that wedges on one
+    pathological ligand -- or that a walltime kills -- has all of its finished
+    documents written, but without a meta.json ``concat_decoy_shards.py``
+    cannot read them and 11 hours of work is lost. That happened: one shard
+    stopped producing at 04:55, spun a core until its 12-hour cap, and its
+    21,760 documents went in the bin. Rewriting a 700-byte JSON per bucket is
+    the cheapest insurance in this file.
+    """
+    for w in writers.values():
+        w.flush()
+    meta: dict = {
+        "vocab_size": (
+            stapled.vocab.vocab_size if stapled is not None else vocab.vocab_size
+        ),
+        # Separate-tokenizers mode doubles the code space (protein then ligand).
+        "atom_codebook_size": (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        ),
+        "source": "biolip2_rigid_decoys",
+        "n_decoys": args.n_decoys,
+        "n_near_torsion_decoys": args.n_near_torsion_decoys,
+        "complexes_used": n_ok,
+        "splits": {},
+    }
+    if args.separate_protein_ckpt is not None:
+        meta["separate_tokenizers"] = True
+    if stapled is not None:
+        # A reader has to be able to tell this corpus from ProLIT's without
+        # opening it: the vocabularies are different sizes, the ligand block is
+        # not one token per atom, and the placement rides in the first tokens
+        # of that block. A trainer pointed at the wrong one would still run.
+        meta["stapled"] = {
+            "protein_tokenizer": "esm3_structure_v0",
+            "ligand_tokenizer": "confseq",
+            "pose_bits": stapled.vocab.pose_bits,
+            "n_pose_tokens": stapled.vocab.n_pose_tokens,
+            "confseq_vocab": stapled.vocab.confseq.size,
+            "esm3_cache": str(args.stapled_esm3_cache),
+            "confseq_vocab_path": str(args.stapled_vocab),
+            "coverage": dict(tally),
+        }
+    for split, w in writers.items():
+        meta["splits"][split] = {
+            "num_docs": w.num_docs,
+            "num_tokens": w.num_tokens,
+            "max_len": w.max_len,
+        }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+    return meta
+
+
 def _dump_bucket(
     out_dir: Path,
     code: str,
@@ -872,12 +979,21 @@ class _RmsdWriter:
         # output stays inspectable and survives interruption (they otherwise sit
         # in an 8 KiB buffer for thousands of poses).
         if self.num_docs % 256 == 0:
-            self._len.flush()
-            self._rmsd.flush()
-            self._bin.flush()
-            self._disp.flush()
-            self._dlen.flush()
-            self._comp.flush()
+            self.flush()
+
+    def flush(self) -> None:
+        """Put every stream on disk.
+
+        Called on a cadence from :meth:`write` and again whenever the meta is
+        checkpointed, so the counts in meta.json describe bytes that are
+        actually there rather than bytes still in a buffer.
+        """
+        self._len.flush()
+        self._rmsd.flush()
+        self._bin.flush()
+        self._disp.flush()
+        self._dlen.flush()
+        self._comp.flush()
 
     def close(self) -> None:
         self._bin.close()
@@ -936,6 +1052,14 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     )
     parser.add_argument("--max-heavy", type=int, default=50)
     parser.add_argument("--val-frac", type=float, default=0.03)
+    parser.add_argument(
+        "--site-timeout",
+        type=int,
+        default=300,
+        help="seconds one complex may take before it is abandoned (0 = no "
+        "limit). Guards against a single symmetric ligand wedging a shard; see "
+        "_SiteBudget for what it does and does not catch.",
+    )
     parser.add_argument(
         "--stapled-esm3-cache",
         type=Path,
@@ -1178,6 +1302,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     }
     symbol_counts: dict[str, int] = {}
     stapled_tally: dict[str, int] = {}
+    budget = _SiteBudget(args.site_timeout)
     val_pdbs = {s[0] for s in uniq[: int(len(uniq) * args.val_frac)]}
 
     # group by bucket to stream each tar once
@@ -1212,6 +1337,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
             lig = ligands.get(f"{pdb}_{ccd}_{ligchain}_{serial}.pdb")
             if rec is None or lig is None:
                 continue
+            budget.arm()
             try:
                 mol = parse_ligand_pdb_text(
                     lig.decode("utf-8", "replace"), ccd_smiles.get(ccd)
@@ -1346,10 +1472,27 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                         )
                 else:
                     n_ok += 1
+            except TimeoutError:
+                logger.warning(
+                    "site %s_%s exceeded %ds; skipped", pdb, ccd, budget.seconds
+                )
+                continue
             except Exception:
                 logger.exception("failed %s_%s", pdb, ccd)
                 continue
+            finally:
+                budget.disarm()
+        # One bucket done: put a meta.json on disk describing exactly what has
+        # been written. Costs ~700 bytes of JSON per bucket and means a shard
+        # that wedges, or that a walltime kills, still hands its finished
+        # complexes to concat_decoy_shards.py instead of taking them with it.
+        if args.dump_receptors is None and not args.build_stapled_vocab:
+            _write_meta(
+                args.out_dir, args, vocab, stapled, n_ok, stapled_tally, writers
+            )
 
+    if budget.hit:
+        logger.warning("%d complexes abandoned on the time budget", budget.hit)
     if stapled is not None:
         logger.info("stapled coverage: %s", stapled_tally)
     if args.build_stapled_vocab:
@@ -1374,48 +1517,12 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
             w.close()
         return
 
-    meta = {
-        "vocab_size": (
-            stapled.vocab.vocab_size if stapled is not None else vocab.vocab_size
-        ),
-        # Separate-tokenizers mode doubles the code space (protein then ligand).
-        "atom_codebook_size": (
-            2 * args.codebook_size
-            if args.separate_protein_ckpt is not None
-            else args.codebook_size
-        ),
-        "source": "biolip2_rigid_decoys",
-        "n_decoys": args.n_decoys,
-        "n_near_torsion_decoys": args.n_near_torsion_decoys,
-        "complexes_used": n_ok,
-        "splits": {},
-    }
-    if args.separate_protein_ckpt is not None:
-        meta["separate_tokenizers"] = True
-    if stapled is not None:
-        # A reader has to be able to tell this corpus from ProLIT's without
-        # opening it: the vocabularies are different sizes, the ligand block is
-        # not one token per atom, and the placement rides in the first tokens
-        # of that block. A trainer pointed at the wrong one would still run.
-        meta["stapled"] = {
-            "protein_tokenizer": "esm3_structure_v0",
-            "ligand_tokenizer": "confseq",
-            "pose_bits": stapled.vocab.pose_bits,
-            "n_pose_tokens": stapled.vocab.n_pose_tokens,
-            "confseq_vocab": stapled.vocab.confseq.size,
-            "esm3_cache": str(args.stapled_esm3_cache),
-            "confseq_vocab_path": str(args.stapled_vocab),
-            "coverage": dict(stapled_tally),
-        }
+    # Meta first: it flushes the writers, so closing after it adds nothing and
+    # the file on disk describes exactly what was written.
+    _write_meta(args.out_dir, args, vocab, stapled, n_ok, stapled_tally, writers)
     for split, w in writers.items():
         w.close()
-        meta["splits"][split] = {
-            "num_docs": w.num_docs,
-            "num_tokens": w.num_tokens,
-            "max_len": w.max_len,
-        }
         logger.info("%s: %d docs (%d tokens)", split, w.num_docs, w.num_tokens)
-    (args.out_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     logger.info("wrote decoy token set to %s", args.out_dir)
 
 
