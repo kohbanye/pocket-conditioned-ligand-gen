@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import argparse
 import functools
+import gzip
 import json
 import logging
 import zlib
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -728,6 +729,106 @@ def _decoy_drawer(  # noqa: PLR0913
     return perturbed
 
 
+def _load_stapled_vocab(path: Path | None, confseq_vocab_cls: type):  # noqa: ANN202
+    """Read the frozen ConfSeq vocabulary that a stapled corpus was built with."""
+    from prolit.tokenizers.stapled import StapledVocab  # noqa: PLC0415
+
+    if path is None or not path.exists():
+        msg = (
+            "--stapled-esm3-cache needs --stapled-vocab pointing at a vocabulary "
+            "built by --build-stapled-vocab; the ids are baked into every stream "
+            "and rebuilding them per shard would give one corpus two alphabets"
+        )
+        raise SystemExit(msg)
+    return StapledVocab(confseq=confseq_vocab_cls.load(path))
+
+
+def _emit_stapled(  # noqa: PLR0913
+    stapled: Any,  # noqa: ANN401
+    pocket: Any,  # noqa: ANN401
+    mols: list[dict],
+    rmsds: list[float],
+    comps: list[tuple[float, float]],
+    hidx: np.ndarray,
+    writer: Any,  # noqa: ANN401
+    symbol_counts: dict[str, int],
+    tally: dict[str, int],
+    *,
+    build_vocab_only: bool,
+) -> int:
+    """Write one site's poses as stapled streams. Returns 1 if any landed.
+
+    No rotation augmentation, unlike the ProLIT arm. ESM3's codes and ConfSeq's
+    tokens are both invariant, so re-expressing the complex in a rotated frame
+    would move nothing but the placement grid -- N near-identical copies of one
+    document rather than N views of it. That asymmetry is a property of the
+    representations and belongs in the write-up, not hidden by manufacturing
+    duplicates here.
+
+    Per-atom displacement labels are not written either: the stapled ligand
+    block is ConfSeq tokens, which do not correspond one-to-one with heavy
+    atoms, so the per-atom head has nothing to attach to. The RMSD label and the
+    translation/rotation decomposition are unaffected.
+    """
+    wrote = 0
+    for m_, rmsd, cmp_ in zip(mols, rmsds, comps, strict=True):
+        tally["poses"] = tally.get("poses", 0) + 1
+        if build_vocab_only:
+            toks = stapled.confseq_tokens(m_["atoms"], m_["bonds"], hidx)
+            if toks is None:
+                tally["confseq_failed"] = tally.get("confseq_failed", 0) + 1
+                continue
+            for t in toks:
+                symbol_counts[t] = symbol_counts.get(t, 0) + 1
+            wrote += 1
+            continue
+        seq, why = stapled.ligand_seq_with_reason(
+            pocket, m_["atoms"], m_["bonds"], hidx
+        )
+        if seq is None:
+            # Counted by reason, not lumped together. "confseq" is a real limit
+            # of the baseline and belongs in the paper; "oov" is a build error
+            # -- the frozen alphabet was collected from too small a sample --
+            # and means this corpus is silently missing good data.
+            tally[f"failed_{why}"] = tally.get(f"failed_{why}", 0) + 1
+            continue
+        writer.write(seq, rmsd, None, cmp_)
+        wrote += 1
+    return 1 if wrote else 0
+
+
+def _dump_bucket(
+    out_dir: Path,
+    code: str,
+    site_list: list[tuple],
+    receptors: dict[str, bytes],
+) -> int:
+    """Write one bucket's receptor structures as gzipped JSON lines.
+
+    One file per bucket, not per receptor: a BioLiP pass touches tens of
+    thousands of structures and the group filesystem has a limited inode
+    budget. Deduplicated by receptor id, since many sites share a chain.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"receptors_{code}.jsonl.gz"
+    seen: set[str] = set()
+    n = 0
+    with gzip.open(path, "wt") as fh:
+        for pdb, rchain, *_ in site_list:
+            sid = f"{pdb}{rchain}"
+            if sid in seen:
+                continue
+            raw = receptors.get(f"{sid}.pdb")
+            if raw is None:
+                continue
+            seen.add(sid)
+            fh.write(
+                json.dumps({"id": sid, "pdb": raw.decode("utf-8", "replace")}) + "\n"
+            )
+            n += 1
+    return n
+
+
 class _RmsdWriter:
     """Streams tokens (.bin/.len), one float32 RMSD per doc (.rmsd), and the
     per-ligand-atom displacement (.disp float32, ``.dlen`` uint16 counts).
@@ -835,6 +936,48 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     )
     parser.add_argument("--max-heavy", type=int, default=50)
     parser.add_argument("--val-frac", type=float, default=0.03)
+    parser.add_argument(
+        "--stapled-esm3-cache",
+        type=Path,
+        default=None,
+        help="build the STAPLED BASELINE's corpus instead of ProLIT's: pocket "
+        "residues carry ESM3 structure codes read from this cache (pass 2 of "
+        "pipelines/corpora/esm3_structure_tokens.py), the ligand carries "
+        "ConfSeq tokens, and the placement neither of them holds is sent as "
+        "--pose-bits quantized bits. Same sites, same decoys, same labels as "
+        "the ProLIT arm -- only the tokenizer differs.",
+    )
+    parser.add_argument(
+        "--confseq-repo", type=Path, default=Path("third_party/ConfSeq")
+    )
+    parser.add_argument(
+        "--stapled-vocab",
+        type=Path,
+        default=None,
+        help="ConfSeq vocabulary JSON: read when emitting, written by "
+        "--build-stapled-vocab. Frozen because the ids are baked into every "
+        "stream and into the model's embedding table.",
+    )
+    parser.add_argument(
+        "--build-stapled-vocab",
+        action="store_true",
+        help="collect ConfSeq's chemical symbols over this corpus, write "
+        "--stapled-vocab and stop. Run it with --n-decoys 0: the geometric "
+        "half of the alphabet is enumerated rather than observed, so only the "
+        "symbols need a data pass.",
+    )
+    parser.add_argument(
+        "--dump-receptors",
+        type=Path,
+        default=None,
+        help="pass 1 of the stapled baseline: write the receptor PDB text of "
+        "every site this corpus selects to gzipped JSON lines under this "
+        "directory and stop. ESM3 has to encode those receptors in another "
+        "interpreter, and dumping them from HERE rather than re-deriving the "
+        "site list there is what guarantees the two arms are built from the "
+        "same complexes -- a second copy of the selection would drift the "
+        "moment either side's defaults changed.",
+    )
     add_seed_argument(parser, default=0)
     parser.add_argument(
         "--n-near-torsion-decoys",
@@ -893,47 +1036,92 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    cfg = AtomVQVAETrainingConfig()
-    cfg.atom.codebook_size = args.codebook_size
-    if args.separate_protein_ckpt is not None:
-        # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
-        # unified into one code space. Feed RAW descriptors (identity external
-        # norm) via PoseEncoder -- SeparateVQVAE normalizes per modality
-        # internally. Combined single-range AtomLMVocab over 2*codebook_size
-        # codes. PoseEncoder encodes pocket + ligand in separate (single-
-        # modality) encode_batch calls, which SeparateVQVAE requires.
-        from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
-            ATOM_DESCRIPTOR_DIM,
+    # Pass 1 for the stapled baseline needs the receptor structures and
+    # nothing else: ESM3 cannot run in this interpreter (its package pins a
+    # fork of transformers), so the receptors this corpus selects are dumped
+    # here and encoded by the benchmark's interpreter. Loading a VQ-VAE and
+    # claiming a GPU to copy text would be pure waste.
+    stapled = None
+    if args.stapled_esm3_cache is not None or args.build_stapled_vocab:
+        from prolit.data.esm3_tokens import Esm3TokenCache  # noqa: PLC0415
+        from prolit.tokenizers.stapled import ConfSeqVocab  # noqa: PLC0415
+        from prolit.tokenizers.stapled_encoder import (  # noqa: PLC0415
+            StapledEncoder,
+            build_vocab,
         )
-        from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
 
-        module = SeparateVQVAE.from_checkpoints(
-            args.separate_protein_ckpt,
-            args.separate_protein_norm,
-            args.separate_ligand_ckpt,
-            args.separate_ligand_norm,
-            device,
-            codebook_size=args.codebook_size,
+        vocab_obj = (
+            build_vocab({})
+            if args.build_stapled_vocab
+            else _load_stapled_vocab(args.stapled_vocab, ConfSeqVocab)
         )
-        mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
-        std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
-        vocab = AtomLMVocab(codebook_size=2 * args.codebook_size)
-    else:
-        module = load_atom_vqvae(args.ckpt, device)
-        module.eval().to(device)
-        norm = torch.load(args.norm_stats, weights_only=False)
-        module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
-        mean = norm["atom_mean"].numpy()
-        std = norm["atom_std"].numpy()
-        vocab = AtomLMVocab(codebook_size=args.codebook_size)
-    enc = PoseEncoder(
-        module.vqvae,
-        mean,
-        std,
-        vocab,
-        device,
-        PocketExtractionConfig(max_residues=args.max_residues),
-    )
+        # The vocabulary pass reads no pocket: ConfSeq's alphabet is a property
+        # of the ligands, so it can be collected before ESM3 has encoded a
+        # single receptor -- and it has to be, since the corpus cannot be
+        # written until the alphabet is frozen.
+        cache = (
+            Esm3TokenCache(args.stapled_esm3_cache)
+            if args.stapled_esm3_cache is not None
+            else None
+        )
+        stapled = StapledEncoder(
+            cache=cache,
+            confseq_repo=args.confseq_repo,
+            vocab=vocab_obj,
+            pocket_cfg=PocketExtractionConfig(max_residues=args.max_residues),
+        )
+        logger.info(
+            "stapled baseline: %d receptors cached, vocab %d, "
+            "pose %d tokens / %.2f bits",
+            len(stapled.cache) if stapled.cache is not None else 0,
+            vocab_obj.vocab_size,
+            vocab_obj.n_pose_tokens,
+            vocab_obj.pose_bits,
+        )
+
+    enc = vocab = None
+    if not args.dump_receptors and stapled is None:
+        cfg = AtomVQVAETrainingConfig()
+        cfg.atom.codebook_size = args.codebook_size
+        if args.separate_protein_ckpt is not None:
+            # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
+            # unified into one code space. Feed RAW descriptors (identity external
+            # norm) via PoseEncoder -- SeparateVQVAE normalizes per modality
+            # internally. Combined single-range AtomLMVocab over 2*codebook_size
+            # codes. PoseEncoder encodes pocket + ligand in separate (single-
+            # modality) encode_batch calls, which SeparateVQVAE requires.
+            from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
+                ATOM_DESCRIPTOR_DIM,
+            )
+            from prolit.tokenizers.separate_vqvae import SeparateVQVAE  # noqa: PLC0415
+
+            module = SeparateVQVAE.from_checkpoints(
+                args.separate_protein_ckpt,
+                args.separate_protein_norm,
+                args.separate_ligand_ckpt,
+                args.separate_ligand_norm,
+                device,
+                codebook_size=args.codebook_size,
+            )
+            mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+            std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
+            vocab = AtomLMVocab(codebook_size=2 * args.codebook_size)
+        else:
+            module = load_atom_vqvae(args.ckpt, device)
+            module.eval().to(device)
+            norm = torch.load(args.norm_stats, weights_only=False)
+            module.vqvae.set_normalization(norm["atom_mean"], norm["atom_std"])
+            mean = norm["atom_mean"].numpy()
+            std = norm["atom_std"].numpy()
+            vocab = AtomLMVocab(codebook_size=args.codebook_size)
+        enc = PoseEncoder(
+            module.vqvae,
+            mean,
+            std,
+            vocab,
+            device,
+            PocketExtractionConfig(max_residues=args.max_residues),
+        )
 
     # CASF-excluded, deduped (pdb, ccd) native sites, shuffled to a subset.
     sites = _parse_biolip_txt(args.biolip_dir / "BioLiP.txt.gz")
@@ -988,6 +1176,8 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         "train": _RmsdWriter(args.out_dir, "train"),
         "val": _RmsdWriter(args.out_dir, "val"),
     }
+    symbol_counts: dict[str, int] = {}
+    stapled_tally: dict[str, int] = {}
     val_pdbs = {s[0] for s in uniq[: int(len(uniq) * args.val_frac)]}
 
     # group by bucket to stream each tar once
@@ -1014,6 +1204,9 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         tb._w_biolip_dir = args.biolip_dir  # noqa: SLF001
         receptors = _read_needed("receptor", code, needed_rec)
         ligands = _read_needed("ligand", code, needed_lig)
+        if args.dump_receptors is not None:
+            n_ok += _dump_bucket(args.dump_receptors, code, site_list, receptors)
+            continue
         for pdb, rchain, ccd, ligchain, serial in site_list:
             rec = receptors.get(f"{pdb}{rchain}.pdb")
             lig = ligands.get(f"{pdb}_{ccd}_{ligchain}_{serial}.pdb")
@@ -1035,10 +1228,26 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                 )
                 if not (args.min_heavy <= heavy.shape[0] <= args.max_heavy):
                     continue
-                setup = enc.setup_pocket(rec.decode("utf-8", "replace"), heavy)
-                if setup is None:
-                    continue
-                p_codes, frame = setup
+                if stapled is not None and args.build_stapled_vocab:
+                    spocket = None
+                    p_codes = frame = None
+                elif stapled is not None:
+                    spocket = stapled.setup_pocket(
+                        f"{pdb}{rchain}", rec.decode("utf-8", "replace"), heavy
+                    )
+                    if spocket is None:
+                        stapled_tally["pocket_failed"] = (
+                            stapled_tally.get("pocket_failed", 0) + 1
+                        )
+                        continue
+                    stapled_tally["sites"] = stapled_tally.get("sites", 0) + 1
+                    p_codes = frame = None
+                else:
+                    spocket = None
+                    setup = enc.setup_pocket(rec.decode("utf-8", "replace"), heavy)
+                    if setup is None:
+                        continue
+                    p_codes, frame = setup
                 split = "val" if pdb in val_pdbs else "train"
                 # Build native + decoys (rigid + conformational), then encode all
                 # poses in ONE batched VQ call (per-pose batch-1 was the bottleneck).
@@ -1105,6 +1314,13 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                         _record_decoy(
                             spun, mol, base, hidx, sink, perms=perms
                         )
+                if stapled is not None:
+                    n_ok += _emit_stapled(
+                        stapled, spocket, mols, rmsds, comps, hidx,
+                        writers[split], symbol_counts, stapled_tally,
+                        build_vocab_only=args.build_stapled_vocab,
+                    )
+                    continue
                 # Descriptors once; each extra rotation only re-quantizes them.
                 # A rotated frame is a different tokenization of the SAME complex
                 # (the VQ-VAE was pretrained with this augmentation), so it
@@ -1134,8 +1350,34 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
                 logger.exception("failed %s_%s", pdb, ccd)
                 continue
 
+    if stapled is not None:
+        logger.info("stapled coverage: %s", stapled_tally)
+    if args.build_stapled_vocab:
+        from prolit.tokenizers.stapled_encoder import build_vocab  # noqa: PLC0415
+
+        built = build_vocab(symbol_counts)
+        args.stapled_vocab.parent.mkdir(parents=True, exist_ok=True)
+        built.confseq.save(args.stapled_vocab)
+        logger.info(
+            "stapled vocabulary: %d ConfSeq tokens (%d observed) -> %s",
+            built.confseq.size,
+            len(symbol_counts),
+            args.stapled_vocab,
+        )
+        for w in writers.values():
+            w.close()
+        return
+
+    if args.dump_receptors is not None:
+        logger.info("dumped %d receptors -> %s", n_ok, args.dump_receptors)
+        for w in writers.values():
+            w.close()
+        return
+
     meta = {
-        "vocab_size": vocab.vocab_size,
+        "vocab_size": (
+            stapled.vocab.vocab_size if stapled is not None else vocab.vocab_size
+        ),
         # Separate-tokenizers mode doubles the code space (protein then ligand).
         "atom_codebook_size": (
             2 * args.codebook_size
@@ -1150,6 +1392,21 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     }
     if args.separate_protein_ckpt is not None:
         meta["separate_tokenizers"] = True
+    if stapled is not None:
+        # A reader has to be able to tell this corpus from ProLIT's without
+        # opening it: the vocabularies are different sizes, the ligand block is
+        # not one token per atom, and the placement rides in the first tokens
+        # of that block. A trainer pointed at the wrong one would still run.
+        meta["stapled"] = {
+            "protein_tokenizer": "esm3_structure_v0",
+            "ligand_tokenizer": "confseq",
+            "pose_bits": stapled.vocab.pose_bits,
+            "n_pose_tokens": stapled.vocab.n_pose_tokens,
+            "confseq_vocab": stapled.vocab.confseq.size,
+            "esm3_cache": str(args.stapled_esm3_cache),
+            "confseq_vocab_path": str(args.stapled_vocab),
+            "coverage": dict(stapled_tally),
+        }
     for split, w in writers.items():
         w.close()
         meta["splits"][split] = {

@@ -27,6 +27,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from recon_bench import datasets, paths, runner  # noqa: E402
 from recon_bench.adapters.own_allatom import ARMS, OwnAllAtomAdapter  # noqa: E402
+from recon_bench.adapters.stapled import StapledAdapter  # noqa: E402
 
 
 def pocket_keys_from_allatom(adapter: OwnAllAtomAdapter) -> dict[str, set]:
@@ -103,8 +104,48 @@ def main() -> None:
         help="skip arms whose per-arm part file already exists, so a resubmitted "
         "job resumes instead of redoing hours of PoseBusters work",
     )
+    p.add_argument(
+        "--stapled-pose-bits",
+        nargs="*",
+        default=["0", "13", "26", "39", "oracle"],
+        help="placement budgets for the `stapled` baseline (ESM3 pocket tokens + "
+        "ConfSeq ligand tokens). Neither half carries the ligand's rigid "
+        "transform, so the budget is what the concatenation has to be handed "
+        "before an interface metric on it means anything; `oracle` is the "
+        "unattainable ceiling. One arm per value, reported as "
+        "stapled_pose<bits>. Only used when `stapled` is among --models.",
+    )
+    p.add_argument(
+        "--stapled-protein-scope",
+        choices=["pocket", "full"],
+        default="full",
+        help="what ESM3 encodes for the stapled baseline. 'full' (default) is "
+        "the whole chain, ESM3's native task, with the pocket residues read out "
+        "of it; 'pocket' encodes the pocket alone, which is 7 A worse because a "
+        "pocket is discontiguous and ESM3 cannot be told so.",
+    )
+    p.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="refuse to start without a visible GPU. ESM3 and the all-atom VQ "
+        "both fall back to CPU silently, which turns a 15-minute run into a "
+        "multi-hour one that hits its walltime with nothing written -- a whole "
+        "node allocation spent to produce no rows. Pass this in every job "
+        "script; leave it off for a laptop smoke test.",
+    )
     p.add_argument("--out", type=Path, default=paths.RESULTS_DIR / "casp16.parquet")
     args = p.parse_args()
+
+    if args.require_cuda:
+        import torch  # noqa: PLC0415
+
+        if not torch.cuda.is_available():
+            raise SystemExit(
+                "[recon_bench] --require-cuda: no GPU visible to torch. "
+                "On TSUBAME a MIG slice is not always handed through; ask for "
+                "gpu_1 rather than a fractional resource."
+            )
+        print(f"[recon_bench] cuda: {torch.cuda.get_device_name(0)}")
 
     paths.ensure_dirs()
     samples = datasets.build(
@@ -158,6 +199,33 @@ def main() -> None:
         if args.protein_scope == "pocket" and pocket_keys is None:
             pocket_keys = pocket_keys_from_allatom(adapter)
     other_models = [m for m in other_models if m != "own_allatom"]
+
+    # The stapled baseline: one adapter per placement budget, each reporting
+    # under its own model name so the budgets land as separate rows of one
+    # rate curve rather than as one number with a footnote.
+    if "stapled" in other_models:
+        other_models = [m for m in other_models if m != "stapled"]
+        for spec in args.stapled_pose_bits:
+            bits = None if str(spec).lower() == "oracle" else int(spec)
+            adapter = StapledAdapter(
+                pose_bits=bits, protein_scope=args.stapled_protein_scope
+            )
+            part = args.out.with_name(f"{args.out.stem}.arm-{adapter.name}.parquet")
+            if args.skip_done_arms and part.exists():
+                print(f"[recon_bench] {adapter.name}: part file exists, skipping")
+                frames.append(pd.read_parquet(part))
+                continue
+            print(f"[recon_bench] stapled baseline: {adapter.name}")
+            arm_df = runner.run(
+                [adapter.name],
+                [s for s in samples if s.protein_pdb and s.ligand_sdf],
+                prebuilt={adapter.name: adapter},
+                pb_valid=args.pb_valid,
+                pb_limit=args.pb_limit,
+            )
+            arm_df.to_parquet(part)
+            print(f"[recon_bench] {adapter.name}: {len(arm_df)} rows -> {part}")
+            frames.append(arm_df)
 
     if args.protein_scope == "pocket" and pocket_keys is None and other_models:
         print(

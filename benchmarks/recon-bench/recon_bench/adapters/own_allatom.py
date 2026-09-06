@@ -42,6 +42,12 @@ from recon_bench.types import ModalityRecon, ReconResult, Sample
 _CLI = paths.REPO_ROOT / "scripts" / "own_allatom_reconstruct_cli.py"
 _BACKBONE_ATOMS = frozenset({"N", "CA", "C", "O"})
 
+#: What ESM3 and FoldToken actually emit: N, CA, C and no carbonyl oxygen. The
+#: ``complex_backbone`` row uses this narrower set rather than
+#: ``_BACKBONE_ATOMS`` so that the atoms scored on both sides of a
+#: stapled-baseline comparison are literally the same atoms.
+_ESM3_BACKBONE_ATOMS = frozenset({"N", "CA", "C"})
+
 
 @dataclass
 class Arm:
@@ -764,4 +770,31 @@ class OwnAllAtomAdapter(ReconstructionModel):
                 },
             )
         )
+        # The same complex restricted to backbone atoms. ESM3 and FoldToken
+        # reconstruct N/CA/C and nothing else, so a stapled baseline built on
+        # one of them can only be scored on interface pairs that involve a
+        # backbone atom. Putting its lDDT-PLI beside the all-atom row above
+        # would compare two different quantities: most real protein-ligand
+        # contacts are to side chains, which the baseline never sees. This row
+        # exists so that comparison has a legitimate column to live in.
+        nco = [
+            i for i, n in enumerate(atom_names)
+            if n.strip() in _ESM3_BACKBONE_ATOMS
+        ]
+        if nco:
+            modalities.append(
+                ModalityRecon(
+                    modality="complex_backbone",
+                    ref=np.vstack([prot_ref[nco], lig_ref]),
+                    rec=np.vstack([prot_rec[nco], lig_rec]),
+                    atom_kind="heavy",
+                    n_tokens=int(d["n_tokens_protein"]) + int(d["n_tokens_ligand"]),
+                    extra={
+                        **rate,
+                        "n_protein_rows": len(nco),
+                        "protein_elements": [prot_elements[i] for i in nco],
+                        "ligand_elements": lig_elements,
+                    },
+                )
+            )
         return ReconResult(self.name, sample_id, modalities=modalities)

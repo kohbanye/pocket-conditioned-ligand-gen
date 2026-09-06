@@ -194,7 +194,16 @@ def _score_target(  # noqa: PLR0913
             [(a[1], a[2], a[3]) for a in native["atoms"] if a[0] != "H"],
             np.float32,
         )
-        setup = enc.setup_pocket(prot.read_text(), native_heavy)
+        # The stapled baseline reads its pocket codes out of a cache keyed by
+        # the CASF target id, which nothing in the PDB text recovers, so it asks
+        # for the id. Gated on the encoder rather than branched on its type:
+        # the ProLIT call below is byte-for-byte what it always was, and the
+        # published numbers cannot move because this arm exists.
+        setup = (
+            enc.setup_pocket(prot.read_text(), native_heavy, tid)
+            if getattr(enc, "needs_struct_id", False)
+            else enc.setup_pocket(prot.read_text(), native_heavy)
+        )
         if setup is None:
             return []
         p_codes, frame = setup

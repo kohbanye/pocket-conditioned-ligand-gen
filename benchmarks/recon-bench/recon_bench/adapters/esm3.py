@@ -9,8 +9,11 @@ Weights download from HuggingFace ``biohub/esm3-sm-open-v1`` on first use
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 
+from recon_bench import paths
 from recon_bench.adapters.base import ReconstructionModel
 from recon_bench.structio import Backbone, read_backbone
 from recon_bench.types import ModalityRecon, ReconResult, Sample
@@ -21,42 +24,28 @@ def chain_break_layout(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Lay a (possibly multi-chain) backbone out the way ESM3 expects one.
 
-    ESM3 encodes a complex as a *single* sequence carrying one separator residue
-    per chain boundary: NaN coordinates, ``residue_index`` -1, and a CHAINBREAK
-    structure token -- which is what ``esm/models/esm3.py`` fills in wherever the
-    sequence has a ``|`` (see ``ProteinComplex.from_chains``). Residue indices
-    are ESM3's own default from ``ProteinChain.from_atom37``: one run of 1..L
-    over the whole input.
-
-    Handing ESM3 the chains butt-joined instead, indexed by author residue
-    number, breaks it twice over. The decoder folds chain B onto the end of
-    chain A because nothing marks the boundary, and author numbering restarts
-    per chain, so residue 5 of chain A and residue 5 of chain B reach the
-    relative-position embedding at offset 0 -- indistinguishable from a residue
-    and itself. On CASP16's 57 two-chain samples that cost ESM3 4.1 A of
-    pocket-scope Kabsch RMSD (5.11 -> 1.02) and produced every one of its
-    apparent reconstruction outliers.
+    The layout itself lives in :func:`prolit.tokenizers.esm3_layout.chain_break_layout`;
+    this is the ``Backbone``-shaped door onto it. The corpus builder for the
+    stapled baseline needs the same layout to cache ESM3 structure tokens, and a
+    second copy is a second chance to reintroduce the multi-chain bug this
+    function exists to fix. prolit is not a dependency of this environment (ESM3
+    pins a fork of transformers), so the module is imported lazily from the
+    source tree on the path.
 
     Returns ``(coords, residue_index, is_residue, order)``: the encoder inputs,
     a mask marking the rows that are real residues, and the ``bb`` row index of
     each real residue in the order ESM3 sees it.
     """
-    coords: list[np.ndarray] = []
-    is_residue: list[bool] = []
-    order: list[int] = []
-    for i, chain in enumerate(dict.fromkeys(bb.chain_ids.tolist())):
-        if i:  # separator residue between chains, never scored
-            coords.append(np.full((3, 3), np.nan))
-            is_residue.append(False)
-        for row in np.flatnonzero(bb.chain_ids == chain):
-            coords.append(bb.coords[row])
-            is_residue.append(True)
-            order.append(int(row))
+    _ensure_prolit_on_path()
+    from prolit.tokenizers.esm3_layout import chain_break_layout as _layout
 
-    is_residue_arr = np.asarray(is_residue)
-    residue_index = np.arange(1, len(coords) + 1, dtype=np.int64)
-    residue_index[~is_residue_arr] = -1
-    return np.stack(coords), residue_index, is_residue_arr, np.asarray(order)
+    return _layout(bb.coords, bb.chain_ids)
+
+
+def _ensure_prolit_on_path() -> None:
+    src = str(paths.OWN_MODEL_WORKDIR / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
 
 
 class ESM3Adapter(ReconstructionModel):
