@@ -38,7 +38,7 @@ from prolit.data.token_stream import ComplexTokenEncoder
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import LigandAtomDescriptor, rotate_atom_descriptor
 from prolit.tokenizers.geometry import random_rotation_matrix
-from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.lm_vocab import NUM_SPECIAL, AtomLMVocab
 from prolit.tokenizers.loaders import load_atom_vqvae
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ def _heavy_centroid(atoms: list[tuple[str, float, float, float]]) -> np.ndarray:
     return heavy.mean(axis=0)
 
 
-def main() -> None:  # noqa: C901, PLR0915
+def main() -> None:  # noqa: C901, PLR0915, PLR0912
     parser = argparse.ArgumentParser()
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--geom-tar", type=Path, default=None)
@@ -72,6 +72,22 @@ def main() -> None:  # noqa: C901, PLR0915
         type=Path,
         default=None,
         help="Atom VQ-VAE ckpt (joint). Omit when using --separate-*-ckpt.",
+    )
+    parser.add_argument(
+        "--stapled-vocab",
+        type=Path,
+        default=None,
+        help="build the STAPLED BASELINE's ligand-only corpus with this frozen "
+        "ConfSeq vocabulary. No ESM3 and no placement: GEOM is conformers with "
+        "no pocket to sit in.",
+    )
+    parser.add_argument(
+        "--confseq-repo", type=Path, default=Path("third_party/ConfSeq")
+    )
+    parser.add_argument(
+        "--build-stapled-vocab",
+        action="store_true",
+        help="collect ConfSeq's chemical symbols over this corpus and stop.",
     )
     parser.add_argument("--separate-protein-ckpt", type=Path, default=None)
     parser.add_argument("--separate-protein-norm", type=Path, default=None)
@@ -119,9 +135,16 @@ def main() -> None:  # noqa: C901, PLR0915
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # The stapled arm writes ConfSeq tokens, which need no weights: there is no
+    # VQ-VAE to load and no GPU to claim.
+    stapled_mode = args.stapled_vocab is not None or args.build_stapled_vocab
+    module = mean = std = None
+    vocab = None
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
-    if args.separate_protein_ckpt is not None:
+    if stapled_mode:
+        pass
+    elif args.separate_protein_ckpt is not None:
         # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
         # unified into one code space. Feed RAW descriptors (identity external
         # norm) -- SeparateVQVAE normalizes per modality internally. GEOM is
@@ -187,8 +210,34 @@ def main() -> None:  # noqa: C901, PLR0915
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     writers = {s: SplitWriter(args.out_dir, s) for s in args.splits}
-    tok = ComplexTokenEncoder(
-        module.vqvae, vocab, mean, std, writers, args.batch_size, device
+    stapled = None
+    symbol_counts: dict[str, int] = {}
+    if stapled_mode:
+        from prolit.tokenizers.stapled import (  # noqa: PLC0415
+            ConfSeqVocab,
+            StapledVocab,
+        )
+        from prolit.tokenizers.stapled_encoder import (  # noqa: PLC0415
+            StapledEncoder,
+            build_vocab,
+        )
+
+        stapled = StapledEncoder(
+            cache=None,
+            confseq_repo=args.confseq_repo,
+            vocab=(
+                build_vocab({})
+                if args.build_stapled_vocab
+                else StapledVocab(confseq=ConfSeqVocab.load(args.stapled_vocab))
+            ),
+            pocket_cfg=None,
+        )
+    tok = (
+        None
+        if stapled_mode
+        else ComplexTokenEncoder(
+            module.vqvae, vocab, mean, std, writers, args.batch_size, device
+        )
     )
     descriptor = LigandAtomDescriptor()
     rng = np.random.default_rng(args.seed)
@@ -212,6 +261,28 @@ def main() -> None:  # noqa: C901, PLR0915
         if n_heavy < 1 or n_heavy > args.heavy_atom_max:
             n_skipped += 1
             continue
+        if stapled is not None:
+            # No rotation augmentation. ConfSeq is SE(3)-invariant, so eight
+            # rotations of one conformer are eight identical documents -- the
+            # augmentation ProLIT gets here is available to it precisely
+            # because its codes depend on the frame. Reported, not manufactured.
+            heavy_idx = np.array([k for k, a in enumerate(atoms) if a[0] != "H"])
+            if args.build_stapled_vocab:
+                toks = stapled.confseq_tokens(atoms, mol["bonds"], heavy_idx)
+                if toks is None:
+                    n_skipped += 1
+                    continue
+                for tkn in toks:
+                    symbol_counts[tkn] = symbol_counts.get(tkn, 0) + 1
+                n_confs += 1
+                continue
+            seq = stapled.ligand_only_seq(atoms, mol["bonds"], heavy_idx)
+            if seq is None:
+                n_skipped += 1
+                continue
+            writers[split].write([seq])
+            n_confs += 1
+            continue
         centroid = _heavy_centroid(atoms)
         base_desc, _elements, _meta = descriptor.compute(
             atoms, mol["bonds"], pocket_frame=(centroid, _IDENTITY)
@@ -223,10 +294,30 @@ def main() -> None:  # noqa: C901, PLR0915
         for _ in range(args.num_rotations):
             rot = random_rotation_matrix(rng)
             tok.add_ligand(split, rotate_atom_descriptor(base_desc, rot))
-    tok.flush_all()
+    if tok is not None:
+        tok.flush_all()
+    if args.build_stapled_vocab:
+        from prolit.tokenizers.stapled_encoder import build_vocab  # noqa: PLC0415
+
+        built = build_vocab(symbol_counts)
+        args.stapled_vocab.parent.mkdir(parents=True, exist_ok=True)
+        built.confseq.save(args.stapled_vocab)
+        logger.info(
+            "stapled vocabulary: %d ConfSeq tokens (%d observed) from %d "
+            "conformers -> %s",
+            built.confseq.size,
+            len(symbol_counts),
+            n_confs,
+            args.stapled_vocab,
+        )
+        for w in writers.values():
+            w.close()
+        return
 
     meta: dict = {
-        "vocab_size": vocab.vocab_size,
+        "vocab_size": (
+            stapled.vocab.vocab_size if stapled is not None else vocab.vocab_size
+        ),
         "all_atom": True,
         "pretrain": {
             "source": "geom",
@@ -242,12 +333,27 @@ def main() -> None:  # noqa: C901, PLR0915
         },
         "splits": {},
     }
-    meta["atom_codebook_size"] = (
-        2 * args.codebook_size
-        if args.separate_protein_ckpt is not None
-        else args.codebook_size
-    )
-    meta["atom_offset"] = vocab.offset
+    if stapled is not None:
+        # ``mix.py`` refuses inputs whose vocab_size disagrees, which is what
+        # keeps a stapled corpus from being concatenated with a ProLIT one --
+        # they are different alphabets and a trainer given both would read
+        # ConfSeq ids as codebook entries and still converge to something.
+        meta["stapled"] = {
+            "protein_tokenizer": None,
+            "ligand_tokenizer": "confseq",
+            "ligand_only": True,
+            "pose_tokens": 0,
+            "confseq_vocab_path": str(args.stapled_vocab),
+        }
+        meta["atom_codebook_size"] = stapled.vocab.vocab_size - NUM_SPECIAL
+        meta["atom_offset"] = NUM_SPECIAL
+    else:
+        meta["atom_codebook_size"] = (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        )
+        meta["atom_offset"] = vocab.offset
     if args.separate_protein_ckpt is not None:
         meta["separate_tokenizers"] = True
     for split, writer in writers.items():

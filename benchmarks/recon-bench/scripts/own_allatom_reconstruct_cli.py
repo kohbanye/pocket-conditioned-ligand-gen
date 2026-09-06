@@ -41,6 +41,7 @@ from pathlib import Path
 
 import numpy as np
 from prolit.seeding import add_seed_argument, seed_from_args
+from prolit.tokenizers.pose_budget import quantize_pose
 
 
 def load_own(workdir: Path):
@@ -101,62 +102,10 @@ def load_own(workdir: Path):
     )
 
 
-# --------------------------------------------------------------------------
-# Pose quantization (ligand-own-frame arms)
-# --------------------------------------------------------------------------
-
-
-def _rotation_grid(n_rot: int, seed: int = 0) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    q = rng.normal(size=(n_rot, 4))
-    return q / np.linalg.norm(q, axis=1, keepdims=True)
-
-
-def _quat_to_matrix(q: np.ndarray) -> np.ndarray:
-    w, x, y, z = q
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
-        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
-        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
-    ])
-
-
-def _matrix_to_quat(rot: np.ndarray) -> np.ndarray:
-    trace = np.trace(rot)
-    if trace > 0:
-        s = 0.5 / np.sqrt(trace + 1.0)
-        q = np.array([
-            0.25 / s,
-            (rot[2, 1] - rot[1, 2]) * s,
-            (rot[0, 2] - rot[2, 0]) * s,
-            (rot[1, 0] - rot[0, 1]) * s,
-        ])
-    else:
-        i = int(np.argmax(np.diag(rot)))
-        j, k = (i + 1) % 3, (i + 2) % 3
-        s = 2.0 * np.sqrt(1.0 + rot[i, i] - rot[j, j] - rot[k, k])
-        q = np.zeros(4)
-        q[0] = (rot[k, j] - rot[j, k]) / s
-        q[i + 1] = 0.25 * s
-        q[j + 1] = (rot[j, i] + rot[i, j]) / s
-        q[k + 1] = (rot[k, i] + rot[i, k]) / s
-    return q / np.linalg.norm(q)
-
-
-def quantize_pose(centroid, rotation, box_origin, box_size, pose_bits, seed=0):
-    """Quantize a rigid transform to ``pose_bits`` bits (half translation, half
-    rotation). ``pose_bits=None`` returns it unchanged: oracle placement."""
-    if pose_bits is None:
-        return centroid, rotation
-    trans_bits = pose_bits // 2
-    rot_bits = pose_bits - trans_bits
-    steps = max(int(round(2 ** (trans_bits / 3.0))), 1)
-    cell = box_size / steps
-    idx = np.clip(np.floor((centroid - box_origin) / cell), 0, steps - 1)
-    centroid_q = box_origin + (idx + 0.5) * cell
-    grid = _rotation_grid(2**rot_bits, seed)
-    best = int(np.argmax(np.abs(grid @ _matrix_to_quat(rotation))))
-    return centroid_q, _quat_to_matrix(grid[best])
+# Pose quantization for the ligand-own-frame arms lives in
+# ``prolit.tokenizers.pose_budget``: the LM corpus builder prices the same
+# transform in the same bits, and two copies of a quantizer is how one
+# comparison ends up measured on two different rate curves.
 
 
 # --------------------------------------------------------------------------

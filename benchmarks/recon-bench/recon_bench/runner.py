@@ -46,7 +46,7 @@ def _rate_columns(mod, n_atoms: int) -> dict:
         "protein_allatom": mod.extra.get("bits_protein"),
         "ligand": mod.extra.get("bits_ligand"),
     }.get(mod.modality)
-    if mod.modality == "complex":
+    if mod.modality.startswith("complex"):
         # Weight the two books by how many atoms each actually encodes.
         n_prot = mod.extra.get("n_protein_rows")
         bp, bl = mod.extra.get("bits_protein"), mod.extra.get("bits_ligand")
@@ -60,6 +60,14 @@ def _rate_columns(mod, n_atoms: int) -> dict:
         # whose reconstruction scope is wider than its evaluation scope.
         n_emitted = mod.n_tokens if mod.n_tokens else n_atoms
         out["total_bits"] = float(bits) * n_emitted + float(mod.extra.get("pose_bits") or 0.0)
+    # An arm whose tokens are not per-atom cannot be billed as rate x tokens:
+    # ESM3 spends one token per RESIDUE and ConfSeq one per SMILES symbol or
+    # rotatable bond, so the two halves have different token-to-atom ratios and
+    # the product above would be neither. Such an arm states its own total and
+    # it wins -- the per-atom column stays for reading alongside, but the bits
+    # a row is charged are the bits it actually spent.
+    if mod.extra.get("total_bits") is not None:
+        out["total_bits"] = float(mod.extra["total_bits"])
     return out
 
 
@@ -94,7 +102,7 @@ def _metric_row(result, mod, ref, rec, eval_scope, is_protein, *, want_pb=False)
                 mod.extra.get("bond_orders") or [1] * len(mod.extra["bonds"]),
                 ref,
             )["pb_valid"]
-    if mod.modality == "complex" and "n_protein_rows" in mod.extra:
+    if mod.modality.startswith("complex") and "n_protein_rows" in mod.extra:
         m.update(
             metrics.complex_metrics(
                 ref,

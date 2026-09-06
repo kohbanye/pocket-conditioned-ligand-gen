@@ -49,7 +49,7 @@ from prolit.tokenizers.atom import (
 )
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
-from prolit.tokenizers.lm_vocab import AtomLMVocab
+from prolit.tokenizers.lm_vocab import NUM_SPECIAL, AtomLMVocab
 from prolit.tokenizers.loaders import load_atom_vqvae
 from prolit.tokenizers.protein import (
     compute_canonical_frame,
@@ -70,6 +70,12 @@ _w_biolip_dir: Path = Path("data/biolip")
 _w_complex: bool = True
 _w_min_heavy: int = 6
 _w_max_heavy: int = 50
+#: Set when this run builds the STAPLED baseline's corpus instead of ProLIT's.
+#: The whole stapled encoding is CPU work -- ESM3's tokens are already cached
+#: and ConfSeq is rule-based -- so it happens inside the worker and the main
+#: process never touches a GPU.
+_w_stapled: object | None = None
+_w_stapled_vocab_only: bool = False
 
 
 def _bucket_code(pdb: str) -> str:
@@ -171,10 +177,12 @@ def _worker_init(  # noqa: PLR0913
     complex_mode: bool,
     min_heavy: int,
     max_heavy: int,
+    stapled: dict | None = None,
 ) -> None:
     global _w_prot_desc, _w_lig_desc, _w_pocket_config  # noqa: PLW0603
     global _w_labels, _w_ccd_smiles, _w_biolip_dir  # noqa: PLW0603
     global _w_complex, _w_min_heavy, _w_max_heavy  # noqa: PLW0603
+    global _w_stapled, _w_stapled_vocab_only  # noqa: PLW0603
     _w_prot_desc = ProteinAtomDescriptor()
     _w_lig_desc = LigandAtomDescriptor()
     _w_pocket_config = PocketExtractionConfig(**pocket_config_dict)
@@ -184,6 +192,34 @@ def _worker_init(  # noqa: PLR0913
     _w_complex = complex_mode
     _w_min_heavy = min_heavy
     _w_max_heavy = max_heavy
+    _w_stapled = None
+    _w_stapled_vocab_only = bool(stapled and stapled.get("vocab_only"))
+    if stapled:
+        from prolit.data.esm3_tokens import Esm3TokenCache  # noqa: PLC0415
+        from prolit.tokenizers.stapled import (  # noqa: PLC0415
+            ConfSeqVocab,
+            StapledVocab,
+        )
+        from prolit.tokenizers.stapled_encoder import (  # noqa: PLC0415
+            StapledEncoder,
+            build_vocab,
+        )
+
+        vocab_obj = (
+            build_vocab({})
+            if stapled.get("vocab_only")
+            else StapledVocab(confseq=ConfSeqVocab.load(Path(stapled["vocab"])))
+        )
+        _w_stapled = StapledEncoder(
+            cache=(
+                Esm3TokenCache(Path(stapled["cache"]))
+                if stapled.get("cache")
+                else None
+            ),
+            confseq_repo=Path(stapled["confseq_repo"]),
+            vocab=vocab_obj,
+            pocket_cfg=_w_pocket_config,
+        )
 
 
 def _read_needed(kind: str, code: str, needed: set[str]) -> dict[str, bytes]:
@@ -216,7 +252,12 @@ def _read_needed(kind: str, code: str, needed: set[str]) -> dict[str, bytes]:
     return members
 
 
-def _process_bucket(task: tuple[str, list[tuple]]) -> list[tuple]:  # noqa: C901, PLR0912
+def rec_text_of(rec_bytes: bytes) -> str:
+    """Receptor PDB text, decoded once per use site."""
+    return rec_bytes.decode("utf-8", "replace")
+
+
+def _process_bucket(task: tuple[str, list[tuple]]) -> list[tuple]:  # noqa: C901, PLR0912, PLR0915
     """Extract (label, prot_desc, lig_desc) for kept sites in one bucket."""
     code, site_list = task
     out: list[tuple] = []
@@ -268,6 +309,37 @@ def _process_bucket(task: tuple[str, list[tuple]]) -> list[tuple]:  # noqa: C901
             )
             if pocket is None or pocket.atom_coords.shape[0] == 0:
                 continue
+            if _w_stapled is not None:
+                # The stapled arm reads ProLIT's own pocket residues out of the
+                # ESM3 cache and describes the ligand with ConfSeq, so the two
+                # arms see the same residues of the same receptor and differ
+                # only in how those residues are written down.
+                heavy_idx = np.array(
+                    [k for k, a in enumerate(mol["atoms"]) if a[0] != "H"]
+                )
+                if _w_stapled_vocab_only:
+                    toks = _w_stapled.confseq_tokens(
+                        mol["atoms"], mol["bonds"], heavy_idx
+                    )
+                    if toks is None:
+                        continue
+                    out.append((label, toks, None))
+                    continue
+                spocket = _w_stapled.setup_pocket(rec_name[:-4], rec_text_of(
+                    rec_bytes), heavy)
+                if spocket is None:
+                    continue
+                seq, why = _w_stapled.ligand_seq_with_reason(
+                    spocket, mol["atoms"], mol["bonds"], heavy_idx
+                )
+                if seq is None:
+                    # "oov" here means the frozen alphabet is too small and
+                    # this corpus is quietly losing molecules; "confseq" is a
+                    # real limit of the baseline. They must not be one number.
+                    out.append((label, None, why))
+                    continue
+                out.append((label, seq, None))
+                continue
             frame = compute_canonical_frame(pocket.ca_coords.astype(np.float64))
             prot_desc, _pm = _w_prot_desc.compute(pocket, feats, frame)
             if prot_desc.shape[0] == 0:
@@ -293,6 +365,26 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
         type=Path,
         default=None,
         help="Atom VQ-VAE ckpt (joint). Omit when using --separate-*-ckpt.",
+    )
+    parser.add_argument(
+        "--stapled-esm3-cache",
+        type=Path,
+        default=None,
+        help="build the STAPLED BASELINE's corpus: pocket residues carry ESM3 "
+        "structure codes from this cache, the ligand carries ConfSeq tokens, "
+        "and the placement neither holds rides in four quantized tokens. Same "
+        "sites, same pocket residues as the ProLIT arm.",
+    )
+    parser.add_argument(
+        "--confseq-repo", type=Path, default=Path("third_party/ConfSeq")
+    )
+    parser.add_argument("--stapled-vocab", type=Path, default=None)
+    parser.add_argument(
+        "--build-stapled-vocab",
+        action="store_true",
+        help="collect ConfSeq's chemical symbols over this corpus, write "
+        "--stapled-vocab and stop. Needs no ESM3 cache: the alphabet is a "
+        "property of the ligands.",
     )
     parser.add_argument("--separate-protein-ckpt", type=Path, default=None)
     parser.add_argument("--separate-protein-norm", type=Path, default=None)
@@ -347,7 +439,15 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
 
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
-    if args.separate_protein_ckpt is not None:
+    # The stapled arm reads ESM3's tokens from a cache and writes ConfSeq's
+    # with no weights at all, so there is no VQ-VAE to load and no GPU to
+    # claim. Loading one anyway would need a --ckpt this run has no use for.
+    stapled_mode = args.stapled_esm3_cache is not None or args.build_stapled_vocab
+    module = mean = std = None
+    vocab: AtomLMVocab | None = None
+    if stapled_mode:
+        pass
+    elif args.separate_protein_ckpt is not None:
         # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
         # unified into one code space. Feed RAW descriptors (identity external
         # norm) -- SeparateVQVAE normalizes per modality internally. Combined
@@ -404,16 +504,40 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     writers = {s: SplitWriter(args.out_dir, s) for s in ("train", "val")}
-    enc = ComplexTokenEncoder(
-        module.vqvae, vocab, mean, std, writers, args.batch_size, device
+    enc = (
+        None
+        if (args.stapled_esm3_cache is not None or args.build_stapled_vocab)
+        else ComplexTokenEncoder(
+            module.vqvae, vocab, mean, std, writers, args.batch_size, device
+        )
     )
     rng = np.random.default_rng(args.seed)
     n_used = 0
+
+    symbol_counts: dict[str, int] = {}
+    stapled_fail: dict[str, int] = {}
 
     def _consume(results: list[tuple]) -> None:
         nonlocal n_used
         for label, prot, lig in results:
             n_used += 1
+            if stapled_cfg is not None:
+                if prot is None:
+                    stapled_fail[lig] = stapled_fail.get(lig, 0) + 1
+                    continue
+                # The worker already produced the finished stream (or, in the
+                # vocabulary pass, the raw ConfSeq symbols): no VQ, no GPU, and
+                # no rotation augmentation. ESM3's codes and ConfSeq's tokens
+                # are both invariant, so a rotated frame would move nothing but
+                # the placement grid -- N copies of one document rather than N
+                # views of it. The asymmetry is a property of the
+                # representations and is reported, not papered over.
+                if args.build_stapled_vocab:
+                    for t in prot:
+                        symbol_counts[t] = symbol_counts.get(t, 0) + 1
+                else:
+                    writers[label].write([prot])
+                continue
             n_rot = args.num_rotations if label == "train" else 1
             for r in range(n_rot):
                 if r == 0:
@@ -435,10 +559,32 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
     # 958k-site dict -- avoids the per-worker dict copy (the 1.195T vmem OOM).
     tasks = [(c, by_bucket[c]) for c in codes]
     init_args = (asdict(pocket_cfg), labels, ccd_smiles, str(args.biolip_dir))
+    stapled_vocab_size = 0
+    stapled_n_pose = 0
+    stapled_pose_bits = 0.0
+    if stapled_mode and not args.build_stapled_vocab:
+        from prolit.tokenizers.stapled import (  # noqa: PLC0415
+            ConfSeqVocab,
+            StapledVocab,
+        )
+
+        _sv = StapledVocab(confseq=ConfSeqVocab.load(args.stapled_vocab))
+        stapled_vocab_size = _sv.vocab_size
+        stapled_n_pose = _sv.n_pose_tokens
+        stapled_pose_bits = _sv.pose_bits
+    stapled_cfg = None
+    if stapled_mode:
+        stapled_cfg = {
+            "cache": str(args.stapled_esm3_cache) if args.stapled_esm3_cache else "",
+            "confseq_repo": str(args.confseq_repo),
+            "vocab": str(args.stapled_vocab) if args.stapled_vocab else "",
+            "vocab_only": bool(args.build_stapled_vocab),
+        }
     init_kwargs = {
         "complex_mode": args.complex,
         "min_heavy": args.min_heavy,
         "max_heavy": args.max_heavy,
+        "stapled": stapled_cfg,
     }
     if args.num_workers > 0:
         import functools  # noqa: PLC0415
@@ -471,9 +617,30 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
         for task in tqdm(tasks, desc="buckets"):
             _consume(_process_bucket(task))
 
-    enc.flush_all()
+    if enc is not None:
+        enc.flush_all()
+    if stapled_cfg is not None and stapled_fail:
+        logger.info("stapled failures by reason: %s", stapled_fail)
+    if args.build_stapled_vocab:
+        from prolit.tokenizers.stapled_encoder import build_vocab  # noqa: PLC0415
+
+        built = build_vocab(symbol_counts)
+        args.stapled_vocab.parent.mkdir(parents=True, exist_ok=True)
+        built.confseq.save(args.stapled_vocab)
+        logger.info(
+            "stapled vocabulary: %d ConfSeq tokens (%d observed) -> %s",
+            built.confseq.size,
+            len(symbol_counts),
+            args.stapled_vocab,
+        )
+        for w in writers.values():
+            w.close()
+        return
+
     meta: dict = {
-        "vocab_size": vocab.vocab_size,
+        "vocab_size": (
+            stapled_vocab_size if stapled_mode else vocab.vocab_size
+        ),
         "all_atom": True,
         "pretrain": {
             "source": "biolip2",
@@ -483,12 +650,24 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
         },
         "splits": {},
     }
-    meta["atom_codebook_size"] = (
-        2 * args.codebook_size
-        if args.separate_protein_ckpt is not None
-        else args.codebook_size
-    )
-    meta["atom_offset"] = vocab.offset
+    if stapled_mode:
+        meta["stapled"] = {
+            "protein_tokenizer": "esm3_structure_v0",
+            "ligand_tokenizer": "confseq",
+            "pose_tokens": stapled_n_pose,
+            "pose_bits": stapled_pose_bits,
+            "esm3_cache": str(args.stapled_esm3_cache),
+            "confseq_vocab_path": str(args.stapled_vocab),
+        }
+        meta["atom_codebook_size"] = stapled_vocab_size - NUM_SPECIAL
+        meta["atom_offset"] = NUM_SPECIAL
+    else:
+        meta["atom_codebook_size"] = (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        )
+        meta["atom_offset"] = vocab.offset
     if args.separate_protein_ckpt is not None:
         meta["separate_tokenizers"] = True
     for split, writer in writers.items():

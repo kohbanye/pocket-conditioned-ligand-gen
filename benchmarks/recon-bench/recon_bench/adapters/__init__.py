@@ -13,6 +13,10 @@ _REGISTRY = {
     "token_mol": ("recon_bench.adapters.token_mol", "TokenMolAdapter"),
     "confseq": ("recon_bench.adapters.confseq", "ConfSeqAdapter"),
     "bio2token": ("recon_bench.adapters.bio2token", "Bio2TokenAdapter"),
+    # ESM3 (pocket) + ConfSeq (ligand) concatenated, with the rigid transform
+    # neither of them carries handed over as an explicit bit budget.
+    # Instantiate with pose_bits=None|13|26|39; see the module docstring.
+    "stapled": ("recon_bench.adapters.stapled", "StapledAdapter"),
 }
 
 

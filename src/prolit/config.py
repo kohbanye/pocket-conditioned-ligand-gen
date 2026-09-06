@@ -656,6 +656,19 @@ class RescoreTrainingConfig:
     # near-native specialist for the top-1 tie-break.
     max_label: float = 0.0
 
+    # Drop the RMSD-0 crystal pose from training. CASF is scored decoys-only, so
+    # a head that has seen the native learns a pose the benchmark never asks it
+    # to rank.
+    #
+    # Declared here with its default rather than only set by
+    # ``scoring_head.py`` when its flag is passed: the dataset reads the
+    # attribute unconditionally, so without this every run that did NOT pass
+    # --drop-native-pose died in the datamodule's setup (128 of the 130
+    # scoring_head commands in jobs/). A dataclass default is also what makes
+    # a config pickled into an older checkpoint still resolve the attribute,
+    # so adding it does not invalidate existing heads.
+    drop_native_pose: bool = False
+
     # Weight of the per-ligand-atom displacement auxiliary loss (needs a corpus
     # with .disp/.dlen sidecars from tokenize_decoys).
     atom_aux_weight: float = 0.0

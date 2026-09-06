@@ -117,6 +117,28 @@ ignore = ["D", "N812", "COM812"]
 ]
 
 [dependency-groups]
+# The stapled baseline (ESM3 x ConfSeq) only. ConfSeq is rule-based and needs
+# no weights, but its demo module imports Indigo for bond perception, SmilesPE
+# for atom-wise pretokenization and timeout-decorator. Kept out of the default
+# dependencies because nothing in ProLIT itself touches them, and SmilesPE
+# declares gensim, which nothing here uses at runtime:
+#
+#     uv sync --group stapled
+#
+# The pinned Indigo is the version the ConfSeq rows in results/ were produced
+# with -- bond perception is part of that tokenizer, not an incidental
+# dependency, so a different Indigo is a different tokenizer.
+# SmilesPE is deliberately NOT here. It is one regex pretokenizer, but its
+# distribution declares gensim, and uv resolves one environment for the whole
+# workspace -- adding it moved shared pins the rest of the project depends on
+# (starlette 1.0.0 -> 1.6.0, which marimo sits on). Install it without its
+# dependency list instead:
+#
+#     uv pip install --no-deps smilespe==0.0.3
+stapled = [
+    "epam-indigo==1.45.0",
+    "timeout-decorator==0.5.0",
+]
 dev = [
     "ruff>=0.14.6",
     "ty>=0.0.1a28",
