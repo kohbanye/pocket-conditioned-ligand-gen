@@ -79,6 +79,12 @@ from generate_ligands_3d import (
 from rdkit import Chem
 from transformers import LogitsProcessor, LogitsProcessorList
 
+from prolit.api import (
+    ATOM_LAYOUT,
+    LIGAND_ELEMENT_VOCAB,
+    fields_by_name,
+    make_clash_probe,
+)
 from prolit.chem.bond_orders import (
     connect_fragments,
     mol_from_decoded,
@@ -89,16 +95,17 @@ from prolit.chem.rigid_fit import vdw_radii
 from prolit.config import (
     PocketExtractionConfig,
 )
-from prolit.model.mlm_decode import refine_codes
+from prolit.model.mlm_decode import apply_rigid, refine_codes, rigid_between
 from prolit.provenance import write_manifest
 from prolit.seeding import add_seed_argument, seed_from_args
-from prolit.tokenizers.atom import ProteinAtomDescriptor
+from prolit.tokenizers.atom import ProteinAtomDescriptor, spherical_to_cartesian_np
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.lm_vocab import (
     L_CLOSE_ID,
     PAD_ID,
     AtomLMVocab,
 )
+from prolit.tokenizers.loaders import load_pose_refiner
 
 # Repository root, used only for default data/output locations. ``prolit`` is
 # an installed package, so nothing needs to be put on sys.path.
@@ -252,6 +259,7 @@ def _build_generator(args, device) -> tuple:  # noqa: ANN001
             codebook_size=args.codebook_size,
         )
         combined_codebook_size = 2 * args.codebook_size
+        lig_vq, lig_code_base = separate_vqvae.ligand, args.codebook_size
         model = load_atom_lm(args.lm_ckpt, combined_codebook_size, device, split=False)
         protein_norm = load_atom_norm_stats(args.separate_protein_norm, device)
         ligand_norm = separate_vqvae.ligand_norm_stats
@@ -293,6 +301,7 @@ def _build_generator(args, device) -> tuple:  # noqa: ANN001
 
     else:
         atom_vqvae = load_atom_vqvae(vqvae_ckpt, args.codebook_size, device)
+        lig_vq, lig_code_base = atom_vqvae, 0
         model = load_atom_lm(args.lm_ckpt, args.codebook_size, device)
         norm_stats = load_atom_norm_stats(args.norm_stats, device)
         vocab = AtomLMVocab(codebook_size=args.codebook_size)
@@ -330,7 +339,44 @@ def _build_generator(args, device) -> tuple:  # noqa: ANN001
                 refine_project=args.refine_project,
             )
 
-    return model, vocab, code_lo, code_hi, code_base, encode_pocket, decode_codes
+    lig_norm = ligand_norm if args.separate_ligand_ckpt else norm_stats
+    cfield = fields_by_name(ATOM_LAYOUT)["coord"]
+    cmean = lig_norm["atom_mean"][cfield.start : cfield.end]
+    cstd = lig_norm["atom_std"][cfield.start : cfield.end]
+
+    def decode_world(seqs, frame, move=None):  # noqa: ANN001, ANN202
+        """A batch of code sequences to world coordinates and radii.
+
+        Only the coordinate and element heads are run: this feeds the clash
+        probe, which needs positions and van der Waals radii and nothing else.
+        ``decode_to_outputs`` takes one sequence and adds ``pos_encoding[:N]``,
+        so flattening a batch into it would ask for B*N positions and overrun
+        the table -- the batch dimension is kept here instead.
+        """
+        centroid, rot = frame
+        idx = torch.as_tensor(np.asarray(seqs) + lig_code_base, device=device)
+        q = lig_vq.codebook.lookup(idx.reshape(-1)).reshape(*idx.shape, -1)
+        trunk = lig_vq.decoder_trunk(
+            lig_vq.transformer_decoder(
+                lig_vq.latent_unproj(q) + lig_vq.pos_encoding[: idx.shape[1]]
+            )
+        )
+        coord = (lig_vq.recon_head_modules["coord"](trunk) * cstd + cmean).cpu().numpy()
+        elem = lig_vq.recon_head_modules["element"](trunk).argmax(-1).cpu().numpy()
+        world = np.stack(
+            [spherical_to_cartesian_np(coord[b]) @ rot + centroid
+             for b in range(coord.shape[0])]
+        )
+        if move is not None:
+            world = np.stack([apply_rigid(w, move) for w in world])
+        radii = np.stack([
+            vdw_radii([LIGAND_ELEMENT_VOCAB[i] for i in elem[b]])
+            for b in range(elem.shape[0])
+        ])
+        return world, radii, elem
+
+    return (model, vocab, code_lo, code_hi, code_base, encode_pocket, decode_codes,
+            decode_world)
 
 
 
@@ -504,12 +550,28 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     parser.add_argument(
         "--iter-order",
-        choices=("confidence", "late_first"),
+        choices=("confidence", "late_first", "clash"),
         default="confidence",
         help="which positions each refinement round re-decides. 'confidence' is "
         "MaskGIT's least-confident-first. 'late_first' sweeps blocks backwards "
         "from the end, because the clash rate climbs 11.4%% -> 33.7%% along the "
-        "decode order while FLOWR stays flat at ~8%%.",
+        "decode order while FLOWR stays flat at ~8%%. 'clash' re-decides exactly "
+        "the atoms that are inside the protein, which is the aimed version of "
+        "the same idea -- the late block IS where clashes are dense (4.6%% -> "
+        "12.8%% on the deployed arm against a flat 0.4%% -> 1.0%% for the "
+        "reference ligand), but 87%% of the atoms in it are fine and re-deciding "
+        "those is wasted risk.",
+    )
+    parser.add_argument(
+        "--iter-candidates",
+        type=int,
+        default=256,
+        help="for --iter-order clash: how many of the model's most probable "
+        "codes are checked for a replacement that clears the wall. The best "
+        "escaping code sits at median rank 133 in the causal model's own "
+        "distribution (60%% within the top 256, 76%% within 1024), so this "
+        "trades coverage against decode; if every candidate clashes the "
+        "position keeps the argmax and nothing stalls.",
     )
     parser.add_argument(
         "--reconcile",
@@ -517,7 +579,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         default="off",
         help="what to do about the decoder reacting globally to a local code "
         "edit. Measured, editing one code moves the edited atom 2.20 A (the "
-        "point) and every other atom 0.24 A (not the point), and only 16% of "
+        "point) and every other atom 0.24 A (not the point), and only 16%% of "
         "that is a rigid move. 'align' superimposes on the unedited atoms; "
         "'splice' also puts them back exactly.",
     )
@@ -533,8 +595,8 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         default=None,
         help="trained bond head (pipelines/train/bond_head.py). Given, the "
         "bond graph is read off the decoded chemistry instead of off the "
-        "decoded distances -- perception recovers 31% of the true bonds at "
-        "the error the decoder makes, the head 72%. Molecule identity is read "
+        "decoded distances -- perception recovers 31%% of the true bonds at "
+        "the error the decoder makes, the head 72%%. Molecule identity is read "
         "off that graph, so this is not only about the bond list.",
     )
     parser.add_argument(
@@ -567,6 +629,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         code_base,
         encode_pocket,
         decode_codes,
+        decode_world,
     ) = _build_generator(args, device)
 
     def build_prompt(prot_codes: list[int]) -> list[int]:
@@ -590,6 +653,56 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         len(ref_elems),
     )
 
+    # ---- clash probe for --iter-order clash ----
+    make_probe = None
+    if args.iter_order == "clash":
+        from prolit.chem.pdb_io import read_heavy_atoms  # noqa: PLC0415
+
+        rec_elems_all, rec_xyz_all = read_heavy_atoms(args.receptor)
+
+        def make_probe(codes):  # noqa: ANN001, ANN202
+            """A probe for THIS molecule, seeing what the refiner will do to it.
+
+            Without this the probe judges the raw decode while the file gets the
+            refined pose, and the two disagree: measured on one target, clash
+            ordering drove the clashing terminal atoms to zero before the
+            refiner and left them untouched after it (3 -> 0 with no refiner,
+            3 -> 3 with one).
+            """
+            move = None
+            if refiner is not None:
+                pre, _r, _e = decode_world(np.asarray([codes]), frame)
+                post = decode_codes(
+                    list(codes), frame, refiner=refiner, pocket_ctx=pocket_ctx
+                )[0]
+                if len(post) == pre.shape[1]:
+                    move = rigid_between(pre[0], np.asarray(post, dtype=float))
+            def decode2(seqs, move=move):  # noqa: ANN001, ANN202
+                world, radii, _elem = decode_world(seqs, frame, move)
+                return world, radii
+
+            probe = make_clash_probe(decode2, rec_xyz_all, list(rec_elems_all))
+            # A replacement is judged more strictly than a position is selected:
+            # it must clear the wall AND still be bonded. Judging replacements by
+            # the wall alone put 13.4% of molecules outside the bond window
+            # against a control's 6.5%, and PoseBusters fell by exactly that 7.0
+            # points. Bonds come from the molecule as it currently stands.
+            pre_w, _rr, pre_e = decode_world(np.asarray([codes]), frame, move)
+            els = [LIGAND_ELEMENT_VOCAB[i] for i in pre_e[0]]
+            accept = make_clash_probe(
+                decode2,
+                rec_xyz_all,
+                list(rec_elems_all),
+                bonds=[(int(u), int(v)) for u, v, *_ in infer_bonds(els, pre_w[0])],
+            )
+            return probe, accept
+
+        logger.info(
+            "Clash-ordered decoding: %d receptor heavy atoms, %d candidates",
+            len(rec_elems_all),
+            args.iter_candidates,
+        )
+
     # ---- optional iterative decoder ----
     mlm = mlm_mask_id = None
     if args.mlm_ckpt is not None:
@@ -610,28 +723,11 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     refiner = None
     pocket_ctx = None
     if args.refine_ckpt is not None:
-        # Which module class the checkpoint belongs to is decided by what is
-        # IN it, not by a flag: a torsion refiner has a torsion head and a
-        # free-displacement one does not. Loading the wrong class silently
-        # drops the head and refines with an untrained backbone.
-        import torch as _torch  # noqa: PLC0415
-
-        from prolit.model.pose_refiner import PoseRefinerModule  # noqa: PLC0415
-        from prolit.model.torsion_refiner import TorsionRefinerModule  # noqa: PLC0415
-
-        _sd = _torch.load(args.refine_ckpt, map_location="cpu", weights_only=False)
-        _keys = _sd.get("state_dict", {})
-        _cls = (
-            TorsionRefinerModule
-            if any(k.startswith("net.torsion_head") for k in _keys)
-            else PoseRefinerModule
-        )
-        logger.info("Pose refiner: %s", _cls.__name__)
-        refiner = (
-            _cls.load_from_checkpoint(args.refine_ckpt, map_location=device)
-            .eval()
-            .to(device)
-        )
+        # Which module class the checkpoint belongs to is decided by what is IN
+        # it, not by a flag; load_pose_refiner does that detection, so the
+        # benchmark adapters and this script cannot disagree about it.
+        refiner = load_pose_refiner(args.refine_ckpt, device)
+        logger.info("Pose refiner: %s", type(refiner).__name__)
         pocket_ctx = _pocket_context(args.receptor, mols[0], frame)
         if pocket_ctx is None:
             logger.warning(
@@ -791,7 +887,11 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                     codebook_size=args.codebook_size,
                     rounds=args.iter_rounds,
                     frac=args.iter_frac,
-                order=args.iter_order,
+                    order=args.iter_order,
+                    **(dict(zip(("clash_probe", "accept_probe"),
+                               make_probe(codes), strict=True))
+                       if make_probe else {}),
+                    candidates=args.iter_candidates,
                     device=device,
                 )
             idx = produced

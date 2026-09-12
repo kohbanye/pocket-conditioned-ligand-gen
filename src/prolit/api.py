@@ -40,12 +40,14 @@ from prolit.chem.bond_orders import (
     mol_from_decoded,
     target_bond_sums,
 )
+from prolit.chem.clash_probe import make_clash_probe
 from prolit.chem.mol2 import mol_to_dict, parse_mol2_multi
 from prolit.chem.pdb_io import (
     infer_bonds,
     read_heavy_atoms,
     write_full_protein_pdb,
 )
+from prolit.chem.prune import prune_clashing_leaves
 from prolit.chem.rigid_fit import rigid_pocket_fit, vdw_radii
 from prolit.chem.torsion_fit import torsion_pocket_fit
 from prolit.data.rescore_dataset import ligand_mask
@@ -113,6 +115,7 @@ __all__ = [
     "load_pose_refiner",
     "load_separate_tokenizer",
     "load_tokenizer",
+    "make_clash_probe",
     "mol_from_decoded",
     "mol_to_dict",
     "parse_ligand_pdb_text",
@@ -123,6 +126,7 @@ __all__ = [
     "precompute_pocket_atom_candidates_from_text",
     "precompute_receptor_atom_features",
     "precompute_receptor_atom_features_from_text",
+    "prune_clashing_leaves",
     "random_rotation_matrix",
     "read_heavy_atoms",
     "rigid_pocket_fit",
