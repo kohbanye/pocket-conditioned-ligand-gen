@@ -38,13 +38,36 @@ FILES: dict[str, str] = {
     "refiner_clm": "refiner/refclm.ckpt",
     "refiner_torsion": "refiner/refit_tors3_ts0.4-e10.ckpt",
     "refiner_torsion_only": "refiner/refit_torsonly_s01-e03.ckpt",
+    # --- the dfs arm -------------------------------------------------------
+    # A SECOND tokenizer, with its OWN statistics. ``normalization_stats.pt``
+    # and ``normalization_stats_dfs.pt`` are different files and pairing either
+    # with the other tokenizer does not raise -- it rescales the coordinates.
+    # That is why these are only ever requested as the ``dfs`` group.
+    "atom_vqvae_dfs": "tokenizer/atom_vqvae_dfs_e249_coord0.1515.ckpt",
+    "norm_stats_dfs": "tokenizer/normalization_stats_dfs.pt",
+    "clm_dfs": "clm/clm_dfs_full-last.ckpt",
+    "mlm_dfs": "mlm/mlm_dfs-last.ckpt",
+    "refiner_overlap": "refiner/refiner_overlap_t0-e05-r1.9315.ckpt",
 }
 
 #: Named bundles. ``tokenizer`` is a set on purpose -- see the module docstring.
+#:
+#: ``dfs`` is the arm clash-ordered decoding is reported on: a different
+#: tokenizer (``buried_dfs`` atom order) with its own normalization statistics,
+#: its own CLM and MLM trained on that token stream, and the overlap-target
+#: refiner. It shares no file with ``generate`` or ``iterative``, and the two
+#: sets must not be crossed -- a dfs CLM emits codes from the dfs codebook.
 GROUPS: dict[str, tuple[str, ...]] = {
     "tokenizer": ("atom_vqvae", "norm_stats"),
     "generate": ("atom_vqvae", "norm_stats", "clm", "refiner"),
     "iterative": ("atom_vqvae", "norm_stats", "clm", "mlm", "code_neighbours"),
+    "dfs": (
+        "atom_vqvae_dfs",
+        "norm_stats_dfs",
+        "clm_dfs",
+        "mlm_dfs",
+        "refiner_overlap",
+    ),
     "all": tuple(FILES),
 }
 
@@ -55,6 +78,14 @@ ENV_FOR: dict[str, str] = {
     "clm": "SBDD_OWN_LM_CKPT",
     "refiner": "SBDD_OWN_REFINE_CKPT",
     "mlm": "SBDD_OWN_MLM_CKPT",
+    # The dfs arm writes the SAME variables, so `--group dfs --env-file` gives a
+    # shell that runs the dfs stack and nothing has to be renamed downstream.
+    # Sourcing both groups' files in one shell is what must not happen.
+    "atom_vqvae_dfs": "SBDD_OWN_VQVAE_CKPT",
+    "norm_stats_dfs": "SBDD_OWN_NORM_STATS",
+    "clm_dfs": "SBDD_OWN_LM_CKPT",
+    "mlm_dfs": "SBDD_OWN_MLM_CKPT",
+    "refiner_overlap": "SBDD_OWN_REFINE_CKPT",
 }
 
 
