@@ -39,7 +39,13 @@ from torch import nn
 from prolit.tokenizers.lm_vocab import NUM_SPECIAL
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
+
+    #: Given a ``(B, n)`` array of ligand code sequences, which positions of each
+    #: are unacceptable. The optional second argument restricts the answer to one
+    #: column, which is all the picker ever reads. Geometry stays in the caller:
+    #: this layer never opens a receptor, holds a frame, or knows a radius.
+    ClashProbe = Callable[..., np.ndarray]
 
 #: Below this the ligand is a fragment and re-masking a fraction of it rounds to
 #: the whole molecule, which is the cold case the model is worst at.
@@ -67,6 +73,9 @@ def refine_codes(  # noqa: PLR0913
     rounds: int = 8,
     frac: float = 0.25,
     order: str = "confidence",
+    clash_probe: ClashProbe | None = None,
+    accept_probe: ClashProbe | None = None,
+    candidates: int = 64,
     device: torch.device | None = None,
 ) -> list[int]:
     """Re-decide ligand codes, ``rounds`` times.
@@ -87,8 +96,39 @@ def refine_codes(  # noqa: PLR0913
     are ``frac`` of the sequence and ``rounds`` of them are swept, so
     ``rounds * frac`` is the tail fraction that gets re-derived.
 
+    ``order="clash"`` re-decides exactly the positions whose atoms are inside the
+    protein, and requires ``clash_probe``. It is the aimed version of
+    ``late_first``: the clash RATE climbs 4.6% -> 12.8% along the token order on
+    the deployed arm while the reference ligand is flat at 0.4% -> 1.0%
+    (2026-09-10), so the late block is where clashes are dense -- but 87% of the
+    atoms in it are fine, and re-deciding those is wasted risk.
+
+    This is the only order that can be aimed correctly. A mask applied while the
+    causal model is still emitting cannot be: the position the VQ decoder gives
+    the newest atom from a left prefix is a median **0.930 A** from where that
+    atom ends up once the sequence is complete, which is the same size as the
+    clash criterion's own margin. With the whole ligand block on the table the
+    decode is exact, so the probe sees where the atoms actually are.
+
+    ``accept_probe`` is what a REPLACEMENT is judged by, and defaults to
+    ``clash_probe``. They are different questions: a position is re-decided
+    because it is in the wall, but a candidate is only acceptable if it is out
+    of the wall *and* has not broken the molecule. Judging replacements by the
+    wall alone was measured to cost exactly the PoseBusters it gained in score
+    (13.4% of molecules outside the bond window against a control's 6.5%, and
+    validity down 7.0 points).
+
+    Replacement is drawn from the ``candidates`` most probable codes rather than
+    the whole codebook, and the most probable acceptable one wins; if every
+    candidate is rejected the position keeps the model's argmax, so the schedule
+    can never fail to terminate. Scanning all 8192 would cost 128x
+    more decode for a tail the model puts almost no mass on.
+
     Returns codebook indices, not vocabulary ids.
     """
+    if order == "clash" and clash_probe is None:
+        msg = "order='clash' needs a clash_probe; geometry does not live in this layer"
+        raise ValueError(msg)
     codes = [int(c) for c in ligand_codes]
     n = len(codes)
     if n < MIN_LIGAND_CODES or rounds < 1 or frac <= 0:
@@ -117,27 +157,82 @@ def refine_codes(  # noqa: PLR0913
 
     for r in range(rounds):
         span = slice(NUM_SPECIAL, NUM_SPECIAL + codebook_size)
-        if order == "late_first":
-            # March a block of width k backwards from the tail, wrapping so a
-            # long sweep re-derives the whole sequence rather than running off
-            # the front.
-            end = n - (r * k) % n
-            weak = np.arange(max(0, end - k), end)
-            if weak.size == 0:
-                continue
-        else:
-            probs = torch.softmax(
-                _logits(model, ids, device)[lo:hi, span].float(), -1
-            )
-            held = probs.gather(1, torch.tensor(codes, device=device)[:, None])
-            weak = torch.argsort(held.squeeze(1))[:k].cpu().numpy()
+        weak = _select(
+            order, codes, ids, model, device, span, lo, hi, k, r, n, clash_probe
+        )
+        if weak is None:
+            break
+        if weak.size == 0:
+            continue
         ids[lo + weak] = mask_token_id
         probs = torch.softmax(_logits(model, ids, device)[lo:hi, span].float(), -1)
-        picked = probs[weak].argmax(-1).cpu().numpy()
+        if order == "clash":
+            assert clash_probe is not None  # noqa: S101 -- checked above
+            picked = _pick_clear(
+                codes, weak, probs, accept_probe or clash_probe, candidates
+            )
+        else:
+            picked = probs[weak].argmax(-1).cpu().numpy()
         for slot, code in zip(weak, picked, strict=True):
             codes[int(slot)] = int(code)
             ids[lo + int(slot)] = NUM_SPECIAL + int(code)
     return codes
+
+
+def _select(  # noqa: PLR0913
+    order: str,
+    codes: list[int],
+    ids: np.ndarray,
+    model: nn.Module,
+    device: torch.device,
+    span: slice,
+    lo: int,
+    hi: int,
+    k: int,
+    r: int,
+    n: int,
+    clash_probe: ClashProbe | None,
+) -> np.ndarray | None:
+    """Which positions this round re-decides. ``None`` ends the schedule early."""
+    if order == "clash":
+        assert clash_probe is not None  # noqa: S101 -- checked by the caller
+        bad = np.flatnonzero(clash_probe(np.asarray([codes]))[0])
+        if bad.size == 0:
+            return None  # nothing is in the wall; further rounds are only risk
+        return bad[:k]
+    if order == "late_first":
+        # March a block of width k backwards from the tail, wrapping so a long
+        # sweep re-derives the whole sequence rather than running off the front.
+        end = n - (r * k) % n
+        return np.arange(max(0, end - k), end)
+    probs = torch.softmax(_logits(model, ids, device)[lo:hi, span].float(), -1)
+    held = probs.gather(1, torch.tensor(codes, device=device)[:, None])
+    return torch.argsort(held.squeeze(1))[:k].cpu().numpy()
+
+
+def _pick_clear(
+    codes: list[int],
+    weak: np.ndarray,
+    probs: torch.Tensor,
+    accept: ClashProbe,
+    candidates: int,
+) -> np.ndarray:
+    """The most probable candidate code the accept probe does not reject.
+
+    One probe call per masked position, batched over that position's candidates.
+    Falls back to the plain argmax when every candidate is rejected, so a buried
+    position degrades to ordinary MaskGIT rather than blocking.
+    """
+    out = []
+    for slot in weak:
+        row = probs[int(slot)]
+        m = min(candidates, row.shape[0])
+        top = torch.topk(row, m).indices.cpu().numpy()
+        trial = np.tile(np.asarray(codes, dtype=np.int64), (m, 1))
+        trial[:, int(slot)] = top
+        clear = ~accept(trial, int(slot))[:, int(slot)]
+        out.append(int(top[int(np.argmax(clear))]) if clear.any() else int(top[0]))
+    return np.asarray(out, dtype=np.int64)
 
 
 def cold_decode(  # noqa: PLR0913
@@ -221,13 +316,35 @@ def cold_decode(  # noqa: PLR0913
     return codes
 
 
-def kabsch_onto(mobile: np.ndarray, target: np.ndarray) -> np.ndarray:
-    """Rigid-body superposition of ``mobile`` onto ``target`` (no scaling)."""
+def rigid_between(
+    mobile: np.ndarray, target: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The rigid move taking ``mobile`` onto ``target``: rotation and centroids.
+
+    Returned separately from :func:`kabsch_onto` because the move sometimes has
+    to be applied to coordinates other than the ones it was derived from. The
+    pose refiner projects to a rigid transform, so the difference between the
+    codes' decode and what is finally written is exactly such a move -- and a
+    clash probe judging candidate codes has to apply it to each candidate rather
+    than re-running the refiner 256 times.
+    """
     mc, tc = mobile - mobile.mean(0), target - target.mean(0)
     u, _, vt = np.linalg.svd(mc.T @ tc)
     d = np.sign(np.linalg.det(vt.T @ u.T))
-    rot = vt.T @ np.diag([1.0, 1.0, d]) @ u.T
-    return (mc @ rot.T) + target.mean(0)
+    return vt.T @ np.diag([1.0, 1.0, d]) @ u.T, mobile.mean(0), target.mean(0)
+
+
+def apply_rigid(
+    coords: np.ndarray, move: tuple[np.ndarray, np.ndarray, np.ndarray]
+) -> np.ndarray:
+    """``coords`` moved by a transform from :func:`rigid_between`."""
+    rot, from_c, to_c = move
+    return (coords - from_c) @ rot.T + to_c
+
+
+def kabsch_onto(mobile: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Rigid-body superposition of ``mobile`` onto ``target`` (no scaling)."""
+    return apply_rigid(mobile, rigid_between(mobile, target))
 
 
 def reconcile(

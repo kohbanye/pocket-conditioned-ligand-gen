@@ -25,9 +25,29 @@ ARM_NAMES = ["joint", "separate"]
 
 #: Trained weights are not in git. The identity checks below are pure metadata
 #: and always run; only the two that resolve an arm to a file need them present.
+#:
+#: The condition is per-run, not "does the runs directory exist". That earlier
+#: proxy held only until the machine trained anything at all: starting an
+#: unrelated VQ run creates ``pocket-ligand-vqvae/``, the guard stops skipping,
+#: and the tests then fail looking for the paper's runs, which are somebody
+#: else's machine's. CI never noticed because CI trains nothing.
+def _runs_present() -> bool:
+    """Are the runs these tests resolve actually on this machine?"""
+    if not variants.VQ_RUNS_DIR.exists():
+        return False
+    for name in ARM_NAMES:
+        for policy in set(variants.PUBLISHED_POLICY.values()):
+            try:
+                variants.checkpoints(name, policy)
+            except FileNotFoundError:
+                return False
+    return True
+
+
 needs_weights = pytest.mark.skipif(
-    not variants.VQ_RUNS_DIR.exists(),
-    reason="no local training runs (weights are not tracked in git)",
+    not _runs_present(),
+    reason="the paper's training runs are not on this machine "
+    "(weights are not tracked in git)",
 )
 
 

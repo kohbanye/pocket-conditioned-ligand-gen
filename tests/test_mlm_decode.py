@@ -8,16 +8,25 @@ positions with the rest of the molecule visible.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
+import pytest
 import torch
 from torch import nn
 
 from prolit.model.mlm_decode import (
     MIN_LIGAND_CODES,
+    apply_rigid,
     cold_decode,
     reconcile,
     refine_codes,
+    rigid_between,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 from prolit.tokenizers.lm_vocab import (
     L_CLOSE_ID,
     L_OPEN_ID,
@@ -258,3 +267,114 @@ def test_cold_decode_refuses_a_degenerate_length() -> None:
         _Stub(), MASK_ID, protein_codes=[1], n_ligand=MIN_LIGAND_CODES - 1,
         codebook_size=NC, rounds=4,
     ) == []
+
+
+class _Ranked(nn.Module):
+    """Predicts a fixed preference order over codes, highest first."""
+
+    def __init__(self, order: list[int]) -> None:
+        super().__init__()
+        self.order = order
+
+    def forward(self, input_ids: torch.Tensor, attention_mask=None) -> torch.Tensor:  # noqa: ANN001, ARG002
+        out = torch.full((1, input_ids.shape[1], VOCAB), -10.0)
+        for rank, code in enumerate(self.order):
+            out[..., NUM_SPECIAL + code] = 10.0 - rank
+        return out
+
+
+def _probe(
+    bad_positions: set[int], bad_codes: set[int]
+) -> Callable[..., np.ndarray]:
+    """A clash probe: a position is in the wall if it holds a bad code."""
+
+    def fn(seqs: np.ndarray, only: int | None = None) -> np.ndarray:
+        out = np.zeros(seqs.shape, dtype=bool)
+        for p in bad_positions:
+            if only is None or p == only:
+                out[:, p] = np.isin(seqs[:, p], list(bad_codes))
+        return out
+
+    return fn
+
+
+def test_clash_order_needs_a_probe() -> None:
+    """Geometry does not live in this layer, so it must be handed in."""
+    with pytest.raises(ValueError, match="clash_probe"):
+        refine_codes(
+            _Stub(), MASK_ID, [1], [5] * 8, codebook_size=NC, order="clash"
+        )
+
+
+def test_clash_order_rewrites_exactly_the_clashing_positions() -> None:
+    codes = [7] * 12
+    out = refine_codes(
+        _Ranked([3, 4, 5]), MASK_ID, [1, 2], codes, codebook_size=NC,
+        rounds=1, frac=1.0, order="clash",
+        clash_probe=_probe({2, 9}, {7}),
+    )
+    assert out[2] != 7
+    assert out[9] != 7
+    assert [c for i, c in enumerate(out) if i not in (2, 9)] == [7] * 10
+
+
+def test_clash_order_stops_when_nothing_is_in_the_wall() -> None:
+    """A clean molecule must come back byte-identical, not re-decided."""
+    codes = [7] * 12
+    out = refine_codes(
+        _Stub(target=3), MASK_ID, [1, 2], codes, codebook_size=NC,
+        rounds=8, frac=1.0, order="clash",
+        clash_probe=_probe(set(), {7}),
+    )
+    assert out == codes
+
+
+def test_it_picks_the_most_probable_code_that_clears_the_wall() -> None:
+    """Not the argmax, and not just any clear code -- the best clear one."""
+    out = refine_codes(
+        _Ranked([3, 4, 5]), MASK_ID, [1, 2], [7] * 10, codebook_size=NC,
+        rounds=1, frac=1.0, order="clash",
+        # 3 is the model's favourite but still clashes; 4 is next and is clear.
+        clash_probe=_probe({0}, {7, 3}),
+    )
+    assert out[0] == 4
+
+
+def test_it_falls_back_to_the_argmax_when_every_candidate_clashes() -> None:
+    """A buried position degrades to ordinary MaskGIT rather than blocking."""
+    out = refine_codes(
+        _Ranked([3, 4, 5]), MASK_ID, [1, 2], [7] * 10, codebook_size=NC,
+        rounds=1, frac=1.0, order="clash",
+        clash_probe=_probe({0}, set(range(NC))),
+    )
+    assert out[0] == 3
+
+
+def test_candidates_bounds_how_far_down_the_tail_it_will_reach() -> None:
+    """With candidates=1 only the argmax is considered, so a clash stands."""
+    out = refine_codes(
+        _Ranked([3, 4, 5]), MASK_ID, [1, 2], [7] * 10, codebook_size=NC,
+        rounds=1, frac=1.0, order="clash", candidates=1,
+        clash_probe=_probe({0}, {7, 3}),
+    )
+    assert out[0] == 3
+
+
+def test_a_rigid_move_can_be_applied_to_other_coordinates() -> None:
+    """The transform is what the clash probe needs, not the superposed points."""
+    rng = np.random.default_rng(0)
+    pre = rng.normal(size=(12, 3))
+    angle = 0.6
+    rot = np.array([
+        [np.cos(angle), -np.sin(angle), 0.0],
+        [np.sin(angle), np.cos(angle), 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    shift = np.array([1.5, -2.0, 0.25])
+    post = pre @ rot.T + shift
+
+    move = rigid_between(pre, post)
+    # Recovered from one pair of point sets, then applied to a DIFFERENT set.
+    other = rng.normal(size=(5, 3))
+    assert np.allclose(apply_rigid(other, move), other @ rot.T + shift, atol=1e-8)
+    assert np.allclose(apply_rigid(pre, move), post, atol=1e-8)
