@@ -173,3 +173,47 @@ def load_pose_refiner(ckpt: str | Path, device: torch.device) -> Any:  # noqa: A
         .eval()
         .to(device)
     )
+
+
+def load_scoring_head(
+    ckpt: str | Path,
+    codebook_size: int,
+    device: torch.device,
+) -> Any:  # noqa: ANN401
+    """Load a scoring head -- the MLM encoder plus the MLP that reads it.
+
+    One class serves both heads the paper reports: the pose head regresses a
+    pose's RMSD to the native (score = -prediction) and the affinity head
+    regresses pK (score = the prediction itself). Which one a checkpoint holds
+    is a property of the corpus it was trained on, not of the module, so the
+    caller has to know what it asked for.
+
+    The checkpoint's own config is the base rather than a freshly built one.
+    Lightning pickles the config INSTANCE into ``hyper_parameters`` and the
+    module builds its submodules off it, so constructing a default config here
+    has already produced a head whose submodules did not match its state_dict.
+    ``codebook_size`` is applied on top, because it is a property of the
+    tokenizer the head is being run against.
+    """
+    from prolit.config import ProLITMLMConfig, RescoreTrainingConfig  # noqa: PLC0415
+    from prolit.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
+
+    stored = (
+        torch.load(str(ckpt), map_location="cpu", weights_only=False)
+        .get("hyper_parameters", {})
+        .get("config")
+    )
+    if isinstance(stored, RescoreTrainingConfig):
+        config = stored
+        config.model.atom_codebook_size = codebook_size
+    else:
+        config = RescoreTrainingConfig(
+            model=ProLITMLMConfig(atom_codebook_size=codebook_size)
+        )
+    return (
+        ComplexRescoreModule.load_from_checkpoint(
+            str(ckpt), config=config, map_location=device
+        )
+        .eval()
+        .to(device)
+    )

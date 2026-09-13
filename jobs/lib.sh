@@ -36,3 +36,40 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 # the environment.
 PY="${PY:-$PROLIT_ROOT/.venv/bin/python}"
 export PY
+
+# Fail loudly when a GPU was paid for and is not there.
+#
+# torch falls back to CPU on its own, so a job that lands on a node where the
+# device is not visible does not crash -- it runs the same work far slower,
+# burns its whole walltime, and is killed at h_rt with a partial or absent
+# result. That reads exactly like a slow job. Two ways in have been seen: the
+# scheduler handing out a node whose GPU is already held, and a driver present
+# but not usable from the job's cgroup.
+#
+# Gated on the resource type, and ONLY on the resource type. Guessing from the
+# environment was tried and removed: $JOB_ID is set in an interactive session
+# on this cluster too, so "are we inside a job" is not answerable here, and a
+# check that guesses wrong kills a queued job for no reason. A script that does
+# not export PROLIT_JOB_RESOURCE before sourcing this file simply gets no
+# check -- which is what every script generated before that ordering was fixed
+# gets, and is the same behaviour it had already.
+#
+# Set PROLIT_SKIP_GPU_CHECK=1 to run a GPU-typed job on CPU deliberately.
+prolit_require_gpu() {
+    [ "${PROLIT_SKIP_GPU_CHECK:-0}" = "1" ] && return 0
+    case "${PROLIT_JOB_RESOURCE:-}" in
+        node_f|node_h|node_q|node_o|gpu_1) ;;
+        *) return 0 ;;
+    esac
+    if "$PY" -c 'import sys, torch; sys.exit(0 if torch.cuda.is_available() else 1)'
+    then
+        return 0
+    fi
+    echo "FATAL: ${PROLIT_JOB_RESOURCE} was requested but torch sees no CUDA" >&2
+    echo "       device. Not falling back to CPU: that would burn the walltime" >&2
+    echo "       and return a partial result that looks like a slow run." >&2
+    nvidia-smi >&2 2>&1 || echo "       nvidia-smi unavailable" >&2
+    exit 1
+}
+
+prolit_require_gpu

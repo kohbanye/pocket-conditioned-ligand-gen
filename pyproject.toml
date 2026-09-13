@@ -52,7 +52,12 @@ where = ["src"]
 # downgrade the model library. recon_bench stays a standalone uv project with its
 # own venv, which is already the pattern its FoldToken and Bio2Token adapters
 # use (.venv-foldtoken / .venv-bio2token, driven as subprocesses).
-members = ["benchmarks/common", "benchmarks/sbdd-bench", "benchmarks/pose-rescoring-bench"]
+members = [
+    "benchmarks/common",
+    "benchmarks/sbdd-bench",
+    "benchmarks/pose-rescoring-bench",
+    "benchmarks/affinity-bench",
+]
 exclude = ["benchmarks/recon-bench"]
 
 [tool.pytest.ini_options]

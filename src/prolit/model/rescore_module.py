@@ -56,6 +56,34 @@ class ComplexRescoreModule(L.LightningModule):
             nn.Linear(h, 1),
         )
         self._logged: bool = False
+        if config.freeze_encoder:
+            self._freeze_encoder()
+
+    def _freeze_encoder(self) -> None:
+        """Train the head only: 0.59M parameters instead of 99.6M.
+
+        The encoder is put in eval mode as well as frozen, because a frozen
+        module still has dropout active in train mode and would hand the head a
+        different vector for the same complex on every step -- noise the head
+        cannot fit and is not meant to. :meth:`train` keeps it that way; see
+        there for why that override is required rather than tidy.
+        """
+        self.encoder.eval()
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def train(self, mode: bool = True) -> ComplexRescoreModule:  # noqa: FBT001, FBT002
+        """Lightning calls ``train()`` on the whole module at each epoch.
+
+        ``nn.Module.train`` recurses into every child, so without this the
+        encoder is put back into train mode at the start of every epoch and
+        starts applying dropout again -- frozen weights, but a moving output.
+        The parameters would still not update, so nothing would look wrong.
+        """
+        super().train(mode)
+        if self.config.freeze_encoder:
+            self.encoder.eval()
+        return self
 
     def _pool(self, hs: Tensor, batch: dict[str, Tensor]) -> Tensor:
         """Mean of the encoder states over the ligand tokens -> one (B, H) vector.
@@ -99,8 +127,14 @@ class ComplexRescoreModule(L.LightningModule):
             self._logged: bool = True
 
     def _listwise_loss(self, pred: Tensor, rmsd: Tensor, groups: Tensor) -> Tensor:
-        """ListNet cross-entropy within each complex: match the softmax over the
-        predicted scores to a softmax over ``-rmsd``.
+        """ListNet cross-entropy within each group: match the softmax over the
+        predicted scores to a softmax over the labels.
+
+        ``listwise_higher_is_better`` picks the sign. A pose group is labelled
+        by RMSD, where small is good, so the default negates both sides and the
+        softmax concentrates on the near-native end. An affinity group is
+        labelled by pK, where large is good; without the flip the same
+        expression would spend the term on telling the weakest binders apart.
 
         Docking power asks "which pose in this set is the native one", which a
         per-pose regression only optimizes indirectly -- and a pairwise margin
@@ -120,6 +154,7 @@ class ComplexRescoreModule(L.LightningModule):
         a gradient budget.
         """
         tau_l = self.config.listwise_label_tau
+        sign = 1.0 if self.config.listwise_higher_is_better else -1.0
         total = pred.new_zeros(())
         n = 0
         for g in groups.unique():
@@ -127,8 +162,10 @@ class ComplexRescoreModule(L.LightningModule):
             p, r = pred[m], rmsd[m]
             if p.numel() < 2:  # noqa: PLR2004
                 continue
-            target = torch.softmax(-r.float() / tau_l, dim=0)
-            logp = torch.log_softmax(-p.float() / self.config.listwise_pred_tau, dim=0)
+            target = torch.softmax(sign * r.float() / tau_l, dim=0)
+            logp = torch.log_softmax(
+                sign * p.float() / self.config.listwise_pred_tau, dim=0
+            )
             total = total - (target * logp).sum()
             n += 1
         return total / max(1, n)

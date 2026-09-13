@@ -25,6 +25,7 @@ inode budget and a receptor set runs to hundreds of thousands of entries.
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,13 +62,25 @@ def write_shard(
 class Esm3TokenCache:
     """Per-structure ESM3 structure tokens, looked up by residue.
 
-    Shards are memory-mapped on first touch and kept, so a builder that walks a
-    corpus grouped by receptor pays each shard's decompression once.
+    A shard is decompressed on first touch and kept, so a builder that walks a
+    corpus grouped by receptor pays each shard's cost once. The cache is
+    BOUNDED, and the bound is the point: the npz files are compressed about
+    18-fold, so the PLINDER cache is 199 MB on disk and 3.53 GB in memory. An
+    unbounded cache in 40 worker processes asked for 141 GB on a 23 GB node --
+    the workers were OOM-killed, and ``multiprocessing.Pool`` does not notice a
+    dead worker, so the run blocked forever on a result that would never
+    arrive. It looked like a hang with frozen CPU, not like an OOM.
+
+    ``max_shards`` is per process. Sixteen shards is ~370 MB here; raise it for
+    a single-process walk, lower it when many workers share a node.
     """
 
     root: Path
+    max_shards: int = 16
     _index: dict[str, tuple[int, int]] = field(default_factory=dict, init=False)
-    _shards: dict[int, dict] = field(default_factory=dict, init=False)
+    _shards: OrderedDict[int, dict] = field(
+        default_factory=OrderedDict, init=False
+    )
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
@@ -96,6 +109,10 @@ class Esm3TokenCache:
             with np.load(self.root / f"shard_{i:04d}.npz", allow_pickle=True) as z:
                 cached = {k: z[k] for k in ("starts", "chain", "resid", "token")}
             self._shards[i] = cached
+            while len(self._shards) > max(self.max_shards, 1):
+                self._shards.popitem(last=False)
+        else:
+            self._shards.move_to_end(i)
         return cached
 
     def residue_tokens(self, struct_id: str) -> dict[tuple[str, int], int] | None:

@@ -46,6 +46,13 @@ class StapledPoseEncoder:
 
     inner: StapledEncoder
     needs_struct_id: bool = True
+    #: Averaging the head over rotated frames is what ProLIT does to smooth its
+    #: PCA frame's instability. There is nothing here to smooth: ESM3's codes
+    #: and ConfSeq's tokens are the same under rotation and only the placement
+    #: grid moves, so N frames would be N copies of one score. The caller reads
+    #: this and evaluates once -- and that single evaluation IS the averaged
+    #: answer, not a cheaper approximation of one.
+    frame_invariant: bool = True
 
     def setup_pocket(
         self,

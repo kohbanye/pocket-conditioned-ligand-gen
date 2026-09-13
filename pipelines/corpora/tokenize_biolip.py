@@ -645,7 +645,13 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
         "pretrain": {
             "source": "biolip2",
             "mode": "complex" if args.complex else "protein_only",
-            "num_rotations": args.num_rotations,
+            # What was APPLIED, not what was asked for. The stapled path emits
+            # one document per system and ignores --num-rotations entirely
+            # (ESM3 codes and ConfSeq tokens are frame-invariant, so a rotated
+            # copy is a duplicate, not a view). Recording the flag's value here
+            # made a 90.4%-coverage corpus read as a 45%-coverage one, because
+            # the expected doc count came out doubled.
+            "num_rotations": 1 if stapled_mode else args.num_rotations,
             "systems_used": n_used,
         },
         "splits": {},
@@ -658,6 +664,11 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
             "pose_bits": stapled_pose_bits,
             "esm3_cache": str(args.stapled_esm3_cache),
             "confseq_vocab_path": str(args.stapled_vocab),
+            # Why the corpus is smaller than ``systems_used``, by reason. The
+            # decoy builder has written this since it was built; without it
+            # here a shortfall has no explanation in the artefact itself and
+            # has to be re-derived from logs that outlive nothing.
+            "failed": dict(sorted(stapled_fail.items())),
         }
         meta["atom_codebook_size"] = stapled_vocab_size - NUM_SPECIAL
         meta["atom_offset"] = NUM_SPECIAL

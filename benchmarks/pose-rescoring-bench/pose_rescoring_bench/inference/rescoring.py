@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from prolit.api import PoseEncoder
 
     from pose_rescoring_bench.config import PathsConfig, RescoringConfig
-    from pose_rescoring_bench.variants import RescoringCkpts
+    from pose_rescoring_bench.variants import RescoringCkpts, StapledSpec
 
 logger = logging.getLogger(__name__)
 _MIN_SCORED = 3
@@ -50,6 +50,30 @@ def _read_rmsd(path: Path) -> dict[str, float]:
         name, val = ln.split()[:2]
         rmsd[name] = float(val)
     return rmsd
+
+
+def _stapled_encoder(
+    spec: StapledSpec,
+    paths: PathsConfig,
+    max_residues: int,
+) -> Any:  # noqa: ANN401 -- PoseEncoder-shaped, not a PoseEncoder
+    """Build the ESM3 x ConfSeq encoder from paths relative to the source repo.
+
+    Imported inside the function because ConfSeq pulls in Indigo, which only the
+    ``stapled`` dependency group installs: scoring the ProLIT arm must not
+    require it.
+    """
+    from pose_rescoring_bench.inference.stapled import (  # noqa: PLC0415
+        make_stapled_encoder,
+    )
+
+    root = paths.source_repo
+    return make_stapled_encoder(
+        esm3_cache=root / spec.esm3_cache,
+        confseq_repo=root / spec.confseq_repo,
+        confseq_vocab=root / spec.confseq_vocab,
+        max_residues=max_residues,
+    )
 
 
 def score_casf(
@@ -74,20 +98,33 @@ def score_casf(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     codebook_size = ckpts.codebook_size
-    module, mean, std = load_tokenizer(ckpts, paths, device)
     mlm_ckpt = ckpts.mlm
     if mlm_ckpt is None:
         msg = "rescoring variant is missing its mlm checkpoint"
         raise ValueError(msg)
     mlm, mask_id = load_mlm(paths.ckpt(mlm_ckpt), codebook_size, device)
-    enc = make_encoder(
-        module,  # ty: ignore[invalid-argument-type]  # SeparateVQVAE duck-types the module
-        mean,
-        std,
-        codebook_size,
-        device,
-        cfg.max_residues,
-    )
+    # The stapled baseline has no VQ-VAE and therefore no normalization
+    # statistics to load, so the tokenizer half of the setup is replaced rather
+    # than parameterized. Everything after this point -- the targets, the
+    # decoys, the head, the metrics -- is the shared path.
+    if ckpts.stapled is not None:
+        enc = _stapled_encoder(ckpts.stapled, paths, cfg.max_residues)
+        if cfg.n_frames > 1:
+            logger.info(
+                "frame averaging over %d frames requested; this arm is frame "
+                "invariant, so one evaluation is the averaged answer",
+                cfg.n_frames,
+            )
+    else:
+        module, mean, std = load_tokenizer(ckpts, paths, device)
+        enc = make_encoder(
+            module,  # ty: ignore[invalid-argument-type]  # SeparateVQVAE duck-types the module
+            mean,
+            std,
+            codebook_size,
+            device,
+            cfg.max_residues,
+        )
     head_spec = ckpts.heads[head_index] if ckpts.heads else None
     rescorer = (
         load_rescorer(
@@ -228,7 +265,9 @@ def _score_target(  # noqa: PLR0913
                 tid,
                 device,
             )
-            if rescorer is not None and cfg.n_frames > 1
+            if rescorer is not None
+            and cfg.n_frames > 1
+            and not getattr(enc, "frame_invariant", False)
             else None
         )
         rows: list[dict] = []

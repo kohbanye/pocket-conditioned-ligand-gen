@@ -97,9 +97,14 @@ _TEMPLATE = """#!/bin/sh
 # directory, not $0.
 PROLIT_ROOT={root}
 export PROLIT_ROOT
+
+# Exported BEFORE lib.sh is sourced: its GPU preflight reads the resource type
+# to decide whether a missing CUDA device is fatal, and a variable set after
+# the prologue has already run tells it nothing.
+{env}
 . "$PROLIT_ROOT/jobs/lib.sh"
 
-{env}{commands}
+{commands}
 """
 
 

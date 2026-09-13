@@ -36,6 +36,8 @@ from prolit.tokenizers.ligand import parse_sdf_text
 from prolit.tokenizers.protein import precompute_pocket_atom_candidates
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from prolit.config import PocketExtractionConfig
 
 logger = logging.getLogger(__name__)
@@ -111,7 +113,66 @@ def _load_shard_pair_map(  # noqa: PLR0913
     return pair_map
 
 
-def _process_atom_tar_shard(  # noqa: C901, PLR0915
+def iter_tar_poses(  # noqa: PLR0913
+    repo_dir: Path,
+    manifest_path: Path,
+    receptors_dir: Path,
+    source_types: list[str],
+    shard_idx: int,
+    *,
+    good_poses_only: bool,
+    min_only: bool,
+    max_files: int | None = None,
+) -> Iterator[tuple[int, int, dict, str]]:
+    """Yield ``(pair_idx, pose_idx, molecule, receptor_path)`` for one ligand tar.
+
+    The walk over ``ligands/{shard:06d}.tar`` -- which members belong to this
+    shard's pairs, gunzip, SDF parse -- is the same work whether the poses are
+    going to become 33-D descriptors or stapled token streams, so it lives here
+    once. What differs between the two is the receptor precomputation, which is
+    expensive and cached per receptor by the consumer: this yields the path and
+    lets the caller decide what to build from it.
+
+    The tar is opened in stream mode (``r|``), so members arrive in archive
+    order and are read exactly once.
+    """
+    pair_map = _load_shard_pair_map(
+        manifest_path,
+        shard_idx,
+        source_types,
+        receptors_dir,
+        good_poses_only=good_poses_only,
+        min_only=min_only,
+    )
+    if not pair_map:
+        return
+
+    tar_path = Path(repo_dir) / "ligands" / f"{shard_idx:06d}.tar"
+    files_seen = 0
+    with tarfile.open(tar_path, "r|") as tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            pair_idx = _pair_idx_from_member(member.name)
+            if pair_idx is None or pair_idx not in pair_map:
+                continue
+            if max_files is not None and files_seen >= max_files:
+                break
+            files_seen += 1
+            fileobj = tar.extractfile(member)
+            if fileobj is None:
+                continue
+            try:
+                text = gzip.decompress(fileobj.read()).decode("utf-8", "replace")
+                molecules = parse_sdf_text(text)
+            except Exception:
+                logger.exception("Read error: pair %d shard %d", pair_idx, shard_idx)
+                continue
+            for pose_idx, mol in enumerate(molecules):
+                yield pair_idx, pose_idx, mol, pair_map[pair_idx]
+
+
+def _process_atom_tar_shard(  # noqa: C901
     args: tuple[
         int, Path, Path, Path, list[str], dict, Path, int | None, bool, bool, str
     ],
@@ -136,17 +197,6 @@ def _process_atom_tar_shard(  # noqa: C901, PLR0915
     protein_desc = ProteinAtomDescriptor()
     ligand_desc = LigandAtomDescriptor()
 
-    pair_map = _load_shard_pair_map(
-        manifest_path,
-        shard_idx,
-        source_types,
-        receptors_dir,
-        good_poses_only=good_poses_only,
-        min_only=min_only,
-    )
-    if not pair_map:
-        return [], [], set(), 0
-
     @lru_cache(maxsize=256)
     def _get_receptor(rec_path: str) -> tuple[object, dict] | None:
         try:
@@ -157,14 +207,12 @@ def _process_atom_tar_shard(  # noqa: C901, PLR0915
             return None
         return precomputed, feats
 
-    tar_path = Path(repo_dir) / "ligands" / f"{shard_idx:06d}.tar"
     shard_files: list[str] = []
     shard_counts: list[int] = []
     elements: set[str] = set()
     buffer: list[dict] = []
     attempted = 0
     part = 0
-    files_seen = 0
 
     def _flush() -> None:
         nonlocal buffer, part
@@ -179,55 +227,45 @@ def _process_atom_tar_shard(  # noqa: C901, PLR0915
         part += 1
         buffer = []
 
-    with tarfile.open(tar_path, "r|") as tar:
-        for member in tar:
-            if not member.isfile():
-                continue
-            pair_idx = _pair_idx_from_member(member.name)
-            if pair_idx is None or pair_idx not in pair_map:
-                continue
-            if max_files is not None and files_seen >= max_files:
-                break
-            files_seen += 1
-            fileobj = tar.extractfile(member)
-            if fileobj is None:
-                continue
-            try:
-                text = gzip.decompress(fileobj.read()).decode("utf-8", "replace")
-                molecules = parse_sdf_text(text)
-                receptor = _get_receptor(pair_map[pair_idx]) if molecules else None
-            except Exception:
-                logger.exception("Read error: pair %d shard %d", pair_idx, shard_idx)
-                continue
-            if not molecules or receptor is None:
-                continue
-            precomputed, feats = receptor
-            for pose_idx, mol in enumerate(molecules):
-                attempted += 1
-                try:
-                    result = _atom_process_pose(
-                        mol,
-                        precomputed,
-                        feats,
-                        pocket_cfg,
-                        protein_desc,
-                        ligand_desc,
-                        ligand_frame,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Error pair %d pose %d (shard %d)",
-                        pair_idx,
-                        pose_idx,
-                        shard_idx,
-                    )
-                    continue
-                if result is not None:
-                    result["pair_idx"] = pair_idx
-                    result["pose_idx"] = pose_idx
-                    buffer.append(result)
-                    if len(buffer) >= _DEFAULT_SHARD_SIZE:
-                        _flush()
+    for pair_idx, pose_idx, mol, rec_path in iter_tar_poses(
+        Path(repo_dir),
+        manifest_path,
+        receptors_dir,
+        source_types,
+        shard_idx,
+        good_poses_only=good_poses_only,
+        min_only=min_only,
+        max_files=max_files,
+    ):
+        receptor = _get_receptor(rec_path)
+        if receptor is None:
+            continue
+        precomputed, feats = receptor
+        attempted += 1
+        try:
+            result = _atom_process_pose(
+                mol,
+                precomputed,
+                feats,
+                pocket_cfg,
+                protein_desc,
+                ligand_desc,
+                ligand_frame,
+            )
+        except Exception:
+            logger.exception(
+                "Error pair %d pose %d (shard %d)",
+                pair_idx,
+                pose_idx,
+                shard_idx,
+            )
+            continue
+        if result is not None:
+            result["pair_idx"] = pair_idx
+            result["pose_idx"] = pose_idx
+            buffer.append(result)
+            if len(buffer) >= _DEFAULT_SHARD_SIZE:
+                _flush()
     _flush()
     logger.info(
         "Tar shard %d: %d ok / %d attempted, %d parts",

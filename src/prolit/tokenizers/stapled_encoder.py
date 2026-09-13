@@ -153,7 +153,25 @@ class StapledEncoder:
         does not cover every one of its residues -- a partially covered pocket
         is a different pocket, not a shorter one.
         """
-        precomp = precompute_pocket_atom_candidates_from_text(protein_text)
+        return self.setup_pocket_precomputed(
+            struct_id,
+            precompute_pocket_atom_candidates_from_text(protein_text),
+            reference_heavy,
+        )
+
+    def setup_pocket_precomputed(
+        self,
+        struct_id: str,
+        precomp: Any,  # noqa: ANN401 -- opaque receptor precomputation
+        reference_heavy: np.ndarray,
+    ) -> StapledPocket | None:
+        """:meth:`setup_pocket` with the receptor parse already done.
+
+        A CrossDocked receptor carries tens of poses and the parse dominates
+        the per-pose cost, so the corpus builder caches one precomputation per
+        receptor and calls this. ``setup_pocket`` is the same call with the
+        parse inlined, kept because every other caller has one structure.
+        """
         pocket = extract_pocket_atoms_from_candidates(
             precomp, reference_heavy, self.pocket_cfg
         )
