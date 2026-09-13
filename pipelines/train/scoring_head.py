@@ -64,6 +64,21 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Size of the EXTRA top-k listwise term (0 = off).",
     )
     parser.add_argument("--listwise-topk-weight", type=float, default=None)
+    parser.add_argument(
+        "--freeze-encoder",
+        action="store_true",
+        help="Train only the head (0.59M params) on top of a frozen, eval-mode "
+        "encoder. Caps what can be fitted at what the pretrained representation "
+        "exposes linearly, which is the point when the encoder memorizes a small "
+        "corpus inside one epoch.",
+    )
+    parser.add_argument(
+        "--listwise-higher-is-better",
+        action="store_true",
+        help="The label's GOOD end is its largest value (pK), not its smallest "
+        "(RMSD). Sharpens the listwise term on strong binders instead of weak "
+        "ones. Pass it for any affinity corpus.",
+    )
     parser.add_argument("--listwise-topk-by-label", action="store_true")
     parser.add_argument("--listwise-topk-tau", type=float, default=None)
     parser.add_argument("--drop-native-pose", action="store_true")
@@ -139,6 +154,10 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.listwise_topk = args.listwise_topk
     if args.listwise_topk_weight is not None:
         config.listwise_topk_weight = args.listwise_topk_weight
+    if args.freeze_encoder:
+        config.freeze_encoder = True
+    if args.listwise_higher_is_better:
+        config.listwise_higher_is_better = True
     if args.listwise_topk_by_label:
         config.listwise_topk_by_label = True
     if args.listwise_topk_tau is not None:

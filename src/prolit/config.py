@@ -676,6 +676,17 @@ class RescoreTrainingConfig:
     listwise_loss_weight: float = 0.0
     listwise_label_tau: float = 0.4
     listwise_pred_tau: float = 0.4
+
+    # Which end of the label the listwise term should sharpen. The ListNet
+    # target is a softmax over the labels, so its mass lands on one end of the
+    # list and that is where the gradient goes. For an RMSD corpus the good end
+    # is the SMALLEST label -- the near-native pose, which is exactly what
+    # top-1 reads -- so the term negates the label and this stays False. For a
+    # pK corpus the good end is the LARGEST label, and leaving this False
+    # sharpens the ordering among the WEAKEST binders instead. The ordering
+    # constraint is symmetric either way, so the sign does not break training;
+    # it decides which end of each group the capacity is spent on.
+    listwise_higher_is_better: bool = False
     complexes_per_batch: int = 8
     # Cap on docs drawn per group in one batch. Needed for the affinity corpus,
     # where a group is a protein and sizes range from 1 to ~700 ligands.
