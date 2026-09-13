@@ -43,7 +43,8 @@ from tokenize_biolip import (
 from tokenize_decoys import _cd_test_pdbs, _RmsdWriter
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from prolit.seeding import add_seed_argument, seed_from_args
+from prolit.seeding import add_seed_argument, rng_for, seed_from_args
+from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
 from prolit.tokenizers.lm_vocab import AtomLMVocab
 from prolit.tokenizers.loaders import load_atom_vqvae
@@ -142,6 +143,16 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         help="Measurement types to keep (CASF-2016 is Kd/Ki only; IC50 is "
         "assay-dependent). Use 'KD,KI,IC50' for everything.",
     )
+    p.add_argument(
+        "--num-rotations",
+        type=int,
+        default=1,
+        help="Documents per training complex, each under its own random rotation "
+        "of the whole complex before quantization. The pocket-canonical frame "
+        "makes a pose's tokens frame-dependent through the codebook, so one "
+        "orientation per complex teaches the head to read quantization noise as "
+        "signal. Val is always 1: it measures the model, not the augmentation.",
+    )
     p.add_argument("--pk-min", type=float, default=2.0)
     p.add_argument("--pk-max", type=float, default=13.0)
     p.add_argument("--val-frac", type=float, default=0.05)
@@ -211,6 +222,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         excluded |= {x.lower() for x in args.casf_pdbs.read_text().split() if x.strip()}
     sites = [s for s in sites if s[0] not in excluded]
     rng = np.random.default_rng(args.seed)
+    # Its own stream: drawing rotations from `rng` would shift the shuffle and
+    # the val split, so two --num-rotations values would not be comparable.
+    rot_rng = rng_for(args.seed, "affinity_rotations")
     rng.shuffle(sites)
     logger.info(
         "affinity sites (%s, CASF/CD-test excluded, pK %.1f-%.1f): %d",
@@ -299,13 +313,24 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                 if setup is None:
                     continue
                 p_codes, frame = setup
-                seq = enc.ligand_seq(p_codes, mol, frame)
-                if seq is None:
-                    continue
                 gid = site_gid[(pdb, ccd)]
                 split = "val" if gid in val_gids else "train"
-                writers[split].write(seq, float(pk))
-                gids_out[split].append(gid)
+                n_rot = args.num_rotations if split == "train" else 1
+                descs = enc.ligand_descs([mol], frame)
+                wrote = 0
+                for k in range(max(n_rot, 1)):
+                    # k == 0 is the unrotated complex, so --num-rotations 1
+                    # reproduces the original corpus byte for byte.
+                    rot = None if k == 0 else random_rotation_matrix(rot_rng)
+                    codes = p_codes if rot is None else enc.pocket_codes_rotated(rot)
+                    seq = enc.seqs_from_descs(codes, descs, rotation=rot)[0]
+                    if seq is None:
+                        continue
+                    writers[split].write(seq, float(pk))
+                    gids_out[split].append(gid)
+                    wrote += 1
+                if wrote == 0:
+                    continue
                 pks.append(pk)
                 n_ok += 1
             except Exception:
@@ -323,6 +348,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         "source": "biolip2_affinity_pk",
         "label": "pK (-log10 molar)",
         "n_complexes": n_ok,
+        "num_rotations": args.num_rotations,
         "train_docs": writers["train"].num_docs,
         "val_docs": writers["val"].num_docs,
         "max_len": max(writers["train"].max_len, writers["val"].max_len),
