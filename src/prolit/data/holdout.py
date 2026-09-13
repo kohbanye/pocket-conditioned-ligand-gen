@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -168,3 +169,82 @@ def evaluation_pdbs(
         if cd_manifest is not None:
             out |= sbdd_bench_receptor_pdbs(Path(cd_manifest))
     return out
+
+
+@dataclass(frozen=True)
+class CrossDockedSplit:
+    """Which CrossDocked pocket goes to which split, and which pairs survive.
+
+    ``pocket_split`` covers only the fold0-TRAIN pockets that were not held out
+    for evaluation; a pocket absent from it is not in the corpus at all.
+    ``pair_to_pocket`` is restricted the same way, so a builder can decide a
+    pose's fate from its ``pair_idx`` alone.
+    """
+
+    pocket_split: dict[str, str]
+    pair_to_pocket: dict[int, str]
+
+    def split_of_pair(self, pair_idx: int) -> str | None:
+        """``"train"``/``"val"`` for a pair, or ``None`` if it is excluded."""
+        pocket = self.pair_to_pocket.get(int(pair_idx))
+        return None if pocket is None else self.pocket_split.get(pocket)
+
+
+def crossdocked_pocket_split(  # noqa: PLR0913
+    manifest_path: Path,
+    source_types: list[str],
+    val_frac: float,
+    seed: int,
+    casf_ids: set[str] | None = None,
+    exclude_pockets: set[str] | None = None,
+) -> CrossDockedSplit:
+    """The leak-free pocket-level train/val assignment for a CrossDocked corpus.
+
+    Two corpora built from this source have to agree on composition or a
+    comparison between the models trained on them measures the split as much as
+    the tokenizer, so the decision lives here once rather than in each builder.
+
+    The order of operations is load-bearing and matches the corpus that is
+    already published: filter by source type, drop pairs whose receptor is a
+    CASF-2016 core-set entry, keep the ``cdonly_fold0 == "train"`` pockets, drop
+    the generation benchmark's evaluation pockets, then hold out ``val_frac`` of
+    what remains. The permutation is drawn from ``np.random.default_rng(seed)``
+    over the *sorted* pocket names, so every partition of a parallel build --
+    and every rebuild, in either tokenizer -- lands on the same assignment.
+    """
+    import numpy as np  # noqa: PLC0415
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    df = pq.read_table(
+        manifest_path,
+        columns=[
+            "pair_idx",
+            "complex_dir",
+            "source_type",
+            "cdonly_fold0",
+            "receptor_pdb",
+        ],
+    ).to_pandas()
+    df = df[df["source_type"].isin(source_types)]
+    if casf_ids:
+        pdb = df["receptor_pdb"].str.extract(r"^([0-9a-zA-Z]{4})_")[0].str.lower()
+        df = df[~pdb.isin(casf_ids)]
+    pair_to_pocket = dict(zip(df["pair_idx"], df["complex_dir"], strict=False))
+    train_pockets = sorted(
+        df[df["cdonly_fold0"] == "train"]["complex_dir"].dropna().unique()
+    )
+    if exclude_pockets:
+        train_pockets = [p for p in train_pockets if p not in exclude_pockets]
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(len(train_pockets))
+    n_val = int(len(train_pockets) * val_frac)
+    val_pockets = {train_pockets[i] for i in perm[:n_val]}
+    pocket_split = {
+        p: ("val" if p in val_pockets else "train") for p in train_pockets
+    }
+    kept = {
+        int(pair): pocket
+        for pair, pocket in pair_to_pocket.items()
+        if pocket in pocket_split
+    }
+    return CrossDockedSplit(pocket_split=pocket_split, pair_to_pocket=kept)

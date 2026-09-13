@@ -16,24 +16,17 @@ and is tested through the builder rather than here.
 
 from __future__ import annotations
 
-import sys
 import time
-from pathlib import Path
 
 import pytest
 
-# pipelines modules import each other by bare name, so its directory goes on the
-# path the same way the builders themselves do.
-_CORPORA = Path(__file__).resolve().parents[1] / "pipelines" / "corpora"
-if str(_CORPORA) not in sys.path:
-    sys.path.insert(0, str(_CORPORA))
+from prolit.data.work_budget import WorkBudget
 
 
 @pytest.fixture(scope="module")
 def budget_cls() -> type:
-    from tokenize_decoys import _SiteBudget  # noqa: PLC0415
-
-    return _SiteBudget
+    """Two corpus builders share this now, so it is tested where it lives."""
+    return WorkBudget
 
 
 def test_work_over_budget_is_abandoned(budget_cls: type) -> None:

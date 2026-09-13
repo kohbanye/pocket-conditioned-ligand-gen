@@ -27,7 +27,6 @@ import functools
 import gzip
 import json
 import logging
-import signal
 import zlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -46,6 +45,7 @@ from tokenize_biolip import (
 )
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
+from prolit.data.work_budget import WorkBudget
 from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.ligand import parse_ligand_pdb_text
@@ -798,47 +798,6 @@ def _emit_stapled(  # noqa: PLR0913
     return 1 if wrote else 0
 
 
-class _SiteBudget:
-    """Abandon one ligand rather than the shard it is in.
-
-    A single pathological molecule can wedge a whole shard: RDKit's
-    ``GetSubstructMatches`` over a highly symmetric ligand explores a factorial
-    space, and ``maxMatches`` caps the results it keeps, not the search it
-    does. One shard spun a core for eleven hours that way and produced nothing
-    after its first six.
-
-    SIGALRM, not a process pool, because this loop is single-threaded and a
-    pool would restructure the file. The limit of that choice is worth being
-    explicit about: a Python signal handler runs between bytecodes, so a call
-    that stays inside C for hours is **not** interrupted by this. It catches
-    the interruptible majority; the meta checkpoint after every bucket is what
-    covers the rest, by making a wedged shard's finished work readable anyway.
-
-    The raised ``TimeoutError`` is an ``OSError``, so the per-site
-    ``except Exception`` already skips the complex -- this only has to make
-    the clock run.
-    """
-
-    def __init__(self, seconds: int) -> None:
-        self.seconds = seconds
-        self.hit = 0
-        if seconds > 0:
-            signal.signal(signal.SIGALRM, self._raise)
-
-    def arm(self) -> None:
-        if self.seconds > 0:
-            signal.setitimer(signal.ITIMER_REAL, self.seconds)
-
-    def disarm(self) -> None:
-        if self.seconds > 0:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-
-    def _raise(self, _signum: int, _frame: object) -> None:
-        self.hit += 1
-        msg = f"complex exceeded its {self.seconds}s budget"
-        raise TimeoutError(msg)
-
-
 def _write_meta(  # noqa: PLR0913
     out_dir: Path,
     args: argparse.Namespace,
@@ -1058,7 +1017,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
         default=300,
         help="seconds one complex may take before it is abandoned (0 = no "
         "limit). Guards against a single symmetric ligand wedging a shard; see "
-        "_SiteBudget for what it does and does not catch.",
+        "prolit.data.work_budget.WorkBudget for what it does and does not catch.",
     )
     parser.add_argument(
         "--stapled-esm3-cache",
@@ -1302,7 +1261,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     }
     symbol_counts: dict[str, int] = {}
     stapled_tally: dict[str, int] = {}
-    budget = _SiteBudget(args.site_timeout)
+    budget = WorkBudget(args.site_timeout)
     val_pdbs = {s[0] for s in uniq[: int(len(uniq) * args.val_frac)]}
 
     # group by bucket to stream each tar once

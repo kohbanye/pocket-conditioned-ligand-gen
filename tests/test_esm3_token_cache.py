@@ -65,3 +65,35 @@ def test_codes_stay_inside_esm3s_codebook(tmp_path) -> None:  # noqa: ANN001
     codes = cache.pocket_codes("1abc", [("A", i) for i in range(4)])
     assert codes == [0, 1, 4094, 4095]
     assert all(0 <= c < 4096 for c in codes)
+
+
+def test_shard_cache_is_bounded(tmp_path) -> None:  # noqa: ANN001
+    """An unbounded cache asked for 141 GB on a 23 GB node and hung the run.
+
+    The npz shards compress about 18-fold, so "keep every shard you touch" is
+    3.53 GB per process for the PLINDER cache. Forty workers each doing that
+    were OOM-killed, and ``multiprocessing.Pool`` blocks forever on a dead
+    worker's result -- the symptom was a frozen CPU counter, which reads as a
+    deadlock rather than as memory exhaustion.
+    """
+    shards = [
+        [(f"s{i}", [("A", 1), ("A", 2)], np.array([10 + i, 20 + i]))] for i in range(6)
+    ]
+    cache = _cache(tmp_path, shards)
+    cache.max_shards = 2
+
+    for i in range(6):
+        assert cache.residue_tokens(f"s{i}") is not None
+        assert len(cache._shards) <= 2, "cache grew past its bound"
+
+    # Bounded, but still correct: an evicted shard is re-read, not lost.
+    assert cache.residue_tokens("s0") == {("A", 1): 10, ("A", 2): 20}
+
+
+def test_default_bound_keeps_a_small_cache_whole(tmp_path) -> None:  # noqa: ANN001
+    """The CrossDocked cache is 16 shards, so the default must not thrash it."""
+    shards = [[(f"s{i}", [("A", 1)], np.array([i]))] for i in range(16)]
+    cache = _cache(tmp_path, shards)
+    for i in range(16):
+        cache.residue_tokens(f"s{i}")
+    assert len(cache._shards) == 16
