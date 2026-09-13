@@ -31,6 +31,7 @@ import json
 import logging
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -66,6 +67,11 @@ _w_allowed: dict[str, str] = {}
 _w_complex: bool = False
 _w_min_heavy: int = 6
 _w_max_heavy: int = 60
+#: The whole stapled encoding is CPU work -- ESM3's tokens are already
+#: cached and ConfSeq is not needed at all in protein-only mode -- so the
+#: worker produces the finished token stream rather than a descriptor for
+#: a GPU pass that would have nothing to do.
+_w_stapled: object | None = None
 
 
 def _system_pdb(system_id: str) -> str:
@@ -139,16 +145,18 @@ def _load_allowed_systems(  # noqa: PLR0913
     return allowed
 
 
-def _worker_init(
+def _worker_init(  # noqa: PLR0913
     pocket_config_dict: dict,
     allowed: dict[str, str],
     *,
     complex_mode: bool,
     min_heavy: int,
     max_heavy: int,
+    stapled: dict | None = None,
 ) -> None:
     global _w_prot_desc, _w_lig_desc, _w_pocket_config  # noqa: PLW0603
     global _w_allowed, _w_complex, _w_min_heavy, _w_max_heavy  # noqa: PLW0603
+    global _w_stapled  # noqa: PLW0603
     _w_prot_desc = ProteinAtomDescriptor()
     _w_lig_desc = LigandAtomDescriptor()
     _w_pocket_config = PocketExtractionConfig(**pocket_config_dict)
@@ -156,6 +164,23 @@ def _worker_init(
     _w_complex = complex_mode
     _w_min_heavy = min_heavy
     _w_max_heavy = max_heavy
+    _w_stapled = None
+    if stapled:
+        from prolit.data.esm3_tokens import Esm3TokenCache  # noqa: PLC0415
+        from prolit.tokenizers.stapled import (  # noqa: PLC0415
+            ConfSeqVocab,
+            StapledVocab,
+        )
+        from prolit.tokenizers.stapled_encoder import (  # noqa: PLC0415
+            StapledEncoder,
+        )
+
+        _w_stapled = StapledEncoder(
+            cache=Esm3TokenCache(Path(stapled["cache"])),
+            confseq_repo=Path(stapled["confseq_repo"]),
+            vocab=StapledVocab(confseq=ConfSeqVocab.load(Path(stapled["vocab"]))),
+            pocket_cfg=_w_pocket_config,
+        )
 
 
 def _largest_ligand(zf: zipfile.ZipFile, lig_members: list[str]) -> dict | None:
@@ -171,8 +196,8 @@ def _largest_ligand(zf: zipfile.ZipFile, lig_members: list[str]) -> dict | None:
     return best
 
 
-def _process_zip(zip_path: str) -> list[tuple]:  # noqa: C901, PLR0912
-    """Extract (label, prot_desc, lig_desc|None) for kept systems in a zip."""
+def _process_zip(zip_path: str) -> list[tuple]:  # noqa: C901, PLR0912, PLR0915
+    """Extract (label, prot_desc-or-stapled-stream, lig_desc|None) per system."""
     out: list[tuple] = []
     try:
         zf = zipfile.ZipFile(zip_path)
@@ -208,6 +233,17 @@ def _process_zip(zip_path: str) -> list[tuple]:  # noqa: C901, PLR0912
                 continue
             rec_text = zf.read(rec).decode("utf-8", "replace")
             precomp = precompute_pocket_atom_candidates_from_text(rec_text)
+            if _w_stapled is not None:
+                # Protein-only, and protein-only is all this arm can be here:
+                # ProLIT's PLINDER corpus writes no ligand either. The ligand is
+                # still what CHOOSES the pocket, in both arms, which is why the
+                # heavy atoms above are computed before this branch.
+                spocket = _w_stapled.setup_pocket_precomputed(sid, precomp, heavy)
+                if spocket is None:
+                    continue
+                seq = _w_stapled.vocab.build_sequence(spocket.codes, [], None)
+                out.append((label, seq, None))
+                continue
             pocket = extract_pocket_atoms_from_candidates(
                 precomp, heavy, _w_pocket_config
             )
@@ -233,7 +269,7 @@ def _process_zip(zip_path: str) -> list[tuple]:  # noqa: C901, PLR0912
     return out
 
 
-def main() -> None:  # noqa: PLR0915, C901
+def main() -> None:  # noqa: PLR0915, C901, PLR0912
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--ckpt",
@@ -246,6 +282,28 @@ def main() -> None:  # noqa: PLR0915, C901
     parser.add_argument("--separate-ligand-ckpt", type=Path, default=None)
     parser.add_argument("--separate-ligand-norm", type=Path, default=None)
     parser.add_argument("--norm-stats", type=Path, default=None)
+    parser.add_argument(
+        "--stapled-esm3-cache",
+        type=Path,
+        default=None,
+        help="Cache of ESM3 structure tokens keyed by PLINDER system id "
+        "(pipelines/corpora/esm3_structure_tokens.py). Switches the builder to "
+        "the ESM3 x ConfSeq baseline: no VQ-VAE, no GPU, no rotations. In "
+        "protein-only mode ConfSeq is not used at all -- there is no ligand to "
+        "write -- so only the vocabulary's layout is taken from it.",
+    )
+    parser.add_argument("--stapled-vocab", type=Path, default=None)
+    parser.add_argument(
+        "--zip-timeout",
+        type=int,
+        default=1800,
+        help="seconds one zip may take before it is abandoned. The biggest "
+        "PLINDER zip (1418 systems) measures 193 s, so this is a wide margin "
+        "whose job is to bound a worker that has died, not a slow one.",
+    )
+    parser.add_argument(
+        "--confseq-repo", type=Path, default=Path("third_party/ConfSeq")
+    )
     parser.add_argument(
         "--systems-dir", type=Path, default=Path("data/plinder/systems")
     )
@@ -261,7 +319,12 @@ def main() -> None:  # noqa: PLR0915, C901
         "--casf-pdbs",
         type=Path,
         default=None,
-        help="Newline-separated CASF-2016 core PDB ids to hold out of pretraining.",
+        help="Newline-separated PDB ids to hold out of pretraining. The name "
+        "says CASF, but the published corpus passed data/eval_holdout_pdbs.txt "
+        "(9329 ids), NOT data/casf2016_pdbs.txt (285) -- the CASF core is a "
+        "subset of the evaluation holdout. Passing the narrow list, or nothing "
+        "(the default), trains on thousands of evaluation structures and no "
+        "message says so.",
     )
     parser.add_argument(
         "--out-dir", type=Path, default=Path("data/lm_tokens_protein_plinder")
@@ -288,9 +351,28 @@ def main() -> None:  # noqa: PLR0915, C901
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    stapled_mode = args.stapled_esm3_cache is not None
+    stapled_cfg = (
+        {
+            "cache": str(args.stapled_esm3_cache),
+            "confseq_repo": str(args.confseq_repo),
+            "vocab": str(args.stapled_vocab),
+        }
+        if stapled_mode
+        else None
+    )
     config = AtomVQVAETrainingConfig()
     config.atom.codebook_size = args.codebook_size
-    if args.separate_protein_ckpt is not None:
+    if stapled_mode:
+        # No VQ-VAE, so no normalization statistics and nothing to put on a GPU.
+        from prolit.tokenizers.stapled import (  # noqa: PLC0415
+            ConfSeqVocab,
+            StapledVocab,
+        )
+
+        module = mean = std = None
+        vocab: Any = StapledVocab(confseq=ConfSeqVocab.load(args.stapled_vocab))
+    elif args.separate_protein_ckpt is not None:
         # ABLATION separate-tokenizers mode: protein-only VQ + ligand-only VQ
         # unified into one code space. Feed RAW descriptors (identity external
         # norm) -- SeparateVQVAE normalizes per modality internally. Combined
@@ -310,9 +392,7 @@ def main() -> None:  # noqa: PLR0915, C901
         )
         mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
         std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
-        vocab: AtomLMVocab = AtomLMVocab(
-            codebook_size=2 * args.codebook_size
-        )
+        vocab = AtomLMVocab(codebook_size=2 * args.codebook_size)
     else:
         module = load_atom_vqvae(args.ckpt, device)
         module.eval()
@@ -343,8 +423,12 @@ def main() -> None:  # noqa: PLR0915, C901
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     writers = {s: SplitWriter(args.out_dir, s) for s in ("train", "val")}
-    enc = ComplexTokenEncoder(
-        module.vqvae, vocab, mean, std, writers, args.batch_size, device
+    enc = (
+        None
+        if stapled_mode
+        else ComplexTokenEncoder(
+            module.vqvae, vocab, mean, std, writers, args.batch_size, device
+        )
     )
     rng = np.random.default_rng(args.seed)
 
@@ -357,6 +441,12 @@ def main() -> None:  # noqa: PLR0915, C901
         nonlocal n_used
         for label, prot, lig in results:
             n_used += 1
+            if stapled_cfg is not None:
+                # The worker already produced the finished stream, and no
+                # rotation augmentation: ESM3's codes are invariant, so a
+                # rotated copy is a duplicate document rather than a view.
+                writers[label].write([prot])
+                continue
             n_rot = args.num_rotations if label == "train" else 1
             for r in range(n_rot):
                 if r == 0:
@@ -376,43 +466,76 @@ def main() -> None:  # noqa: PLR0915, C901
         "complex_mode": args.complex,
         "min_heavy": args.min_heavy,
         "max_heavy": args.max_heavy,
+        "stapled": stapled_cfg,
     }
     if args.num_workers > 0:
         import functools  # noqa: PLC0415
         import multiprocessing  # noqa: PLC0415
 
+        # apply_async + get(timeout), not imap_unordered. A Pool does not
+        # notice a worker that dies -- and these workers CAN die: the ESM3
+        # shard cache decompresses ~18x, so an unbounded one in 40 processes
+        # asked for 141 GB on a 23 GB node, the OOM killer took them, and
+        # imap_unordered then blocked on results that would never arrive. The
+        # run sat for 78 minutes with a frozen CPU counter and no output, and
+        # died at its walltime having written no meta.json. The cache is
+        # bounded now; this is so the next unforeseen death costs one zip.
+        n_timeout = 0
         with multiprocessing.Pool(
             args.num_workers,
             initializer=functools.partial(_worker_init, **init_kwargs),
             initargs=init_args,
         ) as pool:
-            for results in tqdm(
-                pool.imap_unordered(_process_zip, zips), total=len(zips), desc="zips"
-            ):
-                _consume(results)
+            pending = [(z, pool.apply_async(_process_zip, (z,))) for z in zips]
+            for zp, ar in tqdm(pending, total=len(zips), desc="zips"):
+                try:
+                    _consume(ar.get(timeout=args.zip_timeout))
+                except multiprocessing.TimeoutError:
+                    n_timeout += 1
+                    logger.warning("zip %s exceeded %ds; skipped", zp, args.zip_timeout)
+        if n_timeout:
+            logger.warning(
+                "skipped %d of %d zips on the time budget", n_timeout, len(zips)
+            )
     else:
         _worker_init(*init_args, **init_kwargs)
         for zp in tqdm(zips, desc="zips"):
             _consume(_process_zip(zp))
 
-    enc.flush_all()
+    if enc is not None:
+        enc.flush_all()
     meta: dict = {
         "vocab_size": vocab.vocab_size,
         "all_atom": True,
         "pretrain": {
             "source": "plinder",
             "mode": "complex" if args.complex else "protein_only",
-            "num_rotations": args.num_rotations,
+            # What was applied, not what was asked for: the stapled path
+            # writes one document per system and ignores --num-rotations.
+            "num_rotations": 1 if stapled_mode else args.num_rotations,
             "systems_used": n_used,
         },
         "splits": {},
     }
-    meta["atom_codebook_size"] = (
-        2 * args.codebook_size
-        if args.separate_protein_ckpt is not None
-        else args.codebook_size
-    )
-    meta["atom_offset"] = vocab.offset
+    if stapled_mode:
+        from prolit.tokenizers.lm_vocab import NUM_SPECIAL  # noqa: PLC0415
+
+        meta["stapled"] = {
+            "protein_tokenizer": "esm3_structure_v0",
+            "ligand_tokenizer": "confseq",
+            "mode": "protein_only",
+            "esm3_cache": str(args.stapled_esm3_cache),
+            "confseq_vocab_path": str(args.stapled_vocab),
+        }
+        meta["atom_codebook_size"] = vocab.vocab_size - NUM_SPECIAL
+        meta["atom_offset"] = NUM_SPECIAL
+    else:
+        meta["atom_codebook_size"] = (
+            2 * args.codebook_size
+            if args.separate_protein_ckpt is not None
+            else args.codebook_size
+        )
+        meta["atom_offset"] = vocab.offset
     if args.separate_protein_ckpt is not None:
         meta["separate_tokenizers"] = True
     for split, writer in writers.items():

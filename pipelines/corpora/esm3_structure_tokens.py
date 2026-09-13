@@ -24,6 +24,7 @@ line, in any of three shapes::
     {"id": "1abcA", "pdb": "ATOM ...\\n..."}          # text inline
     {"id": "1abc", "path": "/.../1abc_receptor.pdb"}
     {"id": "5xyz", "tar": "/.../shard_003.tar", "member": "5xyz/receptor.pdb"}
+    {"id": "7abc", "zip": "/.../07.zip", "member": "7abc__1__A/receptor.pdb"}
 
 **The whole structure is encoded, not the pocket.** Encoding a pocket alone
 renumbers discontiguous residues 1..L, presenting residues angstroms apart as
@@ -44,7 +45,9 @@ import json
 import logging
 import sys
 import tarfile
+import zipfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -65,24 +68,31 @@ logger = logging.getLogger(__name__)
 _BACKBONE = ("N", "CA", "C")
 
 
-def _read_text(rec: dict, tar_cache: dict[str, tarfile.TarFile]) -> str | None:
-    """Structure text from a plain path or from inside a tar, without unpacking.
+def _read_text(rec: dict, archives: dict[str, Any]) -> str | None:
+    """Structure text from a plain path or from inside an archive, unextracted.
 
     Receptor sets run to hundreds of thousands of files and the group filesystem
-    has a limited inode budget, so archives are streamed rather than extracted.
+    has a limited inode budget, so archives are streamed rather than unpacked.
+    Both ``tar`` and ``zip`` are accepted because the two receptor sets this
+    cache is built from ship differently: CrossDocked as loose PDBs, PLINDER as
+    1060 zips of one directory per system.
     """
     if "pdb" in rec:
         return rec["pdb"]
     if "path" in rec:
         p = Path(rec["path"])
         return p.read_text() if p.exists() else None
-    tar_path = rec["tar"]
-    tf = tar_cache.get(tar_path)
-    if tf is None:
-        tf = tarfile.open(tar_path)  # noqa: SIM115 -- kept open across the shard
-        tar_cache[tar_path] = tf
+    kind = "zip" if "zip" in rec else "tar"
+    path = rec[kind]
+    handle = archives.get(path)
+    if handle is None:
+        opener = zipfile.ZipFile if kind == "zip" else tarfile.open
+        handle = opener(path)
+        archives[path] = handle
     try:
-        f = tf.extractfile(rec["member"])
+        if kind == "zip":
+            return handle.read(rec["member"]).decode("utf-8", "replace")
+        f = handle.extractfile(rec["member"])
     except KeyError:
         return None
     return None if f is None else f.read().decode("utf-8", "replace")
@@ -117,15 +127,29 @@ def _load_manifest(
     Sorted by filename so a resumed run shards the same structures into the same
     npz files; the shard index is part of the cache key, and reshuffling it
     would silently orphan every id an earlier run already wrote.
+
+    ``--part`` splits a DIRECTORY by file and a single FILE by record. Splitting
+    a single file by file is what the obvious implementation does and it is
+    silently wrong: part 0 takes the whole manifest and parts 1..N-1 take
+    nothing, so N-1 of the jobs exit successfully having encoded zero
+    structures and the cache looks complete because part 0 really did write it
+    all -- just N times slower than the fan-out promised.
     """
-    files = sorted(path.glob("*.jsonl.gz")) if path.is_dir() else [path]
-    if part_k is not None and part_n:
-        files = files[part_k::part_n]
+    if path.is_dir():
+        files = sorted(path.glob("*.jsonl.gz"))
+        if part_k is not None and part_n:
+            files = files[part_k::part_n]
+        by_record = False
+    else:
+        files = [path]
+        by_record = True
     records: list[dict] = []
     for f in files:
         opener = gzip.open if f.suffix == ".gz" else open
         with opener(f, "rt") as fh:
             records.extend(json.loads(line) for line in fh if line.strip())
+    if by_record and part_k is not None and part_n:
+        records = records[part_k::part_n]
     return records
 
 
@@ -211,7 +235,7 @@ def main() -> None:  # noqa: C901, PLR0915
     logger.info("%d structures -> %s", len(records), args.out_dir)
 
     encoder: _Encoder | None = None
-    tar_cache: dict[str, tarfile.TarFile] = {}
+    archives: dict[str, Any] = {}
     index: dict[str, list[int]] = {}
     n_shards = 0
     failures = 0
@@ -231,7 +255,7 @@ def main() -> None:  # noqa: C901, PLR0915
             encoder = _Encoder(args.device)
         entries = []
         for rec in chunk:
-            text = _read_text(rec, tar_cache)
+            text = _read_text(rec, archives)
             if text is None:
                 failures += 1
                 continue
@@ -256,7 +280,7 @@ def main() -> None:  # noqa: C901, PLR0915
     name = "index.json" if part_k is None else f"index.part{part_k}.json"
     (args.out_dir / name).write_text(json.dumps({"shards": n_shards, "ids": index}))
     logger.info("cached %d structures, %d failed", len(index), failures)
-    for tf in tar_cache.values():
+    for tf in archives.values():
         tf.close()
 
 

@@ -43,7 +43,9 @@ def main() -> None:
     variant = get(args.variant)
     rescoring_ckpts = variant.rescoring
     if rescoring_ckpts is None or (
-        rescoring_ckpts.vqvae is None and not rescoring_ckpts.is_separate
+        rescoring_ckpts.vqvae is None
+        and not rescoring_ckpts.is_separate
+        and not rescoring_ckpts.is_stapled
     ):
         logger.error("variant %s has no rescoring checkpoints yet", args.variant)
         return

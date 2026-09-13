@@ -144,6 +144,20 @@ def _own_env(
     env = dict(os.environ)
     env["SBDD_OWN_LM_CKPT"] = str(paths.ckpt(ckpts.lm))
     env["SBDD_OWN_CODEBOOK_SIZE"] = str(ckpts.codebook_size)
+    if ckpts.stapled is not None:
+        # No VQ-VAE and no normalization statistics: this arm's two halves are
+        # a cached ESM3 encoding and a frozen ConfSeq vocabulary. Returning
+        # early keeps the refiner out too -- there is no shared frame for it to
+        # refine in, and ProLIT's own refiner is not part of this comparison.
+        env["SBDD_OWN_MODE"] = "stapled"
+        env["SBDD_OWN_ESM3_CACHE"] = str(paths.source_repo / ckpts.stapled.esm3_cache)
+        env["SBDD_OWN_STAPLED_VOCAB"] = str(
+            paths.source_repo / ckpts.stapled.confseq_vocab
+        )
+        env["SBDD_OWN_CONFSEQ_REPO"] = str(
+            paths.source_repo / ckpts.stapled.confseq_repo
+        )
+        return env
     if ckpts.is_separate:
         if (
             ckpts.protein_vqvae is None

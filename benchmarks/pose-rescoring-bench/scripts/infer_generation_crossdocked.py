@@ -85,7 +85,9 @@ def main() -> None:
     gen = variant.generation
     if gen is not None and args.refiner:
         gen = dataclasses.replace(gen, refiner=args.refiner)
-    if gen is None or (gen.vqvae is None and not gen.is_separate):
+    if gen is None or (
+        gen.vqvae is None and not gen.is_separate and not gen.is_stapled
+    ):
         logger.error("variant %s has no generation checkpoints", args.variant)
         return
 

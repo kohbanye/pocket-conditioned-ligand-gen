@@ -12,7 +12,10 @@ Tokenizer mode / checkpoints are selected via constructor kwargs OR environment
 variables (so ``run_generation.py --models own`` can drive any variant without a
 code change — the pose_rescoring_bench driver just sets the env before the subprocess):
 
-    SBDD_OWN_MODE            legacy | allatom | separate   (default: legacy)
+    SBDD_OWN_MODE            legacy | allatom | separate | stapled  (default: legacy)
+    SBDD_OWN_ESM3_CACHE      stapled: ESM3 tokens for the 100 targets
+    SBDD_OWN_STAPLED_VOCAB   stapled: the frozen ConfSeq vocabulary
+    SBDD_OWN_CONFSEQ_REPO    stapled: the ConfSeq checkout (optional)
     SBDD_OWN_LM_CKPT         LM checkpoint (abs path)
     SBDD_OWN_VQVAE_CKPT      VQ-VAE ckpt: legacy 2-codebook OR all-atom VQ
     SBDD_OWN_CODEBOOK_SIZE   codebook size (allatom: combined 8192;
@@ -98,10 +101,20 @@ class OwnAdapter(GenerativeModel):
                                 else _envp("SBDD_OWN_SEP_LIGAND_CKPT"))
         self.sep_ligand_norm = (Path(sep_ligand_norm) if sep_ligand_norm
                                 else _envp("SBDD_OWN_SEP_LIGAND_NORM"))
+        self.esm3_cache = _envp("SBDD_OWN_ESM3_CACHE")
+        self.stapled_vocab = _envp("SBDD_OWN_STAPLED_VOCAB")
+        self.confseq_repo = _envp("SBDD_OWN_CONFSEQ_REPO")
 
     def setup(self) -> None:
         checks = [(self.lm_ckpt, "LM checkpoint")]
-        if self.mode == "separate":
+        if self.mode == "stapled":
+            # No VQ-VAE at all in this arm; the tokenizer's two halves are a
+            # cached ESM3 encoding and a frozen ConfSeq vocabulary instead.
+            checks += [
+                (self.esm3_cache, "stapled ESM3 token cache"),
+                (self.stapled_vocab, "stapled ConfSeq vocabulary"),
+            ]
+        elif self.mode == "separate":
             checks += [
                 (self.sep_protein_ckpt, "separate protein VQ ckpt"),
                 (self.sep_protein_norm, "separate protein norm"),
@@ -119,6 +132,15 @@ class OwnAdapter(GenerativeModel):
 
     def _mode_args(self) -> list[str]:
         args: list[str] = []
+        if self.mode == "stapled":
+            args += [
+                "--esm3-cache", str(Path(self.esm3_cache).resolve()),
+                "--stapled-vocab", str(Path(self.stapled_vocab).resolve()),
+                "--atom-codebook-size", str(self.codebook_size or 12733),
+            ]
+            if self.confseq_repo is not None:
+                args += ["--confseq-repo", str(Path(self.confseq_repo).resolve())]
+            return args
         if self.mode == "separate":
             args += [
                 "--separate-protein-ckpt", str(Path(self.sep_protein_ckpt).resolve()),
@@ -158,8 +180,52 @@ class OwnAdapter(GenerativeModel):
             args += ["--refine-rounds", str(self.refine_rounds)]
         return args
 
+    def _generate_stapled(self, target: Target, n_samples: int, out_dir: Path) -> GenResult:
+        """The ESM3 x ConfSeq arm, which has its own entry point.
+
+        Same contract as the ProLIT path -- generated.sdf, success decided by
+        the exit code -- but a different script, because the two share only the
+        prompt-and-sample half. The target id is passed explicitly: the ESM3
+        tokens are cached per receptor under sbdd-bench's target id, and
+        nothing in the PDB text recovers it.
+        """
+        script = self.workdir / "scripts" / "generate_ligands_stapled.py"
+        existing = os.environ.get("PYTHONPATH", "")
+        entries = [str(self.workdir / "src"), str(self.workdir)]
+        if existing:
+            entries.append(existing)
+        env = dict(os.environ, PYTHONPATH=os.pathsep.join(entries))
+        cmd = [
+            self.python, script,
+            "--receptor", target.receptor_pdb,
+            "--ref-ligand", target.ref_ligand_sdf,
+            "--target-id", target.target_id,
+            "--lm-ckpt", self.lm_ckpt.resolve(),
+            "--out-dir", out_dir.resolve(),
+            "--num-samples", n_samples,
+            "--batch-size", self.batch_size,
+            "--temperature", self.temperature,
+            "--top-p", self.top_p,
+            "--seed", self.seed,
+            *self._mode_args(),
+        ]
+        proc = self._run(cmd, cwd=self.workdir, env=env)
+        sdf = out_dir / "generated.sdf"
+        if proc.returncode != 0 or not sdf.exists():
+            return GenResult(
+                self.name, target.target_id, ok=False, n_requested=n_samples,
+                error=(proc.stderr or proc.stdout or "")[-2000:],
+            )
+        from rdkit import Chem
+
+        n = sum(1 for m in Chem.SDMolSupplier(str(sdf), sanitize=False) if m is not None)
+        return GenResult(self.name, target.target_id, sdf=sdf,
+                         n_requested=n_samples, n_generated=n)
+
     def generate(self, target: Target, n_samples: int, out_dir: Path) -> GenResult:
         self.setup()
+        if self.mode == "stapled":
+            return self._generate_stapled(target, n_samples, out_dir)
         script = self.workdir / "scripts" / "generate_ligands_for_target.py"
         # ``workdir/src`` first, and prepended rather than assigned. The venv
         # holds an editable install of ``prolit`` that points at whichever

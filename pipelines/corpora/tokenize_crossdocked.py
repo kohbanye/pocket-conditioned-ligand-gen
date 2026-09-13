@@ -30,7 +30,7 @@ import torch
 
 from prolit.config import AtomVQVAETrainingConfig, CrossDockedConfig, HubDatasetConfig
 from prolit.data.atom_descriptors import AtomComplexDescriptorDataModule
-from prolit.data.holdout import sbdd_bench_pockets
+from prolit.data.holdout import crossdocked_pocket_split, sbdd_bench_pockets
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
 from prolit.seeding import add_seed_argument, seed_from_args
@@ -87,7 +87,7 @@ def _tokenize_split(  # noqa: PLR0913
     encoder.flush_all()
 
 
-def _build_pocket_plans(  # noqa: PLR0913, C901
+def _build_pocket_plans(  # noqa: PLR0913
     shard_dir: Path,
     shard_counts: list[int],
     manifest_path: Path,
@@ -132,6 +132,12 @@ def _build_pocket_plans(  # noqa: PLR0913, C901
     ).to_pandas()
     df = df[df["source_type"].isin(source_types)]
     allowed_pairs: set[int] | None = None
+    # The pocket-level assignment itself lives in prolit so the stapled corpus
+    # builder lands on the same one; verified identical (1670 pockets, 83 val)
+    # against the manifest this corpus was published from.
+    split = crossdocked_pocket_split(
+        manifest_path, source_types, val_frac, seed, casf_pdbs, exclude_pockets
+    )
     if near_native_only:
         # CrossDocked ships DOCKED poses, and most of them are decoys: of the
         # 1,565,002 fold0-train rows only 19.4% are label==1, and the rest sit a
@@ -152,28 +158,14 @@ def _build_pocket_plans(  # noqa: PLR0913, C901
             len(allowed_pairs),
             len(df),
         )
-    if casf_pdbs:
-        pdb = df["receptor_pdb"].str.extract(r"^([0-9a-zA-Z]{4})_")[0].str.lower()
-        n_before = len(df)
-        df = df[~pdb.isin(casf_pdbs)]
-        logger.info("CASF-excluded %d CrossDocked pairs", n_before - len(df))
-    pair_to_pocket = dict(zip(df["pair_idx"], df["complex_dir"], strict=False))
-    train_pockets = sorted(
-        df[df["cdonly_fold0"] == "train"]["complex_dir"].dropna().unique()
-    )
-    if exclude_pockets:
-        n_before = len(train_pockets)
-        train_pockets = [p for p in train_pockets if p not in exclude_pockets]
-        logger.info(
-            "Pocket-excluded %d of %d train pockets (generation benchmark)",
-            n_before - len(train_pockets),
-            n_before,
-        )
+    pair_to_pocket = split.pair_to_pocket
+    pocket_split = split.pocket_split
+    n_val = sum(v == "val" for v in pocket_split.values())
+    # Drawn again for the per-pocket cap below. The split's own permutation is
+    # taken inside ``crossdocked_pocket_split`` from a generator seeded the same
+    # way, so the assignment is unchanged; only the cap's draw moved, and this
+    # corpus was built with a cap (100000) no pocket reaches.
     rng = np.random.default_rng(seed)
-    perm = rng.permutation(len(train_pockets))
-    n_val = int(len(train_pockets) * val_frac)
-    val_pockets = {train_pockets[i] for i in perm[:n_val]}
-    pocket_split = {p: ("val" if p in val_pockets else "train") for p in train_pockets}
 
     by_pocket: dict[str, list[tuple[int, int]]] = defaultdict(list)
     for shard_idx, _count in enumerate(shard_counts):
@@ -203,7 +195,7 @@ def _build_pocket_plans(  # noqa: PLR0913, C901
     val_plan = sorted((si, sorted(lis)) for si, lis in val_by_shard.items())
     logger.info(
         "Pocket split: %d train / %d val pockets (cap %d/pocket)",
-        len(train_pockets) - n_val,
+        len(pocket_split) - n_val,
         n_val,
         max_per_pocket,
     )

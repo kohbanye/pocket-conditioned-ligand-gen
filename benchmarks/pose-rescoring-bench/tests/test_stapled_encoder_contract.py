@@ -38,3 +38,14 @@ def test_both_encoders_expose_the_same_per_pose_call() -> None:
         params = list(inspect.signature(cls.ligand_seq).parameters)
         assert len(params) == 4, f"{cls.__name__}.ligand_seq takes {params}"
         assert params[0] == "self"
+
+
+def test_only_the_stapled_arm_declares_itself_frame_invariant() -> None:
+    """The flag that turns frame averaging off must not reach the ProLIT arm.
+
+    ``e250_div`` is published at ``--n-frames 16``; if ``PoseEncoder`` ever grew
+    ``frame_invariant``, that averaging would silently switch off and the arm's
+    numbers would move without anything in the recipe changing.
+    """
+    assert getattr(PoseEncoder, "frame_invariant", False) is False
+    assert StapledPoseEncoder.frame_invariant is True
