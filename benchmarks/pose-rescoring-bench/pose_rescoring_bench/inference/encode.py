@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from prolit.model.vqvae_module import AtomVQVAEModule
 
     from pose_rescoring_bench.config import PathsConfig
-    from pose_rescoring_bench.variants import AffinityCkpts, RescoringCkpts
+    from pose_rescoring_bench.variants import RescoringCkpts
 
 
 def load_vqvae(
@@ -84,7 +84,7 @@ def load_separate_vqvae(  # noqa: PLR0913
 
 
 def load_tokenizer(
-    ckpts: RescoringCkpts | AffinityCkpts,
+    ckpts: RescoringCkpts,
     paths: PathsConfig,
     device: torch.device,
 ) -> tuple[object, np.ndarray, np.ndarray]:

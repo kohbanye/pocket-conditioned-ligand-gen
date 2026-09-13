@@ -25,15 +25,8 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("results") / "figures")
     args = parser.parse_args()
 
-    # comparison figures (ours vs existing methods)
-    aff, _ = report.affinity_comparison(args.results)
-    if not aff.empty:
-        plotting.bar_comparison(
-            aff,
-            "scoring_R",
-            args.out / "affinity_scoring_R.png",
-            ascending=True,
-        )
+    # comparison figures (ours vs existing methods). Affinity is not here: it
+    # moved to benchmarks/affinity-bench with its own registry and figures.
     pose, _ = report.rescoring_comparison(args.results)
     if not pose.empty:
         plotting.bar_comparison(
@@ -52,13 +45,6 @@ def main() -> None:
         )
 
     # ablation figures (joint vs single-modality) — populated once variants exist
-    abl_aff, _ = report.affinity_ablation(args.results)
-    if len(abl_aff) > 1:
-        plotting.ablation_bars(
-            abl_aff,
-            ["scoring_R", "ranking_rho"],
-            args.out / "ablation_affinity.png",
-        )
     abl_pose, _ = report.rescoring_ablation(args.results)
     if len(abl_pose) > 1:
         plotting.ablation_bars(

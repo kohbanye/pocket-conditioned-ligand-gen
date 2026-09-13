@@ -2,7 +2,12 @@
 
 Every function is *method-agnostic*: it takes a ``dict[method_name -> frame]`` so
 the exact same code produces the existing-method comparison (ours vs
-GenScore/Vina/...) and the tokenizer ablation (joint_nocasf vs separate).
+RTMScore/GenScore/Vina/...) and the tokenizer ablation (joint_nocasf vs separate).
+
+Affinity lived here too until it became its own benchmark. It shares an
+architecture with pose rescoring and nothing else -- not a corpus, not a label,
+not a backbone -- and one registry describing two models under one name is the
+drift ``prolit_bench.variants`` exists to prevent. See ``benchmarks/affinity-bench``.
 Significance is always computed against a chosen reference method and
 Holm-corrected across the set of pairwise comparisons.
 """
@@ -12,79 +17,7 @@ from __future__ import annotations
 import pandas as pd
 from prolit_bench import stats
 
-from pose_rescoring_bench.metrics import affinity as A
 from pose_rescoring_bench.metrics import rescoring as R
-
-# ----------------------------------------------------------------------------
-# Affinity (CASF scoring & ranking power)
-# ----------------------------------------------------------------------------
-
-
-def affinity_metrics(
-    preds: dict[str, pd.DataFrame],
-    pred_col: str = A.PRED,
-) -> pd.DataFrame:
-    """Scoring R and ranking rho per method (rows = methods)."""
-    rows = [
-        {
-            "method": name,
-            "scoring_R": A.scoring_r(df, pred_col),
-            "ranking_rho": A.ranking_rho(df, pred_col),
-            "n": int(df.dropna(subset=["logka", pred_col]).shape[0]),
-        }
-        for name, df in preds.items()
-    ]
-    return pd.DataFrame(rows).set_index("method")
-
-
-def affinity_pairwise(
-    preds: dict[str, pd.DataFrame],
-    reference: str,
-    pred_col: str = A.PRED,
-) -> pd.DataFrame:
-    """Significance of each method vs ``reference`` (Steiger + Wilcoxon)."""
-    ref = preds[reference].dropna(subset=["logka", pred_col]).set_index("pdbid")
-    ref_clusters = A.cluster_rho(preds[reference], pred_col).set_index("cluster")["rho"]
-    rows, scoring_p, ranking_p = [], [], []
-    others = [m for m in preds if m != reference]
-    for name in others:
-        cur = preds[name].dropna(subset=["logka", pred_col]).set_index("pdbid")
-        shared = ref.index.intersection(cur.index)
-        sr = stats.compare_scoring_r(
-            ref.loc[shared, "logka"].to_numpy(),
-            cur.loc[shared, pred_col].to_numpy(),
-            ref.loc[shared, pred_col].to_numpy(),
-        )
-        cur_clusters = A.cluster_rho(preds[name], pred_col).set_index("cluster")["rho"]
-        common = ref_clusters.index.intersection(cur_clusters.index)
-        rr = stats.wilcoxon_paired(
-            cur_clusters.loc[common].to_numpy(),
-            ref_clusters.loc[common].to_numpy(),
-        )
-        rows.append(name)
-        scoring_p.append(sr.pvalue)
-        ranking_p.append(rr.pvalue)
-    return pd.DataFrame(
-        {
-            "vs_reference": reference,
-            "d_scoring_R": [
-                A.scoring_r(preds[m], pred_col)
-                - A.scoring_r(preds[reference], pred_col)
-                for m in others
-            ],
-            "scoring_p": scoring_p,
-            "scoring_p_holm": stats.holm_correction(scoring_p),
-            "d_ranking_rho": [
-                A.ranking_rho(preds[m], pred_col)
-                - A.ranking_rho(preds[reference], pred_col)
-                for m in others
-            ],
-            "ranking_p": ranking_p,
-            "ranking_p_holm": stats.holm_correction(ranking_p),
-        },
-        index=pd.Index(others, name="method"),
-    )
-
 
 # ----------------------------------------------------------------------------
 # Pose rescoring (CASF docking power)

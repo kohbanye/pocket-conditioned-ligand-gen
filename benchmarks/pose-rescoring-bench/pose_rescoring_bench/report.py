@@ -2,8 +2,6 @@
 
 Directory layout (``results/<task>/<method_or_variant>/...``)::
 
-    affinity/<variant>/*.csv        one CSV per ensemble head (logka,cluster,head)
-    affinity/{genscore,vina,boltz2}/scoring.csv
     rescoring/<variant>/*.csv       per-pose head dumps (pdbid,pose,rmsd,head,pll)
     rescoring/{rtmscore,genscore}/pose_scores.csv   (pdbid,pose,native_score)
     rescoring/vina/pose_scores.csv                  (pdbid,pose,rmsd,head)
@@ -27,7 +25,6 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from pose_rescoring_bench import aggregate
-from pose_rescoring_bench.metrics import affinity as A
 from pose_rescoring_bench.metrics import rescoring as R
 
 if TYPE_CHECKING:
@@ -35,62 +32,6 @@ if TYPE_CHECKING:
 from pose_rescoring_bench.variants import ABLATION_ORDER
 
 Report = tuple[pd.DataFrame, pd.DataFrame]  # (metrics, significance)
-
-
-# ---------------------------------------------------------------- affinity ---
-def _affinity_variant_pred(variant_dir: Path) -> pd.DataFrame | None:
-    """Fixed z-sum ensemble of all head CSVs in a variant dir (pred col ``head``)."""
-    members = sorted(variant_dir.glob("*.csv"))
-    if not members:
-        return None
-    frames = [pd.read_csv(m) for m in members]
-    return A.zsum_ensemble(frames)
-
-
-def _affinity_baseline(path: Path, col: str) -> pd.DataFrame:
-    return pd.read_csv(path).rename(columns={col: "head"})
-
-
-def affinity_methods(results_dir: Path) -> dict[str, pd.DataFrame]:
-    """Load ours (joint ensemble) + baseline affinity predictions keyed by method."""
-    root = results_dir / "affinity"
-    methods: dict[str, pd.DataFrame] = {}
-    joint = _affinity_variant_pred(root / "joint")
-    if joint is not None:
-        methods["OURS (joint)"] = joint
-    for name, sub, col in (
-        ("GenScore", "genscore", "score"),
-        ("Boltz-2", "boltz2", "score"),
-        ("Vina", "vina", "vina_score"),
-    ):
-        p = root / sub / "scoring.csv"
-        if p.exists():
-            methods[name] = _affinity_baseline(p, col)
-    return methods
-
-
-def affinity_comparison(results_dir: Path) -> Report:
-    methods = affinity_methods(results_dir)
-    metrics = aggregate.affinity_metrics(methods)
-    ref = "GenScore" if "GenScore" in methods else next(iter(methods))
-    sig = aggregate.affinity_pairwise(methods, reference=ref)
-    return metrics, sig
-
-
-def affinity_ablation(results_dir: Path) -> Report:
-    root = results_dir / "affinity"
-    variants = {}
-    for name in ABLATION_ORDER:
-        pred = _affinity_variant_pred(root / name)
-        if pred is not None:
-            variants[name] = pred
-    metrics = aggregate.affinity_metrics(variants)
-    sig = (
-        aggregate.affinity_pairwise(variants, reference="joint_nocasf")
-        if "joint_nocasf" in variants and len(variants) > 1
-        else _empty_sig()
-    )
-    return metrics, sig
 
 
 # --------------------------------------------------------------- rescoring ---

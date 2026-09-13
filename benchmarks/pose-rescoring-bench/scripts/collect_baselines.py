@@ -15,7 +15,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from pose_rescoring_bench.baselines import casf_affinity, casf_pose, sbdd_gen
+from pose_rescoring_bench.baselines import casf_pose, sbdd_gen
 from pose_rescoring_bench.config import PathsConfig
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -27,14 +27,6 @@ def main() -> None:
     parser.add_argument("--results", type=Path, default=Path("results"))
     args = parser.parse_args()
     paths = PathsConfig(results_dir=args.results)
-
-    # affinity baselines
-    aff = args.results / "affinity"
-    _write(
-        casf_affinity.collect_genscore(paths.baselines_repo),
-        aff / "genscore" / "scoring.csv",
-    )
-    _write(casf_affinity.collect_vina(paths.source_repo), aff / "vina" / "scoring.csv")
 
     # pose baselines (per-pose native_score; rmsd joined at eval time)
     res = args.results / "rescoring"

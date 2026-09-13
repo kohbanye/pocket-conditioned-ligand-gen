@@ -27,7 +27,6 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 _TASKS = {
-    "affinity": (report.affinity_comparison, report.affinity_ablation),
     "rescoring": (report.rescoring_comparison, report.rescoring_ablation),
     "generation": (report.generation_comparison, report.generation_ablation),
 }

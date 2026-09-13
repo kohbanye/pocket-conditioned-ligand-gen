@@ -101,15 +101,6 @@ class RescoringConfig:
 
 
 @dataclass
-class AffinityConfig:
-    """CASF affinity inference settings."""
-
-    label_cap: float = 13.0
-    max_residues: int = 50
-    max_targets: int | None = None
-
-
-@dataclass
 class EvalConfig:
     """Top-level configuration for one evaluation run."""
 
@@ -117,4 +108,3 @@ class EvalConfig:
     codebook_size: int = 8192
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     rescoring: RescoringConfig = field(default_factory=RescoringConfig)
-    affinity: AffinityConfig = field(default_factory=AffinityConfig)

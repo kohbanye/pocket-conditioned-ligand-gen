@@ -96,7 +96,9 @@ def test_pose_rescoring_bench_arm_codebook_size_matches_registry(name: str) -> N
     )
     variant = rescoring_variants.get(name)
     ours = variants.get(name)
-    for task in (variant.rescoring, variant.affinity):
+    # Affinity moved to benchmarks/affinity-bench; the same invariant is
+    # asserted there, over its own registry, in test_registry_contract.py.
+    for task in (variant.rescoring,):
         if task is None:
             continue
         assert task.codebook_size == ours.combined_codebook_size, (

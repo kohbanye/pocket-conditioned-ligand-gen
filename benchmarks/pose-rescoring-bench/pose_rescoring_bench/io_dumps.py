@@ -17,8 +17,6 @@ if TYPE_CHECKING:
 
 # CASF pose-rescoring per-pose dump (source: outputs/casf/pose_scores*.csv)
 POSE_COLUMNS = ("pdbid", "pose", "rmsd", "head", "pll")
-# CASF affinity per-complex dump (source: outputs/casf/affinity_*.csv)
-AFFINITY_COLUMNS = ("pdbid", "logka", "cluster", "pll", "head")
 # Generation per-molecule dump (subset of source tsweep_per_molecule.parquet)
 GENERATION_MOLECULE_KEYS = ("model", "target_id")
 
@@ -39,15 +37,6 @@ def read_pose_scores(path: Path, method: str | None = None) -> pd.DataFrame:
     return df
 
 
-def read_affinity(path: Path, method: str | None = None) -> pd.DataFrame:
-    """Load a per-complex affinity dump; optionally tag with a ``method`` column."""
-    df = pd.read_csv(path)
-    _require(df, ("pdbid", "logka"), path)
-    if method is not None:
-        df = df.assign(method=method)
-    return df
-
-
 def read_generation_molecules(path: Path) -> pd.DataFrame:
     """Load a per-molecule generation dump (parquet or csv)."""
     df = pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path)
@@ -62,10 +51,3 @@ def write_pose_scores(df: pd.DataFrame, path: Path) -> None:
     cols = [c for c in POSE_COLUMNS if c in df.columns]
     df.to_csv(path, columns=cols, index=False)
 
-
-def write_affinity(df: pd.DataFrame, path: Path) -> None:
-    """Write a per-complex affinity dump in the canonical column order."""
-    _require(df, ("pdbid", "logka"), path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cols = [c for c in AFFINITY_COLUMNS if c in df.columns]
-    df.to_csv(path, columns=cols, index=False)
