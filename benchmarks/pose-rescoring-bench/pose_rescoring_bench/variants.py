@@ -17,8 +17,12 @@ arm exactly -- the arm the paper describes.
 An 8192+8192 separate arm was registered here too, before the ablation was
 redone at matched total size. It is gone: its combined vocabulary was twice the
 joint arm's, so it varied the token budget as well as the tokenizer, and the
-paper reports the matched one. Its affinity head (``aff_head_sep``) had no
-matched counterpart, so the separate arm now covers pose and generation only.
+paper reports the matched one.
+
+Affinity is not here: it moved to ``benchmarks/affinity-bench`` with its own
+registry. It shares an architecture with pose rescoring and nothing else -- a
+different corpus, a different label, and a different MLM backbone -- so one
+registry naming both described two models under one name.
 Checkpoint strings are stated relative to the source repo and resolved with
 ``PathsConfig.ckpt`` (heads may be run-names, resolved by
 :func:`pose_rescoring_bench.inference.encode.resolve_rescore_ckpt`).
@@ -31,7 +35,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class HeadSpec:
-    """One rescoring/affinity head: a checkpoint and the label its dump is named.
+    """One rescoring head: a checkpoint and the label its dump is named.
 
     ``ckpt`` is either an exact path ending in ``.ckpt`` or a run-name (e.g.
     ``pose_head_sep``) resolved to the lowest-val-loss checkpoint of that run by
@@ -40,6 +44,28 @@ class HeadSpec:
 
     ckpt: str
     label: str = ""
+
+
+@dataclass(frozen=True)
+class StapledSpec:
+    """Where the ESM3 x ConfSeq baseline keeps the pieces it is not trained on.
+
+    This arm has no VQ-VAE, so ``RescoringCkpts.vqvae`` is ``None`` and these
+    three paths stand in its place: a cache of ESM3 structure tokens keyed by
+    CASF target id (built by ``pipelines/corpora/esm3_structure_tokens.py``
+    under an interpreter that has ``esm``), the ConfSeq checkout that turns a
+    molecule into its token string, and the frozen ConfSeq vocabulary.
+
+    The vocabulary is pinned rather than rebuilt. It is a constant 445 tokens
+    by construction, but a *rebuilt* one could still renumber the stream --
+    which would train, converge, and mean nothing against a model fitted to the
+    first numbering. Paths are stated relative to the source repo, like
+    ``RescoringCkpts``'s checkpoints.
+    """
+
+    esm3_cache: str
+    confseq_repo: str
+    confseq_vocab: str
 
 
 @dataclass(frozen=True)
@@ -63,6 +89,12 @@ class GenerationCkpts:
     ligand_vqvae: str | None = None
     protein_norm: str | None = None
     ligand_norm: str | None = None
+    stapled: StapledSpec | None = None
+
+    @property
+    def is_stapled(self) -> bool:
+        """True for the ESM3 x ConfSeq baseline, which has no VQ-VAE at all."""
+        return self.stapled is not None
 
     @property
     def is_separate(self) -> bool:
@@ -88,33 +120,17 @@ class RescoringCkpts:
     ligand_vqvae: str | None = None
     protein_norm: str | None = None
     ligand_norm: str | None = None
+    stapled: StapledSpec | None = None
 
     @property
     def is_separate(self) -> bool:
         """True for the separate-tokenizer arm (protein + ligand VQ-VAEs)."""
         return self.protein_vqvae is not None
 
-
-@dataclass(frozen=True)
-class AffinityCkpts:
-    """Checkpoints for the affinity pipeline of one variant (ensemble of heads).
-
-    Shares the joint/separate tokenizer convention of :class:`RescoringCkpts`.
-    """
-
-    vqvae: str | None
-    mlm: str | None
-    heads: tuple[HeadSpec, ...] = ()
-    codebook_size: int = 8192
-    protein_vqvae: str | None = None
-    ligand_vqvae: str | None = None
-    protein_norm: str | None = None
-    ligand_norm: str | None = None
-
     @property
-    def is_separate(self) -> bool:
-        """True for the separate-tokenizer arm (protein + ligand VQ-VAEs)."""
-        return self.protein_vqvae is not None
+    def is_stapled(self) -> bool:
+        """True for the ESM3 x ConfSeq baseline, which has no VQ-VAE at all."""
+        return self.stapled is not None
 
 
 @dataclass(frozen=True)
@@ -125,12 +141,11 @@ class Variant:
     description: str
     generation: GenerationCkpts | None = None
     rescoring: RescoringCkpts | None = None
-    affinity: AffinityCkpts | None = None
 
     @property
     def trained(self) -> bool:
         """True once at least one task pipeline has real (non-None) checkpoints."""
-        for task in (self.generation, self.rescoring, self.affinity):
+        for task in (self.generation, self.rescoring):
             if task is None:
                 continue
             if getattr(task, "vqvae", None) is not None:
@@ -183,16 +198,6 @@ JOINT = Variant(
             ),
         ),
     ),
-    affinity=AffinityCkpts(
-        vqvae=_JOINT_VQVAE,
-        mlm="pocket-ligand-mlm/wxlhgqx3/checkpoints/mlm-e02-vl0.8199.ckpt",
-        heads=(
-            HeadSpec(
-                "pocket-ligand-rescore/tzqaubl4/checkpoints/rescore-e09-vl0.6196.ckpt",
-                "kdki-mean",
-            ),
-        ),
-    ),
 )
 
 JOINT_NOCASF = Variant(
@@ -207,12 +212,6 @@ JOINT_NOCASF = Variant(
         vqvae=_JOINT_VQVAE,
         mlm=_NOCASF_MLM,
         heads=(HeadSpec("pose_head_jointnocasf", "v2"),),
-        codebook_size=8192,
-    ),
-    affinity=AffinityCkpts(
-        vqvae=_JOINT_VQVAE,
-        mlm=_NOCASF_MLM,
-        heads=(HeadSpec("aff_head_jointnocasf", "kdki"),),
         codebook_size=8192,
     ),
 )
@@ -264,7 +263,6 @@ E250_MEAN = Variant(
         heads=(HeadSpec("head_mean_e250lig3", "mean"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 #: The two arms the 2026-08-19 loop selected, both a SINGLE mean-pooled head --
@@ -304,7 +302,6 @@ E250_LISTWISE = Variant(
         heads=(HeadSpec("head_e10_lw1.0_s7", "listwise"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -343,7 +340,6 @@ E250_FIT = Variant(
         heads=(HeadSpec("head_fitB", "fit"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -382,7 +378,6 @@ E250_DIV = Variant(
         heads=(HeadSpec("head_div", "div"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -403,7 +398,6 @@ E250_DIV_S8 = Variant(
         vqvae=_E250_VQ, mlm=_E250_MLM,
         heads=(HeadSpec("head_div_s8", "div_s8"),), codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 #: :data:`E250_DIV` from a third seed; see :data:`E250_DIV_S8`.
@@ -415,7 +409,6 @@ E250_DIV_S9 = Variant(
         vqvae=_E250_VQ, mlm=_E250_MLM,
         heads=(HeadSpec("head_div_s9", "div_s9"),), codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 E250_LISTWISE_BIG = Variant(
@@ -430,9 +423,6 @@ E250_LISTWISE_BIG = Variant(
         mlm=_E250_MLM,
         heads=(HeadSpec("head_big_lw1.0_s7", "listwise_big"),),
         codebook_size=8192,
-    ),
-    affinity=AffinityCkpts(
-        vqvae=_E250_VQ_BIG, mlm=_E250_MLM, heads=(), codebook_size=8192
     ),
 )
 
@@ -465,7 +455,6 @@ E250_LISTWISE_TORSION = Variant(
         heads=(HeadSpec("head_ntor_s7", "torsion"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -500,9 +489,6 @@ E250_LISTWISE_MLM2 = Variant(
         heads=(HeadSpec("head_mlm2_s7", "mlm2"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(
-        vqvae=_E250_VQ, mlm=_E250_MLM_LONG, heads=(), codebook_size=8192
-    ),
 )
 
 
@@ -532,7 +518,6 @@ E250_LISTWISE_TOPK = Variant(
         heads=(HeadSpec("head_topk5", "topk5"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -561,7 +546,6 @@ E250_LISTWISE_ADD = Variant(
         heads=(HeadSpec("head_add1.0", "add"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -595,7 +579,6 @@ E250_LISTWISE_LABEL = Variant(
         heads=(HeadSpec("head_lab_k5_w1.0", "label"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -622,7 +605,6 @@ E250_LISTWISE_LABEL3 = Variant(
         heads=(HeadSpec("head_lab2_k3_w1.0", "label3"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -645,7 +627,6 @@ E250_LISTWISE_SHARP = Variant(
         heads=(HeadSpec("head_st0.15", "sharp"),),
         codebook_size=8192,
     ),
-    affinity=AffinityCkpts(vqvae=_E250_VQ, mlm=_E250_MLM, heads=(), codebook_size=8192),
 )
 
 
@@ -674,6 +655,49 @@ E250_GEN = Variant(
 )
 
 
+#: The stapled baseline: ESM3 structure tokens for the pocket, ConfSeq for the
+#: ligand, four quantized placement tokens between them. No VQ-VAE, so no
+#: normalization statistics and no shared frame.
+#:
+#: Everything downstream of the tokenizer is matched to :data:`E250_DIV`, which
+#: is the arm this is meant to isolate the tokenizer against: the same MLM
+#: architecture and schedule, the same decoy corpus recipe (same sites, same
+#: decoy generator, same seed), the same head, and the same listwise objective
+#: with the same hyperparameters. The two things that are NOT matched are
+#: consequences of the tokenizer rather than choices, and both are reported
+#: with the numbers: the vocabulary (12740 against 8199) and how much corpus
+#: each arm's tokenizer could actually encode.
+STAPLED = Variant(
+    name="stapled",
+    description=(
+        "ESM3 structure tokens x ConfSeq + a 4-token quantized pose, with "
+        "E250_DIV's MLM and listwise head recipe on top."
+    ),
+    generation=GenerationCkpts(
+        vqvae=None,
+        lm="pocket-ligand-lm/clm_stapled_fullft/checkpoints/lm-e00-vl2.1141.ckpt",
+        refiner=None,
+        codebook_size=12733,
+        stapled=StapledSpec(
+            esm3_cache="data/esm3_tokens_sbdd_targets",
+            confseq_repo="third_party/ConfSeq",
+            confseq_vocab="data/stapled/confseq_vocab.json",
+        ),
+    ),
+    rescoring=RescoringCkpts(
+        vqvae=None,
+        mlm="pocket-ligand-mlm/mlm_stapled/checkpoints/mlm-e02-vl0.7394.ckpt",
+        heads=(HeadSpec("head_stapled", "div"),),
+        codebook_size=12733,
+        stapled=StapledSpec(
+            esm3_cache="data/esm3_tokens_casf2016",
+            confseq_repo="third_party/ConfSeq",
+            confseq_vocab="data/stapled/confseq_vocab.json",
+        ),
+    ),
+)
+
+
 REGISTRY: dict[str, Variant] = {
     v.name: v
     for v in (
@@ -695,6 +719,7 @@ REGISTRY: dict[str, Variant] = {
         E250_DIV_S8,
         E250_DIV_S9,
         E250_GEN,
+        STAPLED,
     )
 }
 
