@@ -9,6 +9,7 @@ resolution-markers = [
 [manifest]
 members = [
     "pocket-conditioned-ligand-gen",
+    "prolit-affinity-bench",
     "prolit-bench-common",
     "prolit-pose-rescoring-bench",
     "prolit-sbdd-bench",
@@ -1671,6 +1672,49 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/26/ae/6d5ecf4e557d2d59c07f3019ab286642a65084dadb35086263ef14bef42e/prolif-2.2.1.tar.gz", hash = "sha256:06d7fa6bc443cece04c19db17685b61d34b569e5081ce88a2472437b7fcaafd9", size = 10179785, upload-time = "2026-07-27T21:20:19.087Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7e/ed/2386bfc0033bcf7ddb741e02f2f107b028b326c940296dd1e93c88fc5db3/prolif-2.2.1-py3-none-any.whl", hash = "sha256:f7239aceb11949cb4a4b4d2c32f1f7c9b46792cc65eedc69bc44cb3c492bd806", size = 10199637, upload-time = "2026-07-27T21:20:16.869Z" },
+]
+
+[[package]]
+name = "prolit-affinity-bench"
+version = "0.1.0"
+source = { editable = "benchmarks/affinity-bench" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "pocket-conditioned-ligand-gen" },
+    { name = "prolit-bench-common" },
+    { name = "pytest" },
+    { name = "rdkit" },
+    { name = "scipy" },
+    { name = "torch" },
+    { name = "tqdm" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "matplotlib", specifier = ">=3.10.7" },
+    { name = "numpy", specifier = ">=2.3.5" },
+    { name = "pandas", specifier = ">=2.3.3" },
+    { name = "pocket-conditioned-ligand-gen", editable = "." },
+    { name = "prolit-bench-common", editable = "benchmarks/common" },
+    { name = "pytest", specifier = ">=9.0.1" },
+    { name = "rdkit" },
+    { name = "scipy", specifier = ">=1.14" },
+    { name = "torch", specifier = ">=2.9.1" },
+    { name = "tqdm", specifier = ">=4.67.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "ruff", specifier = ">=0.14.6" },
+    { name = "ty", specifier = ">=0.0.1a28" },
 ]
 
 [[package]]
