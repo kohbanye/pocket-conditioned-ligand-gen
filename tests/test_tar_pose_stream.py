@@ -15,11 +15,14 @@ from __future__ import annotations
 import gzip
 import io
 import tarfile
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from prolit.data.atom_tar_prep import iter_tar_poses
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _SDF = """mol
      RDKit          3D
@@ -76,7 +79,12 @@ def _rows() -> list[dict]:
         {**base, "pair_idx": 2, "ligand_sdf_gz": "b_min.sdf.gz"},
         # Filtered out three different ways, one per row.
         {**base, "pair_idx": 9, "ligand_sdf_gz": "c_docked.sdf.gz"},
-        {**base, "pair_idx": 4, "source_type": "other", "ligand_sdf_gz": "d_min.sdf.gz"},
+        {
+            **base,
+            "pair_idx": 4,
+            "source_type": "other",
+            "ligand_sdf_gz": "d_min.sdf.gz",
+        },
         {**base, "pair_idx": 5, "label": 0, "ligand_sdf_gz": "e_min.sdf.gz"},
     ]
 

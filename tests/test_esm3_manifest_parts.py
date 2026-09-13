@@ -46,7 +46,11 @@ def _write_dir(tmp_path: Path, files: int, per_file: int) -> Path:
 
 
 @pytest.mark.parametrize("n_parts", [1, 2, 3, 4, 8])
-def test_single_file_parts_cover_every_record_once(load, tmp_path: Path, n_parts: int) -> None:  # noqa: ANN001
+def test_single_file_parts_cover_every_record_once(
+    load,  # noqa: ANN001
+    tmp_path: Path,
+    n_parts: int,
+) -> None:
     p = _write_file(tmp_path, 101)
     seen = [r["id"] for k in range(n_parts) for r in load(p, k, n_parts)]
     assert len(seen) == len(set(seen)) == 101
@@ -66,10 +70,11 @@ def test_directory_still_splits_by_file(load, tmp_path: Path) -> None:  # noqa: 
 
 
 def _pdb() -> str:
+    # Fixed-format records: the columns ARE the format, so these cannot be wrapped.
     return (
-        "ATOM      1  N   ALA A   1      11.104   6.134  -6.504  1.00  0.00           N\n"
-        "ATOM      2  CA  ALA A   1      11.639   6.071  -5.147  1.00  0.00           C\n"
-        "ATOM      3  C   ALA A   1      12.313   4.741  -4.886  1.00  0.00           C\n"
+        "ATOM      1  N   ALA A   1      11.104   6.134  -6.504  1.00  0.00           N\n"  # noqa: E501
+        "ATOM      2  CA  ALA A   1      11.639   6.071  -5.147  1.00  0.00           C\n"  # noqa: E501
+        "ATOM      3  C   ALA A   1      12.313   4.741  -4.886  1.00  0.00           C\n"  # noqa: E501
     )
 
 
@@ -88,7 +93,8 @@ def test_reads_from_a_zip_member(read_text, tmp_path: Path) -> None:  # noqa: AN
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("7abc__1__A/receptor.pdb", _pdb())
     cache: dict = {}
-    got = read_text({"id": "7abc", "zip": str(z), "member": "7abc__1__A/receptor.pdb"}, cache)
+    record = {"id": "7abc", "zip": str(z), "member": "7abc__1__A/receptor.pdb"}
+    got = read_text(record, cache)
     assert got == _pdb()
     assert len(cache) == 1, "the archive handle should be reused across records"
 
@@ -114,4 +120,5 @@ def test_a_missing_member_is_none_not_an_exception(read_text, tmp_path: Path) ->
     z = tmp_path / "08.zip"
     with zipfile.ZipFile(z, "w") as zf:
         zf.writestr("a/receptor.pdb", _pdb())
-    assert read_text({"id": "x", "zip": str(z), "member": "nope/receptor.pdb"}, {}) is None
+    record = {"id": "x", "zip": str(z), "member": "nope/receptor.pdb"}
+    assert read_text(record, {}) is None

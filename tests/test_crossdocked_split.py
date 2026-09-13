@@ -14,11 +14,14 @@ this was extracted; that check needs 2.5M rows and does not belong in CI.
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from prolit.data.holdout import crossdocked_pocket_split
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _ST = ["cdonly"]
 
@@ -32,18 +35,16 @@ def _manifest(tmp_path: Path, rows: list[dict]) -> Path:
 
 
 def _rows() -> list[dict]:
-    rows = []
-    for i in range(100):
-        rows.append(
-            {
-                "pair_idx": i,
-                "complex_dir": f"POCKET_{i // 5}",  # 5 pairs per pocket, 20 pockets
-                "receptor_pdb": f"{1000 + i}_A_rec.pdb",
-                "source_type": "cdonly",
-                "cdonly_fold0": "train" if i < 90 else "test",
-            }
-        )
-    return rows
+    return [
+        {
+            "pair_idx": i,
+            "complex_dir": f"POCKET_{i // 5}",  # 5 pairs per pocket, 20 pockets
+            "receptor_pdb": f"{1000 + i}_A_rec.pdb",
+            "source_type": "cdonly",
+            "cdonly_fold0": "train" if i < 90 else "test",
+        }
+        for i in range(100)
+    ]
 
 
 def test_val_fraction_is_taken_from_the_train_pockets(tmp_path: Path) -> None:

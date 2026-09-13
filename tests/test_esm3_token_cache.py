@@ -84,7 +84,9 @@ def test_shard_cache_is_bounded(tmp_path) -> None:  # noqa: ANN001
 
     for i in range(6):
         assert cache.residue_tokens(f"s{i}") is not None
-        assert len(cache._shards) <= 2, "cache grew past its bound"
+        # The bound is on an internal structure: the public API cannot tell a
+        # bounded cache from an unbounded one.
+        assert len(cache._shards) <= 2, "cache grew past its bound"  # noqa: SLF001
 
     # Bounded, but still correct: an evicted shard is re-read, not lost.
     assert cache.residue_tokens("s0") == {("A", 1): 10, ("A", 2): 20}
@@ -96,4 +98,4 @@ def test_default_bound_keeps_a_small_cache_whole(tmp_path) -> None:  # noqa: ANN
     cache = _cache(tmp_path, shards)
     for i in range(16):
         cache.residue_tokens(f"s{i}")
-    assert len(cache._shards) == 16
+    assert len(cache._shards) == 16  # noqa: SLF001
