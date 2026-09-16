@@ -138,6 +138,10 @@ celerybeat.pid
 .env
 .envrc
 .venv
+# Per-baseline scoring environments (scripts/setup_*_env.sh build these inside
+# benchmarks/affinity-bench). `.venv` alone does not match `.venv-sfcnn`, and a
+# conda env is thousands of files.
+.venv-*
 env/
 venv/
 ENV/

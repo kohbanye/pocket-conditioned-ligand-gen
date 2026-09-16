@@ -53,6 +53,7 @@ from prolit.tokenizers.ligand import (
     _atom_features_from_mol,
     _build_rdkit_mol,
     _knn_offsets_and_elements,
+    validated_heavy_mol,
 )
 
 if TYPE_CHECKING:
@@ -188,13 +189,15 @@ class LigandAtomDescriptor:
     def __init__(self, atom_order: str = "file") -> None:
         self.atom_order = atom_order
 
-    def compute(
+    def compute(  # noqa: PLR0913
         self,
         atoms: list[tuple[str, float, float, float]],
         bonds: list[tuple[int, int, int]],
         pocket_frame: tuple[np.ndarray, np.ndarray] | None = None,
         pocket_canonical: np.ndarray | None = None,
         pocket_elements: np.ndarray | None = None,
+        *,
+        chemistry: dict | None = None,
     ) -> tuple[np.ndarray, list[str], dict[str, Any]]:
         """Compute ``(N_heavy, 33)`` descriptors for the ligand's heavy atoms.
 
@@ -236,7 +239,11 @@ class LigandAtomDescriptor:
         elements_sym = [a[0] for a in heavy_atoms]
         canonical = (coords_global - centroid) @ rotation.T
 
-        mol = _build_rdkit_mol(heavy_atoms, heavy_bonds)
+        mol = (
+            _build_rdkit_mol(heavy_atoms, heavy_bonds)
+            if chemistry is None
+            else validated_heavy_mol(chemistry, atoms, bonds, heavy_indices)
+        )
         feats = _atom_features_from_mol(mol, n)
 
         descriptor = _assemble_atom_descriptor(

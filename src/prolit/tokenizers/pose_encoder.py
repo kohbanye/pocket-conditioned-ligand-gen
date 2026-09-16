@@ -113,7 +113,10 @@ class PoseEncoder:
     ) -> list[int] | None:
         """Token sequence for one pose, or None if it has no encodable atoms."""
         lig_desc, _elements, _mask = self.lig_desc.compute(
-            mol["atoms"], mol["bonds"], frame
+            mol["atoms"],
+            mol["bonds"],
+            frame,
+            **({"chemistry": mol["chemistry"]} if "chemistry" in mol else {}),
         )
         if lig_desc.shape[0] == 0:
             return None
@@ -146,9 +149,7 @@ class PoseEncoder:
         x, mask = collate_molecules(tensors)
         idx = self._encode_batch(x, mask)
         for k, (i, _) in enumerate(valid):
-            out[i] = self.vocab.build_sequence(
-                protein_codes, idx[k][mask[k]].tolist()
-            )
+            out[i] = self.vocab.build_sequence(protein_codes, idx[k][mask[k]].tolist())
         return out
 
     def ligand_descs(self, mols: list[dict], frame: Any) -> list[np.ndarray]:  # noqa: ANN401
@@ -158,7 +159,15 @@ class PoseEncoder:
         features per orientation; see
         :func:`~prolit.tokenizers.atom.rotate_atom_descriptor`.
         """
-        return [self.lig_desc.compute(m["atoms"], m["bonds"], frame)[0] for m in mols]
+        return [
+            self.lig_desc.compute(
+                m["atoms"],
+                m["bonds"],
+                frame,
+                **({"chemistry": m["chemistry"]} if "chemistry" in m else {}),
+            )[0]
+            for m in mols
+        ]
 
     def seqs_from_descs(
         self,
