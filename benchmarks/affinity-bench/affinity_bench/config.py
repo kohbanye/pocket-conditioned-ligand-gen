@@ -66,6 +66,13 @@ class AffinityConfig:
 
     n_frames: int = 1
     max_residues: int = 50
+    pocket_distance: str = "ca"
+    #: ``"validated"`` reads each ligand's chemistry from its crystal MOL2
+    #: rather than rebuilding it from the SDF, which is the only way the
+    #: descriptor's charge channel sees a formal charge at all. It defaults to
+    #: the arm's own setting, because a head trained on validated inputs and
+    #: scored on rebuilt ones is not the model that was trained.
+    chemistry: str = "legacy"
     max_targets: int | None = None
 
 

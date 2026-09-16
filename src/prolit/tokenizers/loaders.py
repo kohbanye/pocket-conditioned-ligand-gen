@@ -175,10 +175,13 @@ def load_pose_refiner(ckpt: str | Path, device: torch.device) -> Any:  # noqa: A
     )
 
 
-def load_scoring_head(
+def load_scoring_head(  # noqa: PLR0913
     ckpt: str | Path,
     codebook_size: int,
     device: torch.device,
+    readout: str = "ligand",
+    layer_mix: bool = False,  # noqa: FBT001, FBT002
+    lora_rank: int = 0,
 ) -> Any:  # noqa: ANN401
     """Load a scoring head -- the MLM encoder plus the MLP that reads it.
 
@@ -194,6 +197,15 @@ def load_scoring_head(
     has already produced a head whose submodules did not match its state_dict.
     ``codebook_size`` is applied on top, because it is a property of the
     tokenizer the head is being run against.
+
+    ``readout`` must be the pooling the checkpoint was TRAINED under. The
+    ``ligand``/``balanced``/``allatoms`` modes add no parameters, so a checkpoint
+    trained under one loads cleanly under another and then reads its own weights
+    through pooling they never saw -- silently, since no shape mismatch occurs.
+    ``concat`` is the exception: it widens the head's first layer, so loading it
+    under any other readout (or another checkpoint under it) fails on shape.
+    The caller states it because only the caller knows which arm the
+    checkpoint belongs to.
     """
     from prolit.config import ProLITMLMConfig, RescoreTrainingConfig  # noqa: PLC0415
     from prolit.model.rescore_module import ComplexRescoreModule  # noqa: PLC0415
@@ -212,7 +224,12 @@ def load_scoring_head(
         )
     return (
         ComplexRescoreModule.load_from_checkpoint(
-            str(ckpt), config=config, map_location=device
+            str(ckpt),
+            config=config,
+            readout=readout,
+            layer_mix=layer_mix,
+            lora_rank=lora_rank,
+            map_location=device,
         )
         .eval()
         .to(device)

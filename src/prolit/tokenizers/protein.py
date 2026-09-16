@@ -177,12 +177,30 @@ def extract_pocket_atoms_from_candidates(
     ligand_coords: np.ndarray,
     config: PocketExtractionConfig,
 ) -> PocketAtomData | None:
-    """Select pocket residues by CA distance and flatten their heavy atoms."""
+    """Select residues by the configured distance, then emit their heavy atoms."""
     if len(precomputed.ca_coords) == 0:
         return None
 
-    diff = precomputed.ca_coords[:, None, :] - ligand_coords[None, :, :]
-    min_dists = np.linalg.norm(diff, axis=2).min(axis=1)
+    metric = getattr(config, "pocket_distance", "ca")
+    if metric == "ca":
+        diff = precomputed.ca_coords[:, None, :] - ligand_coords[None, :, :]
+        min_dists = np.linalg.norm(diff, axis=2).min(axis=1)
+    elif metric == "heavy":
+        # Per-residue computation avoids allocating a whole receptor x ligand
+        # distance matrix. Candidate residues already contain heavy atoms only.
+        min_dists = np.array(
+            [
+                np.linalg.norm(
+                    np.asarray([a[2] for a in atoms])[:, None, :]
+                    - ligand_coords[None, :, :],
+                    axis=2,
+                ).min()
+                for atoms in precomputed.residue_atoms
+            ]
+        )
+    else:
+        msg = f"unknown pocket_distance {metric!r}; expected ca or heavy"
+        raise ValueError(msg)
 
     within = np.where(min_dists <= config.distance_cutoff)[0]
     if len(within) == 0:
@@ -201,14 +219,13 @@ def extract_pocket_atoms_from_candidates(
         # closest residues adjacent to the ligand makes that decay agree with
         # spatial proximity instead of fighting it.
         #
-        # The ordering key is the ligand-to-CA distance already used to SELECT
+        # The ordering key is the configured distance already used to SELECT
         # the pocket, so it introduces no information the pocket definition did
         # not already carry.
         selected = within[order][: config.max_residues][::-1].tolist()
     else:
         sort_keys = [
-            (precomputed.chain_ids[i], precomputed.residue_indices[i])
-            for i in selected
+            (precomputed.chain_ids[i], precomputed.residue_indices[i]) for i in selected
         ]
         final_order = sorted(range(len(selected)), key=lambda k: sort_keys[k])
         selected = selected[final_order].tolist()
@@ -294,5 +311,3 @@ def compute_canonical_frame(
         vt[2] *= -1
 
     return centroid, vt.astype(np.float64)
-
-

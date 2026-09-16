@@ -40,6 +40,9 @@ class ProLITMLMModule(L.LightningModule):
             input_ids=batch["input_ids"],
             attention_mask=batch["attention_mask"],
             labels=batch["labels"],
+            component_balanced_loss=getattr(
+                self.config, "component_balanced_loss", False
+            ),
         )
         return out.loss, out.logits
 
@@ -48,6 +51,14 @@ class ProLITMLMModule(L.LightningModule):
             n = count_parameters(self.model)
             self.print(f"Model parameters: {n / 1e6:.1f}M")
             self._logged_param_count: bool = True
+
+    def on_train_epoch_start(self) -> None:
+        # Validation retains its fixed mask schedule for comparable checkpoints.
+        # Lightning attaches `datamodule` to the trainer at fit time; not in the stub.
+        dm = self.trainer.datamodule  # ty: ignore[unresolved-attribute]
+        datasets = getattr(dm, "_datasets", {})
+        if "train" in datasets:
+            datasets["train"].set_epoch(self.current_epoch)
 
     def _masked_accuracy(self, logits: Tensor, labels: Tensor) -> Tensor | None:
         mask = labels != IGNORE_INDEX

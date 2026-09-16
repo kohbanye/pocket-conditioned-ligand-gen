@@ -76,6 +76,10 @@ class PocketExtractionConfig:
     #: ``asdict(pocket_config)``.
     pocket_context: bool = False
 
+    #: Residue selection distance: CA (legacy) or minimum heavy-atom distance.
+    #: Changing the crop changes both the token stream and canonical frame.
+    pocket_distance: str = "ca"
+
 
 def _default_atom_recon_weights() -> dict[str, float]:
     """Recon weights for the unified all-atom VQ-VAE (protein + ligand).
@@ -594,6 +598,9 @@ class MLMTrainingConfig:
     # When True, only ligand (``<l>..</l>``) tokens are masked -> the model learns
     # P(ligand | pocket) bidirectionally (a condition-only / rescoring-tuned MLM).
     ligand_only_masking: bool = False
+    # Opt-in affinity representation ablations; no encoder/head parameter changes.
+    component_balanced_loss: bool = False
+    ligand_block_masking: bool = False
 
     learning_rate: float = 4e-4
     min_lr_ratio: float = 0.1
@@ -687,6 +694,64 @@ class RescoreTrainingConfig:
     # constraint is symmetric either way, so the sign does not break training;
     # it decides which end of each group the capacity is spent on.
     listwise_higher_is_better: bool = False
+
+    # Weight of a loss term on the per-GROUP mean prediction (a group is one
+    # protein). 0 = off, which is every existing checkpoint.
+    #
+    # Measured on CASF-2016: the head's error is dominated by getting a target's
+    # overall level wrong, and it shrinks target-level differences by ~19%
+    # (slope of cluster-mean error against cluster-mean pK: ours -0.190,
+    # GenScore -0.193, GIGN -0.048, OnionNet-2 -0.014). Per-complex smooth-L1
+    # never penalises that directly: a group whose predictions are uniformly
+    # 1 log too low costs the same as scattered error of the same size. This
+    # term penalises the group's MEAN residual, which re-weights the objective
+    # toward the between-target component where the deficit sits.
+    group_mean_weight: float = 0.0
+
+    # Weight of a batch-wise Pearson term: loss = (1 - w) * smooth_l1 + w * (1 - PCC).
+    # 0 = off, which is every existing checkpoint.
+    #
+    # The two baselines that beat us on CASF scoring power both optimise the
+    # correlation directly -- OnionNet-2 with alpha * (1 - PCC) + (1 - alpha) *
+    # RMSE (alpha default 0.7), GenScore with a corrcoef term in its loss --
+    # while a pure per-complex regression never asks predictions to line up on a
+    # common scale across complexes. A correlation term is also scale-free, so
+    # unlike squared error it cannot be satisfied by shrinking toward the mean,
+    # which is the failure the CASF diagnosis measured (target-level spread 19%
+    # too small).
+    corr_weight: float = 0.0
+    #: Training-time knobs for the --layer-mix head. They do not change the
+    #: state_dict, so they live here (and land in the checkpoint as provenance)
+    #: rather than being init arguments like `layer_mix` itself.
+    #: `layer_mix_init_last` is the starting logit of the LAST state, the rest
+    #: starting at 0: 4.0 puts 0.81 of the mix on the last layer, so training
+    #: begins roughly where a last-layer head already is.
+    #: `layer_mix_lr_scale` multiplies the learning rate of those scalars only.
+    layer_mix_init_last: float = 0.0
+    layer_mix_lr_scale: float = 1.0
+    #: LoRA rank for the encoder's attention projections; 0 disables it.
+    #: Unlike the refuted full fine-tuning, the encoder's weights stay frozen
+    #: and only the rank-r pairs train. Changing this changes the state_dict,
+    #: so a checkpoint must be scored with the rank it was trained with.
+    lora_rank: int = 0
+    lora_alpha: float = 1.0
+    #: Knowledge distillation against a teacher's predictions on the TRAINING
+    #: documents (docs/notes/2026-09-15_prereg_distillation.md). The sidecar is
+    #: a float32 array aligned 1:1 with the document stream, so it is loaded
+    #: for train only -- val must stay the untouched checkpoint-selection
+    #: signal. The weight REWEIGHTS the objective rather than stacking on it,
+    #: matching how corr_weight already behaves.
+    distill_weight: float = 0.0
+    distill_path: str = ""
+
+    # How a group larger than ``max_per_group`` is handled once group batching
+    # is on. False (the legacy path) SUBSAMPLES it: one random slice per epoch,
+    # so the rest of that group's documents are never seen that epoch -- with
+    # real protein groups that dropped a union epoch to 46% of its documents.
+    # True PARTITIONS it into consecutive chunks that land in different batches,
+    # so an epoch sees every document exactly once and a batch still holds
+    # several ligands of the same protein.
+    group_batch_partition: bool = False
     complexes_per_batch: int = 8
     # Cap on docs drawn per group in one batch. Needed for the affinity corpus,
     # where a group is a protein and sizes range from 1 to ~700 ligands.
@@ -725,6 +790,8 @@ class RescoreTrainingConfig:
     mlm_aux_mask_prob: float = 0.15
 
     learning_rate: float = 1e-4  # low: the encoder is pretrained
+    #: Opt-in backbone LR multiplier; 1 keeps the legacy optimizer/schedule.
+    encoder_lr_scale: float = 1.0
     min_lr_ratio: float = 0.1
     weight_decay: float = 0.01
     adam_beta1: float = 0.9
@@ -744,6 +811,52 @@ class RescoreTrainingConfig:
     # ``cfg.seed`` and get this default. A field *without* a default would not
     # have been.
     seed: int = DEFAULT_SEED
+
+    # Rotation augmentation at the DATASET level, for a corpus built with
+    # ``--num-rotations R`` (R consecutive docs per complex, the same complex
+    # under R orientations; val is always 1 rotation).
+    #
+    # R > 1 here does NOT train on R times the documents. That is what
+    # ``e250_rot8`` did, and the encoder memorised 65k docs inside one epoch
+    # (train/loss 0.034 against val/loss 0.922, best checkpoint at epoch 0),
+    # costing 0.079 ranking rho. Here the index holds one entry per COMPLEX and
+    # each draw picks one of its R orientations, so an epoch is the same size as
+    # the 1-rotation corpus and only the orientation varies across epochs.
+    #
+    # The point is a measured train/test mismatch: the pocket-canonical frame
+    # makes tokens frame-dependent, training sees one fixed frame per complex,
+    # and inference averages 16-32 frames.
+    rotations_per_complex: int = 1
+
+    # Input masking during head fine-tuning, TRAIN split only (val stays the
+    # untouched checkpoint-selection signal, and inference never masks -- so an
+    # arm trained with this is scored by exactly the existing path and needs no
+    # registry field to keep the two in step).
+    #
+    # ``input_mask_prob`` of the selected side's codebook tokens are replaced by
+    # the encoder's ``<mask>`` id. Unlike every other input change tried here
+    # (heavy crop, validated chemistry) this one stays INSIDE the pretraining
+    # distribution: ``<mask>`` is the token the MLM saw at 15% of positions at
+    # every position type, which is why the rate defaults to that same 0.15.
+    #
+    # The motive is the measured memorisation -- a 105M encoder fine-tuned on
+    # ~15k complexes ends at train/loss 0.018 against val/loss 0.695. Masking
+    # ligand atoms also forces what the pocket rows carry into the ligand rows
+    # the readout pools, which is the only way to use the interface here without
+    # constructing contact pairs.
+    input_mask_prob: float = 0.0
+    #: Which side is maskable: "ligand" (the rows the default readout pools),
+    #: "pocket" (the side that carries the between-target scale, which is where
+    #: the deficit sits), or "both".
+    input_mask_side: str = "ligand"
+    #: What the readout does with a masked ligand position. "keep" leaves it in
+    #: ``ligand_mask``, so the pooled vector averages the state the encoder
+    #: INFERRED there from the pocket and the rest of the ligand -- the feature
+    #: the masking is meant to create. "drop" removes it, making this a plain
+    #: input dropout whose pooled statistic is identical in train and test.
+    #: "keep" is therefore the stronger hypothesis and the weaker protocol: at
+    #: inference nothing is masked, so the pooled mixture differs from training.
+    input_mask_pool: str = "keep"
 
 
 @dataclass

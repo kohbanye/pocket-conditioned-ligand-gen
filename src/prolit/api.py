@@ -72,6 +72,7 @@ from prolit.tokenizers.ligand import (
     parse_ligand_pdb_text,
     parse_sdf,
     parse_sdf_text,
+    validated_mol_from_mol2_text,
 )
 from prolit.tokenizers.lm_vocab import AtomLMVocab
 from prolit.tokenizers.loaders import (
@@ -135,6 +136,7 @@ __all__ = [
     "rotate_atom_descriptor",
     "target_bond_sums",
     "torsion_pocket_fit",
+    "validated_mol_from_mol2_text",
     "vdw_radii",
     "write_full_protein_pdb",
 ]

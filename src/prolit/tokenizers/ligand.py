@@ -150,10 +150,12 @@ def parse_sdf_text(text: str) -> list[dict]:  # noqa: C901
     return molecules
 
 
-def parse_ligand_pdb_text(
+def parse_ligand_pdb_text(  # noqa: C901
     text: str,
     template_smiles: str | None = None,
     max_template_atoms: int = 70,
+    *,
+    preserve_chemistry: bool = False,
 ) -> dict | None:
     """Parse a ligand PDB block (e.g. BioLIP ``ligand/*.pdb``) into a mol dict.
 
@@ -167,6 +169,10 @@ def parse_ligand_pdb_text(
     Returns the same ``{"atoms": [(elem, x, y, z)], "bonds": [(i, j, type)]}``
     shape as :func:`parse_sdf_text` (0-indexed, atom order preserved), or
     ``None`` on parse failure.
+
+    ``preserve_chemistry`` opts into the validated_v1 payload. It requires a
+    complete CCD template match and successful sanitization, otherwise raises
+    ValueError; the default retains the historical best-effort behavior.
     """
     import contextlib  # noqa: PLC0415
 
@@ -185,16 +191,27 @@ def parse_ligand_pdb_text(
     # (combinatorial substructure matching). Such ligands are cofactor-sized and
     # dropped by the downstream heavy-atom filter anyway, so skip the template for
     # them and keep the cheap proximity graph.
+    matched_template = False
     if template_smiles and mol.GetNumHeavyAtoms() <= max_template_atoms:
         for smi in template_smiles.split(";"):
             tmpl = Chem.MolFromSmiles(smi.strip())
             if tmpl is None:
                 continue
+            if preserve_chemistry and tmpl.GetNumHeavyAtoms() != mol.GetNumHeavyAtoms():
+                continue
             try:
-                mol = AllChem.AssignBondOrdersFromTemplate(tmpl, mol)
+                candidate = AllChem.AssignBondOrdersFromTemplate(tmpl, mol)
+                if preserve_chemistry:
+                    Chem.SanitizeMol(candidate)
+                mol = candidate
+                matched_template = True
                 break
             except Exception:  # noqa: BLE001, S112
                 continue
+
+    if preserve_chemistry and not matched_template:
+        msg = "validated_v1 requires a complete, sanitizable CCD template match"
+        raise ValueError(msg)
 
     try:
         conf = mol.GetConformer()
@@ -217,7 +234,125 @@ def parse_ligand_pdb_text(
     ]
     if not atoms:
         return None
-    return {"atoms": atoms, "bonds": bonds}
+    result = {"atoms": atoms, "bonds": bonds}
+    if preserve_chemistry:
+        result["chemistry"] = {
+            "schema": "validated_v1",
+            "source": "ccd_template",
+            "molblock": Chem.MolToMolBlock(mol),
+        }
+    return result
+
+
+def validated_heavy_mol(
+    chemistry: dict,
+    atoms: list[tuple[str, float, float, float]],
+    bonds: list[tuple[int, int, int]],
+    heavy_indices: list[int],
+) -> Mol:
+    """Restore validated chemistry in descriptor order, without rebuilding charge.
+
+    Geometry remains supplied by ``atoms`` (it may have been rigidly rotated).
+    Element and bond topology must still match the payload. Explicit hydrogens
+    are removed by RDKit, retaining their contribution to heavy-atom H counts.
+    Unknown versions and mismatched metadata fail closed.
+    """
+    from rdkit import Chem  # noqa: PLC0415
+
+    if chemistry.get("schema") != "validated_v1":
+        msg = "Unknown ligand chemistry schema"
+        raise ValueError(msg)
+    mol = Chem.MolFromMolBlock(chemistry["molblock"], sanitize=True, removeHs=False)
+    if mol is None:
+        msg = "Invalid validated_v1 molecule payload"
+        raise ValueError(msg)
+    if [a.GetSymbol() for a in mol.GetAtoms()] != [a[0] for a in atoms]:
+        msg = "Chemistry payload atom order does not match geometry"
+        raise ValueError(msg)
+    expected_edges = {(*sorted((a, b)), kind) for a, b, kind in bonds}
+    bond_types = {
+        Chem.BondType.SINGLE: 1,
+        Chem.BondType.DOUBLE: 2,
+        Chem.BondType.TRIPLE: 3,
+        Chem.BondType.AROMATIC: 4,
+        # The legacy geometry graph projects coordination bonds to SINGLE.
+        # This projection is only for comparison: retain the directed DATIVE
+        # bond in `mol` for all chemistry descriptors and hydrogen handling.
+        Chem.BondType.DATIVE: 1,
+    }
+    unsupported = {b.GetBondType() for b in mol.GetBonds()} - bond_types.keys()
+    if unsupported:
+        msg = "Unsupported chemistry payload bond types: " + ", ".join(
+            sorted(str(kind) for kind in unsupported)
+        )
+        raise ValueError(msg)
+    edges = {
+        (*sorted((b.GetBeginAtomIdx(), b.GetEndAtomIdx())), bond_types[b.GetBondType()])
+        for b in mol.GetBonds()
+    }
+    if expected_edges != edges:
+        msg = "Chemistry payload connectivity does not match geometry"
+        raise ValueError(msg)
+    for atom in mol.GetAtoms():
+        atom.SetIntProp("_prolit_original_index", atom.GetIdx())
+    mol = Chem.RemoveAllHs(mol)
+    index = {a.GetIntProp("_prolit_original_index"): a.GetIdx() for a in mol.GetAtoms()}
+    if set(index) != set(heavy_indices):
+        msg = "Chemistry payload heavy-atom mapping does not match"
+        raise ValueError(msg)
+    return Chem.RenumberAtoms(mol, [index[i] for i in heavy_indices])
+
+
+def validated_mol_from_mol2_text(
+    reference: dict,
+    text: str,
+    tolerance: float = 0.01,
+) -> dict | None:
+    """A mol dict carrying validated chemistry, read from a sanitizable MOL2.
+
+    CASF ships every core ligand twice: an SDF, which is what the benchmark
+    scores, and a crystal MOL2. Rebuilding a molecule from the SDF's elements
+    and bond orders cannot recover formal charge -- the 285 core ligands carry
+    212 charged atoms and the rebuilt path keeps 14 -- so the descriptor's
+    charge channel reads neutral for ligands that are not. The MOL2 sanitizes
+    for all 285 where the SDF manages 193, which is what makes it usable.
+
+    Atoms AND bonds come from the same MOL2 molecule that produced the payload,
+    so its geometry and its chemistry cannot disagree with each other. They can
+    still disagree with ``reference``: a few core ligands are deposited with
+    different coordinates in the two files. Those return ``None`` -- scoring a
+    different pose is a worse error than a missing charge -- as does anything
+    :func:`validated_heavy_mol` would reject, so the caller never receives a
+    payload that fails after encoding has already started.
+    """
+    from rdkit import Chem  # noqa: PLC0415
+
+    from prolit.chem.mol2 import mol_to_dict  # noqa: PLC0415
+
+    mol = Chem.MolFromMol2Block(text, sanitize=True, removeHs=False)
+    parsed = mol_to_dict(mol) if mol is not None else None
+    if parsed is None:
+        return None
+    atoms, bonds = parsed["atoms"], parsed["bonds"]
+    heavy = [i for i, a in enumerate(atoms) if a[0] != "H"]
+    ref_heavy = [i for i, a in enumerate(reference["atoms"]) if a[0] != "H"]
+    if len(heavy) != len(ref_heavy) or any(
+        atoms[i][0] != reference["atoms"][j][0]
+        or max(abs(atoms[i][k] - reference["atoms"][j][k]) for k in (1, 2, 3))
+        > tolerance
+        for i, j in zip(heavy, ref_heavy, strict=True)
+    ):
+        return None
+    chemistry = {
+        "schema": "validated_v1",
+        "source": "mol2",
+        "molblock": Chem.MolToMolBlock(mol),
+    }
+    try:
+        validated_heavy_mol(chemistry, atoms, bonds, heavy)
+    except ValueError:
+        return None
+    return {"atoms": atoms, "bonds": bonds, "chemistry": chemistry}
 
 
 # ---------------------------------------------------------------------------
@@ -437,5 +572,3 @@ def _knn_offsets_and_elements(
             k_ctx,
         )
     return offsets, nbr_elements
-
-
