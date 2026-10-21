@@ -76,6 +76,15 @@ class PocketExtractionConfig:
     #: ``asdict(pocket_config)``.
     pocket_context: bool = False
 
+    #: Fill a LIGAND atom's ``aa`` slot with the residue class it contacts
+    #: (within 4.5 A), instead of the constant ``X`` every ligand row has
+    #: carried. Costs no descriptor width -- the channel already exists and is
+    #: used by protein rows for their own residue -- so the token FORMAT is
+    #: unchanged, but the codes mean something different and the cache must be
+    #: rebuilt. Unlike ``pocket_context`` it displaces nothing: the knn slots
+    #: keep their ligand neighbours.
+    contact_residue_channel: bool = False
+
     #: Residue selection distance: CA (legacy) or minimum heavy-atom distance.
     #: Changing the crop changes both the token stream and canonical frame.
     pocket_distance: str = "ca"
@@ -99,6 +108,9 @@ def _default_atom_recon_weights() -> dict[str, float]:
         "aa": 0.5,
         "bb_sc": 0.1,
         "clash": 5.0,
+        # Protein-ligand overlap. Off unless the training config asks for it,
+        # so a run that does not enable the term is unaffected by its presence.
+        "clash_pl": 5.0,
         # Only consumed when ``AtomVQVAEConfig.predict_knn_offsets`` is set.
         "knn_offsets": 1.0,
         # Only consumed when ``AtomVQVAEConfig.bond_distance_loss`` is set.
@@ -341,6 +353,22 @@ class AtomVQVAEConfig:
     # the term is nearly inert: 68.5% of reconstructions still contain a
     # non-bonded pair under 2.0 A.
     clash_floor: float = 1.2
+
+    # --- protein-ligand overlap -----------------------------------------
+    #
+    # The ligand pair term above is ``lig x lig`` ONLY: the decoder has never
+    # been penalised for putting a ligand atom inside the protein, which is the
+    # overlap generation actually suffers from. The second-pass repair
+    # (``refine_codes(order="clash")``) and the rigid relaxation are the only
+    # places protein-ligand overlap is seen at all, and both act after the
+    # decoder has already produced the coordinates.
+    protein_ligand_clash_loss: bool = False
+    # Floor as a FRACTION of the two atoms' van der Waals radius sum, matching
+    # the convention the readout uses (PoseBusters counts an overlap below 0.75
+    # of the sum). Not a fixed distance: a C/C contact and an O/H-bond partner
+    # have different right answers, and `2026-08-24_it_is_clashes.md` measured
+    # that the radius set alone moves the intermolecular energy by 1.73 kcal.
+    protein_ligand_clash_scale: float = 0.75
 
     # --- codebook balance (R2) ------------------------------------------
     #

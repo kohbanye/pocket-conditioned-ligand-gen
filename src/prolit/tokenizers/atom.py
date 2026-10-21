@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from prolit.tokenizers.descriptor_schema import (
     ATOM_DESCRIPTOR_DIM,
@@ -57,6 +58,7 @@ from prolit.tokenizers.ligand import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from rdkit.Chem.rdchem import Atom, Mol, RingInfo
@@ -79,6 +81,49 @@ _CHEM_FIELDS = ("charge", "hybrid", "aromatic", "ring", "numH")
 # ---------------------------------------------------------------------------
 # Shared assembly
 # ---------------------------------------------------------------------------
+
+
+#: Furthest a pocket atom can sit and still be the residue a ligand atom
+#: "contacts" for the ``aa`` channel. The same 4.5 A window
+#: :mod:`prolit.chem.contacts` uses, so the descriptor channel and the
+#: auxiliary MLM target mean the same thing.
+CONTACT_CUT = 4.5
+
+
+def _contacting_residue(
+    canonical: np.ndarray,
+    pocket_coords: np.ndarray | None,
+    pocket_residues: np.ndarray | None,
+    n: int,
+) -> np.ndarray:
+    """The ``aa`` channel for LIGAND atoms: the residue each one touches.
+
+    For a protein atom ``aa`` is its own residue. For a ligand atom it was the
+    constant :data:`PROTEIN_AA_X_IDX` -- a whole categorical channel carrying no
+    information on one side of the shared codebook. Here it carries the residue
+    class of the nearest pocket atom within :data:`CONTACT_CUT`, and
+    ``PROTEIN_AA_X_IDX`` only where nothing is in range.
+
+    This is information the coordinates do not already contain: which residue
+    sits next to an atom is not recoverable from the atom's own position, and
+    unlike the ``pocket_context`` experiment it displaces nothing -- the kNN
+    slots keep their ligand neighbours.
+
+    Returns the old constant unchanged when the caller passes no pocket, so
+    every existing cache and the ligand-only corpora are byte-identical.
+    """
+    if pocket_coords is None or pocket_residues is None or n == 0:
+        return np.full(n, PROTEIN_AA_X_IDX, dtype=np.int64)
+    pocket = np.asarray(pocket_coords, dtype=np.float64)
+    if pocket.shape[0] == 0:
+        return np.full(n, PROTEIN_AA_X_IDX, dtype=np.int64)
+    res = np.asarray(pocket_residues, dtype=np.int64)
+    tree = cKDTree(pocket)
+    out = np.full(n, PROTEIN_AA_X_IDX, dtype=np.int64)
+    dist, idx = tree.query(np.asarray(canonical, dtype=np.float64), k=1)
+    close = dist <= CONTACT_CUT
+    out[close] = res[idx[close]]
+    return out
 
 
 def _assemble_atom_descriptor(  # noqa: PLR0913
@@ -168,6 +213,60 @@ def atom_descriptor_to_coords(
     return canonical @ rotation + centroid
 
 
+def contact_residue_arrays(
+    pocket_coords: np.ndarray,
+    pocket_aa: Sequence[str],
+    ligand_frame: tuple[np.ndarray, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(pocket_canonical, residue_classes)`` for the ``aa`` channel.
+
+    The sibling of :func:`pocket_context_arrays`: both express the pocket in the
+    ligand's frame, and they differ only in what they carry alongside -- element
+    codes for the knn search set, residue classes for the ``aa`` slot. Written
+    as a pair so a reader can see that the two descriptor variants are
+    independent knobs rather than one feature with two switches.
+
+    Residue classes come from :data:`PROTEIN_AA_TO_IDX`, the index protein rows
+    already use, so a ligand row's ``aa`` means the same thing as a protein
+    row's.
+    """
+    centroid, rotation = ligand_frame
+    canonical = (np.asarray(pocket_coords, dtype=np.float64) - centroid) @ rotation.T
+    classes = np.array(
+        [PROTEIN_AA_TO_IDX.get(str(a), PROTEIN_AA_X_IDX) for a in pocket_aa],
+        dtype=np.int64,
+    )
+    return canonical, classes
+
+
+def pocket_context_arrays(
+    pocket_coords: np.ndarray,
+    protein_descriptors: np.ndarray,
+    ligand_frame: tuple[np.ndarray, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """The two arrays :meth:`LigandAtomDescriptor.compute` needs for pocket context.
+
+    Returns ``(pocket_canonical, pocket_elements)``: the pocket's heavy atoms
+    expressed in ``ligand_frame``, and their element codes read off the protein
+    descriptors that were built for the same atoms, in the same order.
+
+    ``ligand_frame`` is the frame the LIGAND is encoded in, not necessarily the
+    pocket's. They coincide in the shared-frame recipe, and differ in the
+    ligand-own-frame ablation; passing the ligand's is what makes the two agree
+    in both.
+
+    This exists because four call sites need the identical three lines -- the
+    descriptor cache builder, :class:`~prolit.tokenizers.pose_encoder.PoseEncoder`,
+    and the PLINDER and BioLIP corpus builders -- and three of them had no
+    pocket-context path at all while the fourth carried the only copy.
+    """
+    centroid, rotation = ligand_frame
+    canonical = (pocket_coords.astype(np.float64) - centroid) @ rotation.T
+    element_field = fields_by_name(ATOM_LAYOUT)["element"]
+    elements = protein_descriptors[:, element_field.start].astype(np.int64)
+    return canonical, elements
+
+
 # ---------------------------------------------------------------------------
 # Ligand front-end
 # ---------------------------------------------------------------------------
@@ -197,6 +296,8 @@ class LigandAtomDescriptor:
         pocket_canonical: np.ndarray | None = None,
         pocket_elements: np.ndarray | None = None,
         *,
+        pocket_residue_coords: np.ndarray | None = None,
+        pocket_residues: np.ndarray | None = None,
         chemistry: dict | None = None,
     ) -> tuple[np.ndarray, list[str], dict[str, Any]]:
         """Compute ``(N_heavy, 33)`` descriptors for the ligand's heavy atoms.
@@ -251,7 +352,9 @@ class LigandAtomDescriptor:
             SOURCE_LIGAND_IDX,
             feats["element"],
             {name: feats[name] for name in _CHEM_FIELDS},
-            np.full(n, PROTEIN_AA_X_IDX, dtype=np.int64),
+            _contacting_residue(
+                canonical, pocket_residue_coords, pocket_residues, n
+            ),
             np.full(n, BB_SC_NA_IDX, dtype=np.int64),
             context_coords=pocket_canonical,
             context_elements=pocket_elements,
@@ -514,6 +617,8 @@ __all__ = [
     "LigandAtomDescriptor",
     "ProteinAtomDescriptor",
     "atom_descriptor_to_coords",
+    "contact_residue_arrays",
+    "pocket_context_arrays",
     "precompute_receptor_atom_features",
     "rotate_atom_descriptor",
 ]

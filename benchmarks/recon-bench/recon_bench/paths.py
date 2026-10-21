@@ -83,6 +83,25 @@ OWN_LOCALFRAME_CACHE = Path(
         OWN_MODEL_WORKDIR / "data" / "descriptor_cache_ligand_localframe",
     )
 )
+# Descriptors built with ``pocket_context``: a ligand atom's kNN search set is
+# widened to the pocket, so its empty neighbour slots hold protein atoms. Same
+# 33-D width as the plain cache, which is exactly why it needs its own path --
+# a tokenizer trained on one and fed the other raises nothing.
+# Descriptors whose LIGAND ``aa`` channel holds the residue the atom
+# contacts, instead of the constant X every ligand row carried. Same 33-D
+# width as the plain cache, which is why it needs its own path.
+OWN_CTCRES_CACHE = Path(
+    os.environ.get(
+        "RECON_BENCH_OWN_CTCRES_CACHE",
+        OWN_MODEL_WORKDIR / "data" / "descriptor_cache_allatom_ctcres",
+    )
+)
+OWN_PCTX_CACHE = Path(
+    os.environ.get(
+        "RECON_BENCH_OWN_PCTX_CACHE",
+        OWN_MODEL_WORKDIR / "data" / "descriptor_cache_allatom_pctx",
+    )
+)
 
 # Parsed receptors, pickled and shared across arms and runs. Re-parsing a CASP
 # protein costs ~10 s; every all-atom arm runs as its own process, so without

@@ -16,7 +16,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from prolit.config import PocketExtractionConfig
 from prolit.data.descriptors import collate_molecules
+from prolit.tokenizers.atom import pocket_context_arrays
 from prolit.tokenizers.lm_vocab import AtomLMVocab
 from prolit.tokenizers.pose_encoder import PoseEncoder
 
@@ -33,9 +35,29 @@ class _FakeTokenizer:
 
 
 class _FixedDescriptors:
-    """Stands in for LigandAtomDescriptor: returns a canned array per mol."""
+    """Stands in for LigandAtomDescriptor: returns a canned array per mol.
 
-    def compute(self, atoms, bonds, frame) -> tuple:  # noqa: ANN001, ARG002
+    The signature tracks the real ``compute`` -- including the two positional
+    pocket-context arrays -- because the encoder passes them positionally and a
+    narrower fake would pass here while the real call site raised.
+    """
+
+    def __init__(self) -> None:
+        #: What the encoder handed over on the last call, so a test can assert
+        #: the pocket context actually reached the descriptor.
+        self.last_pocket: tuple = (None, None)
+
+    def compute(  # noqa: PLR0913
+        self,
+        atoms: np.ndarray,
+        bonds: object = None,  # noqa: ARG002
+        frame: object = None,  # noqa: ARG002
+        pocket_canonical: np.ndarray | None = None,
+        pocket_elements: np.ndarray | None = None,
+        *,
+        chemistry: dict | None = None,  # noqa: ARG002
+    ) -> tuple:
+        self.last_pocket = (pocket_canonical, pocket_elements)
         return atoms, None, None
 
 
@@ -144,3 +166,52 @@ def test_pocket_rotation_requires_setup() -> None:
         return
     msg = "expected RuntimeError before setup_pocket()"
     raise AssertionError(msg)
+
+
+def test_pocket_context_reaches_the_ligand_descriptor() -> None:
+    """The flag on the pocket config must arrive as compute()'s pocket arrays.
+
+    This is the failure the descriptor cache already suffered once: the flag
+    lives on ``PocketExtractionConfig`` and travels to workers as a dict, so a
+    path that forgets to read it produces a well-formed 33-D descriptor from the
+    WRONG distribution and raises nothing. Corpora built that way are silently
+    identical to the plain ones.
+    """
+    lig = _FixedDescriptors()
+    enc = PoseEncoder(
+        _FakeTokenizer(),
+        np.zeros(_DIM, dtype=np.float32),
+        np.ones(_DIM, dtype=np.float32),
+        AtomLMVocab(codebook_size=_CODEBOOK),
+        torch.device("cpu"),
+        PocketExtractionConfig(max_residues=50, pocket_context=True),
+    )
+    enc.lig_desc = lig
+
+    pocket_coords = np.array([[1.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+    prot_desc = np.zeros((2, _DIM), dtype=np.float32)
+    frame = (np.zeros(3), np.eye(3))
+    enc.pkt_canonical, enc.pkt_elements = pocket_context_arrays(
+        pocket_coords, prot_desc, frame
+    )
+
+    mol = {"atoms": np.zeros((3, _DIM), dtype=np.float32), "bonds": []}
+    enc.ligand_seq([1, 2], mol, frame)
+    got_canonical, got_elements = lig.last_pocket
+    assert got_canonical is not None, "pocket context never reached the descriptor"
+    np.testing.assert_allclose(got_canonical, pocket_coords)
+    assert got_elements.shape == (2,)
+
+    # ...and the default stays off, so every existing checkpoint's corpus is
+    # reproduced byte for byte.
+    plain = PoseEncoder(
+        _FakeTokenizer(),
+        np.zeros(_DIM, dtype=np.float32),
+        np.ones(_DIM, dtype=np.float32),
+        AtomLMVocab(codebook_size=_CODEBOOK),
+        torch.device("cpu"),
+        PocketExtractionConfig(max_residues=50),
+    )
+    plain.lig_desc = _FixedDescriptors()
+    plain.ligand_seq([1, 2], mol, frame)
+    assert plain.lig_desc.last_pocket == (None, None)

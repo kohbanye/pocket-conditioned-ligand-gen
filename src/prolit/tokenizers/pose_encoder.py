@@ -25,6 +25,7 @@ from prolit.data.descriptors import collate_molecules
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
+    pocket_context_arrays,
     precompute_receptor_atom_features_from_text,
     rotate_atom_descriptor,
 )
@@ -70,6 +71,12 @@ class PoseEncoder:
         #: Pocket descriptor kept after :meth:`setup_pocket`, so a rotated
         #: re-encoding does not have to re-parse the receptor.
         self.prot_desc_raw: np.ndarray | None = None
+        #: Pocket atoms in the shared frame, kept only when ``pocket_cfg``
+        #: asks for pocket context, so each ligand atom's knn SEARCH set can
+        #: be widened to the receptor. Empty otherwise, which reproduces the
+        #: ligand-only neighbourhood every existing checkpoint was built on.
+        self.pkt_canonical: np.ndarray | None = None
+        self.pkt_elements: np.ndarray | None = None
 
     # -- pocket ---------------------------------------------------------
     def setup_pocket(
@@ -83,6 +90,14 @@ class PoseEncoder:
         malformed or ligand-free entries and is not worth raising over: the
         caller skips that complex.
         """
+        # Cleared before anything can fail: this encoder is reused across
+        # complexes, and every early return below would otherwise leave the
+        # PREVIOUS pocket cached. A caller that ignored the None would then
+        # encode one complex's ligand against another's receptor, which is
+        # wrong in a way that raises nothing.
+        self.prot_desc_raw = None
+        self.pkt_canonical = self.pkt_elements = None
+
         precomp = precompute_pocket_atom_candidates_from_text(protein_text)
         pocket = extract_pocket_atoms_from_candidates(
             precomp, reference_heavy, self.pocket_cfg
@@ -95,7 +110,43 @@ class PoseEncoder:
         if prot_desc.shape[0] == 0:
             return None
         self.prot_desc_raw = prot_desc
+        self._cache_pocket_context(pocket, prot_desc, frame)
         return self._encode(prot_desc), frame
+
+    def _cache_pocket_context(
+        self,
+        pocket: Any,  # noqa: ANN401
+        prot_desc: np.ndarray,
+        frame: Any,  # noqa: ANN401
+    ) -> None:
+        """Keep the pocket in the shared frame, for pocket-context descriptors.
+
+        Mirrors :func:`prolit.data.atom_descriptors._atom_process_pose`, which is
+        the only other place that builds this. A pose encoded here always uses
+        the pocket's own frame for the ligand, so the two agree by construction
+        and no separate ligand frame is needed.
+
+        Off by default: the flag lives on the pocket config, so it travels with
+        the checkpoint's other pocket settings rather than being a separate
+        argument each caller has to remember.
+        """
+        if not getattr(self.pocket_cfg, "pocket_context", False):
+            self.pkt_canonical = self.pkt_elements = None
+            return
+        self.pkt_canonical, self.pkt_elements = pocket_context_arrays(
+            pocket.atom_coords, prot_desc, frame
+        )
+
+    def _lig_compute(self, mol: dict, frame: Any) -> tuple:  # noqa: ANN401
+        """One ligand's descriptor, with pocket context when it is configured."""
+        return self.lig_desc.compute(
+            mol["atoms"],
+            mol["bonds"],
+            frame,
+            self.pkt_canonical,
+            self.pkt_elements,
+            **({"chemistry": mol["chemistry"]} if "chemistry" in mol else {}),
+        )
 
     def pocket_codes_rotated(self, rotation: np.ndarray) -> list[int]:
         """Re-encode the cached pocket descriptor under an extra frame rotation."""
@@ -112,12 +163,7 @@ class PoseEncoder:
         frame: Any,  # noqa: ANN401
     ) -> list[int] | None:
         """Token sequence for one pose, or None if it has no encodable atoms."""
-        lig_desc, _elements, _mask = self.lig_desc.compute(
-            mol["atoms"],
-            mol["bonds"],
-            frame,
-            **({"chemistry": mol["chemistry"]} if "chemistry" in mol else {}),
-        )
+        lig_desc, _elements, _mask = self._lig_compute(mol, frame)
         if lig_desc.shape[0] == 0:
             return None
         return self.vocab.build_sequence(protein_codes, self._encode(lig_desc))
@@ -159,15 +205,7 @@ class PoseEncoder:
         features per orientation; see
         :func:`~prolit.tokenizers.atom.rotate_atom_descriptor`.
         """
-        return [
-            self.lig_desc.compute(
-                m["atoms"],
-                m["bonds"],
-                frame,
-                **({"chemistry": m["chemistry"]} if "chemistry" in m else {}),
-            )[0]
-            for m in mols
-        ]
+        return [self._lig_compute(m, frame)[0] for m in mols]
 
     def seqs_from_descs(
         self,
