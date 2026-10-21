@@ -288,10 +288,29 @@ notebooks/*.html
 /benchmarks/sbdd-bench/weights
 /benchmarks/sbdd-bench/results_*
 
+# Baseline weights and scratch for the pose bench's adapters. The gnina release
+# binary alone is 2 GB, and the pocket/sdf caches under work/ are regenerable
+# from the CASF inputs.
+/benchmarks/pose-rescoring-bench/weights
+/benchmarks/pose-rescoring-bench/work
+/benchmarks/affinity-bench/weights
+/benchmarks/affinity-bench/work
+
+# Investigation logs and result dumps. The repo's policy is that git carries
+# code and a run directory carries the command that produced it; these are
+# written next to the weights, on the machine that has them, and are not
+# reproducible from a checkout. CLAUDE.md has stated they are ignored for a
+# while -- they were not, and were only staying out of commits by hand.
+/docs/
+
 # Per-loop snapshots of the library, taken so a long sweep keeps running while
-# src/ moves under it, and the tests that drive them. The test imports the
-# snapshot by sys.path, so committing it without the snapshot makes collection
-# fail in every checkout but the machine that holds one -- which is exactly
-# what happened: CI could not collect test_m14_readout.py at all.
+# src/ moves under it, and the tests that drive them. A test imports its
+# snapshot by sys.path, so committing one without the snapshot makes collection
+# fail in every checkout but the machine that holds it -- which is exactly what
+# happened: CI could not collect test_m14_readout.py at all, and a collection
+# error takes the other 466 tests with it.
 /experiments/
 /tests/test_m14_readout.py
+/tests/test_fresh_prediction_diagnostics.py
+/tests/test_genscore_matched_train.py
+/tests/test_reconstruction_regression_report.py
