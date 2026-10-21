@@ -235,17 +235,6 @@ wget-log
 /results*/
 benchmarks/*/results*/
 
-# Result dumps and their derived tables: regenerable from a run, and large
-# (6.0M of json, 4.9M of csv against 908K of prose). The notes and figures that
-# read them ARE tracked -- they were kept out because they described artifacts
-# that lived only on this machine, and the weights are published now, so the
-# reason expired. What a number means belongs in git; the bytes it was computed
-# from belong beside the run that produced them.
-/docs/**/*.json
-/docs/**/*.csv
-/docs/**/*.parquet
-/docs/_build/
-
 # Cluster job scripts: what to run is in pipelines/, how to submit it is
 # site-specific. jobs/submit.py generates them; the generated and previously-run
 # ones stay local.
@@ -296,11 +285,18 @@ notebooks/*.html
 /benchmarks/affinity-bench/weights
 /benchmarks/affinity-bench/work
 
-# Investigation logs and result dumps. The repo's policy is that git carries
-# code and a run directory carries the command that produced it; these are
-# written next to the weights, on the machine that has them, and are not
-# reproducible from a checkout. CLAUDE.md has stated they are ignored for a
-# while -- they were not, and were only staying out of commits by hand.
+# The investigation record: notes, result dumps, derived tables and figures.
+# The policy CLAUDE.md states is that git carries code while a run directory
+# carries the command that produced it, and docs/ is the prose half of that run
+# directory -- written beside the weights, on the machine that has them, and
+# not reproducible from a checkout.
+#
+# 205 files under here WERE tracked while this line was absent, so the state
+# was neither: the older notes were in git and the newer ones invisible. They
+# are untracked in the same commit as this line and remain on disk, so nothing
+# is lost on this machine and the history still has them. A test that reads one
+# of them skips with a reason rather than failing collection -- see
+# tests/test_m01_reconstruction_contract.py.
 /docs/
 
 # Per-loop snapshots of the library, taken so a long sweep keeps running while

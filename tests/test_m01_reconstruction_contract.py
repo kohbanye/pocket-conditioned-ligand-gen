@@ -12,6 +12,17 @@ SCRIPT = (
     Path(__file__).resolve().parents[1]
     / "docs/research/affinity_fresh_20260913/audit_m01_reconstruction.py"
 )
+if not SCRIPT.exists():
+    # docs/ is untracked -- it is the investigation record, written beside the
+    # weights on the machine that has them. Skip at module level rather than
+    # letting exec_module raise, because an import error during collection
+    # takes the whole suite down instead of this one file.
+    pytest.skip(
+        "docs/ is not tracked; the audited script is only on the machine that "
+        "produced the run",
+        allow_module_level=True,
+    )
+
 SPEC = importlib.util.spec_from_file_location("m01_audit_contract", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
