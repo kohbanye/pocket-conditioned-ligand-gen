@@ -71,6 +71,17 @@ def main() -> None:
     )
     p.add_argument("--foldtoken-level", type=int, default=12)
     p.add_argument(
+        "--bio2token-dumps",
+        type=Path,
+        default=None,
+        help="all-atom NPZ dumps Bio2Token reconstructs from (default: the first "
+        "own_allatom arm this run produced). Bio2Token is fed the SAME pocket "
+        "atoms and ligand atoms our tokenizer saw, so the comparison is on the "
+        "tokenizer and not on who picked a different pocket. Its default points "
+        "at the `joint` arm, which is wrong whenever `joint` is not among the "
+        "arms being run -- those dumps are then stale, from another dataset.",
+    )
+    p.add_argument(
         "--allatom-arms",
         nargs="*",
         default=None,
@@ -178,7 +189,9 @@ def main() -> None:
             else:
                 keep.append(a)
         arms = keep
+    ran_arms: list[str] = []
     for arm in arms or []:
+        ran_arms.append(arm)
         adapter = OwnAllAtomAdapter(arm=arm, min_epoch=args.allatom_min_epoch)
         print(f"[recon_bench] all-atom arm {arm}: {ARMS[arm].label}")
         adapter.materialize(samples)
@@ -236,11 +249,17 @@ def main() -> None:
     # ESM3 / FoldToken always reconstruct the full CASP protein (native task);
     # pocket_keys restricts the *scoring* to the pocket residues.
     if other_models:
+        extra_kwargs = {"foldtoken": {"level": args.foldtoken_level}}
+        dumps = args.bio2token_dumps
+        if dumps is None and ran_arms:
+            dumps = paths.OUTPUTS_DIR / "own_allatom" / ran_arms[0]
+        if dumps is not None:
+            extra_kwargs["bio2token"] = {"dumps": dumps}
         frames.append(
             runner.run(
                 other_models,
                 [s for s in samples if s.protein_pdb],
-                adapter_kwargs={"foldtoken": {"level": args.foldtoken_level}},
+                adapter_kwargs=extra_kwargs,
                 pocket_keys=pocket_keys,
                 pb_valid=args.pb_valid,
                 pb_limit=args.pb_limit,

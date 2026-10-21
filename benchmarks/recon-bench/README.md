@@ -1,8 +1,9 @@
 # prolit-recon-bench
 
 タンパク質・低分子化合物の **3D 構造再構成（reconstruction）** を、離散構造トークナイザ
-4 種で比較するためのベンチマーク。評価には **CASP16** の実験構造（pharma ligands）を使う
-——どのモデルの学習データにも含まれない held-out 複合体なので、リークのない再構成テストになる。
+4 種で比較するためのベンチマーク。主評価は **PoseBusters Benchmark set**（428 複合体 /
+426 タンパク質、2021 年以降の PDB）。**CASP16** は補助に回した——理由は下の
+「評価セット」を参照。
 
 | モデル | 種別 | 再構成対象 | 重みの入手 |
 |--------|------|-----------|-----------|
@@ -17,6 +18,41 @@
 - **タンパク質背骨**は ESM3 / FoldToken4 / Ours で比較可能（共通の評価軸）。
 - **リガンド**は Ours（座標 VQ-VAE）と Token-Mol（torsion）が再構成可能。Ours はさらに
   ポケット＋リガンドを一括 align した **complex** の RMSD も報告する。
+
+## 評価セット
+
+| dataset | n | 別タンパク質 | 別リガンド | 素性 |
+|---|---|---|---|---|
+| `posebusters` | 428 | **426** | 427 | 2021 年以降の PDB。PDBbind v2020 / CrossDocked2020 とゼロ重複 |
+| `astex` | 85 | 85 | 85 | 〜2007 年。**学習データに入っている**ので seen-data 対照 |
+| `casp16` | 303 | **4** | 267 | CASP16 pharma ligands |
+
+**CASP16 を主評価にしてはいけない。** 303 複合体の実体は 4 タンパク質
+（autotaxin 227 / SARS-CoV-2 Mpro 57 / chymase 17 / cathepsin G 2）で、
+CASP の pharma-ligand は *super-target* 設計——1 タンパク質に多数のリガンドを
+出題する——だからこうなる。ポーズ予測を採点するには正しい形で、トークナイザが
+タンパク質の幾何をどう復元するかを測るには間違った形。再構成 RMSD が二峰に
+見えるのはこの構成そのもの（805 残基の autotaxin と 612 残基の Mpro 二量体）で、
+モデルの性質ではない。`docs/results/casp16_significance.md` の n=303 対応あり検定は
+227 個の準複製を独立扱いしている。**CASP16 を見るときは必ず `target` で層別する。**
+リガンドは 267 種あるので「ポケットを固定したときのリガンド多様性」としては読める。
+
+PoseBusters 側の注意:
+
+- タンパク質 PDB に glycerol / ethylene glycol / DMSO / SO4 と本物の補因子
+  (FAD, NADP, CoA) が `HETATM` で残っている。`precompute_pocket_atom_candidates`
+  が `AA_3TO1` にあって CA を持つ残基しか通さないのでポケットには入らない。
+  clash 指標には効く——それは壁なので、そうあるべき。
+- 428 件中 40 件がリガンド重原子 10 個以下だが、CASP16 と違って中身は
+  succinate / fumarate / thymine のような本物の代謝物・フラグメントで、
+  結晶化添加物ではない（CASP16 は 30 件中 26 件が DMSO・硫酸・酢酸の類）。
+- 鎖数は 1 が 219 件、2 が 157 件、最大 40 鎖・5308 残基。ESM3 / FoldToken を
+  全長で走らせるときはここが効く。
+
+```bash
+# 取得（Zenodo 8278563, 52 MB, checksum 検証つき）。PoseBusters と Astex の両方を展開する
+uv run python scripts/prepare_posebusters.py
+```
 
 ## リポジトリ構成
 
@@ -81,11 +117,13 @@ submodule、重み・正規化統計は作業コピーから symlink。
 ## 実行
 
 ```bash
-# CASP16: 自作モデルが pocket+ligand、ESM3/FoldToken は全長を再構成→pocket 残基で評価
+# 自作モデルが pocket+ligand、ESM3/FoldToken は全長を再構成→pocket 残基で評価
 # （HF_HUB_OFFLINE=1 で prefetch 済みの structure 重みのみ使用。未設定だと初回 5.5GB DL）
 HF_HUB_OFFLINE=1 uv run python scripts/run_reconstruction.py \
     --models own_vqvae esm3 foldtoken token_mol \
-    --dataset casp16 --limit 50 --out results/casp16.parquet
+    --dataset posebusters --out results/posebusters.parquet
+
+# --dataset の既定は casp16 のまま（既存のジョブスクリプトを壊さないため）。明示すること。
 
 # ESM3/FoldToken を CASP の全長タンパク質で（各モデル本来のスコープ、自作モデルは対象外）
 uv run python scripts/run_reconstruction.py \

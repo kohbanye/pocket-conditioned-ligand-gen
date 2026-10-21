@@ -28,6 +28,13 @@ dependencies = [
     "py3dmol>=2.4",
     "marimo>=0.23",
     "prolit-bench-common",
+    # ConfSeq tokenizes from Indigo's bond perception (its demo/ConfSeq.py
+    # does `from indigo import *`), so the Indigo version is part of that
+    # tokenizer rather than an incidental dependency -- pinned to the one
+    # the ConfSeq rows in results/ were produced with.
+    "epam-indigo==1.45.0",
+    "smilespe==0.0.3",
+    "timeout-decorator==0.5.0",
 ]
 
 [tool.uv.sources]

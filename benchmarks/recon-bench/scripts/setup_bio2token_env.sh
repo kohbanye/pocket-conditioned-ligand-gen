@@ -14,6 +14,10 @@
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# third_party/ is shared by every bench, so it sits at the monorepo root --
+# two levels up from this bench, not inside it. The pre-split layout had it
+# under the bench and this line kept looking there.
+MONOREPO_ROOT="$(cd "$REPO_ROOT/../.." && pwd)"
 VENV="$REPO_ROOT/.venv-bio2token"
 VPY="$VENV/bin/python"
 
@@ -34,7 +38,7 @@ uv pip install --python "$VPY" \
     "lightning>=2.4" hydra-zen python-box loguru dill \
     invariant-point-attention "transformers==4.44.2"
 
-uv pip install --python "$VPY" --no-deps -e "$REPO_ROOT/third_party/bio2token"
+uv pip install --python "$VPY" --no-deps -e "$MONOREPO_ROOT/third_party/bio2token"
 
 "$VPY" -c "import mamba_ssm, torch; print('mamba-ssm', mamba_ssm.__version__, 'torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 echo "[setup] bio2token venv ready at $VENV"
