@@ -20,7 +20,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from pose_rescoring_bench import report
 from pose_rescoring_bench.metrics import rescoring as R
+from pose_rescoring_bench.variants import PAPER_ARM
 
 _RESULTS = Path(__file__).resolve().parent.parent / "results" / "rescoring"
 
@@ -76,3 +78,24 @@ def test_e250_div_leads_every_metric() -> None:
     assert R.docking_power(div, 2.0) > R.docking_power(rtm, 2.0)
     assert R.docking_power(div, 1.0) > R.docking_power(rtm, 1.0)
     assert R.ranking_rho(div) > R.ranking_rho(rtm)
+
+
+def test_the_assembled_table_reports_the_paper_arm() -> None:
+    """``make_tables.py`` must agree with the numbers pinned above.
+
+    It did not: ``report.rescoring_comparison`` hard-coded the ``joint`` arm --
+    the first-generation ``xzkjxu9q`` tokenizer -- while this file pinned
+    ``e250_div``. Running the documented command therefore produced a table that
+    lost to RTMScore on all three columns (DP@2A 89.5) next to a test suite
+    asserting the arm that wins on all three (95.4). Both called themselves "the
+    paper's table".
+    """
+    metrics, _ = report.rescoring_comparison(_RESULTS.parent)
+    ours = [i for i in metrics.index if i.startswith("OURS") and "Vina" not in i]
+    assert len(ours) == 1, f"expected one OURS row, got {ours}"
+    row = metrics.loc[ours[0]]
+
+    div = _our(PAPER_ARM, "div_f16.csv")
+    assert row["DP@2A"] == pytest.approx(R.docking_power(div, 2.0), abs=_DP)
+    assert row["DP@1A"] == pytest.approx(R.docking_power(div, 1.0), abs=_DP)
+    assert row["ranking_rho"] == pytest.approx(R.ranking_rho(div), abs=_RHO)

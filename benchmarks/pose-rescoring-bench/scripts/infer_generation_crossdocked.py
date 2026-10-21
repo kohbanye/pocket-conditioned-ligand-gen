@@ -56,6 +56,19 @@ def main() -> None:
     parser.add_argument("--gen-extra", nargs="*", default=None)
     parser.add_argument("--eval-extra", nargs="*", default=None)
     parser.add_argument(
+        "--shard",
+        default=None,
+        metavar="K/N",
+        help="evaluate only every Nth target, starting at K, and write to "
+        "``<results>/generation/<variant>/chunk<K>``. Vina Dock is ~7 min per "
+        "target on a full node, so 100 targets is ~11 h in one job and a "
+        "quarter of that split four ways -- which is also the difference "
+        "between waiting for a whole node and getting scheduled. Merge the "
+        "chunks afterwards with scripts/merge_eval_chunks.py. A first-class "
+        "flag rather than --eval-extra because argparse's nargs='*' cannot "
+        "carry a value that starts with a dash.",
+    )
+    parser.add_argument(
         "--refiner",
         default=None,
         help="Override the variant's pose-refiner checkpoint (path relative to "
@@ -107,6 +120,11 @@ def main() -> None:
     # Absolute: run_evaluation runs with cwd=sbdd-bench, so a relative --results
     # would land under sbdd-bench/ instead of this repo's results/ tree.
     results_dir = (args.results / "generation" / (args.variant + args.out_suffix)).resolve()
+    eval_extra = list(args.eval_extra or [])
+    if args.shard:
+        shard_k = args.shard.split("/")[0]
+        results_dir = results_dir / f"chunk{shard_k}"
+        eval_extra += ["--shard", args.shard]
 
     gen_extra = list(args.gen_extra or [])
     if args.ids:
@@ -129,7 +147,7 @@ def main() -> None:
             out_root=out_root,
             results_dir=results_dir,
             dock_modes=tuple(args.dock_modes),
-            extra_args=args.eval_extra,
+            extra_args=eval_extra,
         )
     logger.info("crossdocked generation for %s -> %s", args.variant, results_dir)
 
