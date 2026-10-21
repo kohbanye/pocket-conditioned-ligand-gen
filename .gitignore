@@ -138,6 +138,10 @@ celerybeat.pid
 .env
 .envrc
 .venv
+# Per-baseline scoring environments (scripts/setup_*_env.sh build these inside
+# benchmarks/affinity-bench). `.venv` alone does not match `.venv-sfcnn`, and a
+# conda env is thousands of files.
+.venv-*
 env/
 venv/
 ENV/
@@ -283,3 +287,11 @@ notebooks/*.html
 /benchmarks/sbdd-bench/data
 /benchmarks/sbdd-bench/weights
 /benchmarks/sbdd-bench/results_*
+
+# Per-loop snapshots of the library, taken so a long sweep keeps running while
+# src/ moves under it, and the tests that drive them. The test imports the
+# snapshot by sys.path, so committing it without the snapshot makes collection
+# fail in every checkout but the machine that holds one -- which is exactly
+# what happened: CI could not collect test_m14_readout.py at all.
+/experiments/
+/tests/test_m14_readout.py

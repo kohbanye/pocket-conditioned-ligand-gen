@@ -28,6 +28,7 @@ from prolit.api import (
     load_tokenizer,
     parse_sdf,
     random_rotation_matrix,
+    validated_mol_from_mol2_text,
 )
 from prolit.config import PocketExtractionConfig
 from prolit.model.mlm_score import ligand_pll
@@ -87,8 +88,9 @@ def casf_complexes(casf_dir: Path) -> list[Complex]:
             continue
         logka, cluster = labels[tid]
         out.append(
-            Complex(tid, d / f"{tid}_protein.pdb", d / f"{tid}_ligand.sdf",
-                    logka, cluster)
+            Complex(
+                tid, d / f"{tid}_protein.pdb", d / f"{tid}_ligand.sdf", logka, cluster
+            )
         )
     return out
 
@@ -124,8 +126,13 @@ def pdbbind_complexes(
             d = root / sub / pid
             if d.is_dir():
                 out.append(
-                    Complex(pid, d / f"{pid}_protein.pdb", d / f"{pid}_ligand.sdf",
-                            labels[pid], pid)
+                    Complex(
+                        pid,
+                        d / f"{pid}_protein.pdb",
+                        d / f"{pid}_ligand.sdf",
+                        labels[pid],
+                        pid,
+                    )
                 )
                 break
     return out
@@ -179,7 +186,9 @@ def _build_encoder(
         std,
         AtomLMVocab(codebook_size=variant.codebook_size),
         device,
-        PocketExtractionConfig(max_residues=cfg.max_residues),
+        PocketExtractionConfig(
+            max_residues=cfg.max_residues, pocket_distance=cfg.pocket_distance
+        ),
     )
 
 
@@ -205,6 +214,9 @@ def score_complexes(  # noqa: PLR0913
     """
     import pandas as pd  # noqa: PLC0415
 
+    if cfg.chemistry not in ("legacy", "validated"):
+        msg = f"unknown chemistry {cfg.chemistry!r}; expected 'legacy' or 'validated'"
+        raise ValueError(msg)
     torch.set_float32_matmul_precision("high")
     from rdkit import RDLogger  # noqa: PLC0415
 
@@ -220,6 +232,9 @@ def score_complexes(  # noqa: PLR0913
         resolve_scoring_head(paths.source_repo, head_spec.ckpt),
         variant.codebook_size,
         device,
+        readout=variant.readout,
+        layer_mix=variant.layer_mix,
+        lora_rank=variant.lora_rank,
     )
 
     items = complexes if complexes is not None else casf_complexes(paths.casf_dir)
@@ -234,7 +249,12 @@ def score_complexes(  # noqa: PLR0913
         row = _score_complex(item, enc, mlm, mask_id, head, device, cfg, rng)
         if row is not None:
             rows.append(row)
-    return pd.DataFrame(rows, columns=["pdbid", "logka", "cluster", "pll", "head"])  # ty: ignore[invalid-argument-type]  # pandas stub: list[str] columns
+    # ``chemistry`` records which route each complex actually took, so a run
+    # that quietly fell back to the rebuilt molecule cannot be read as a
+    # validated-input measurement. write_affinity drops it from the dump.
+    return pd.DataFrame(  # ty: ignore[invalid-argument-type]  # pandas stub: list[str] columns
+        rows, columns=["pdbid", "logka", "cluster", "pll", "head", "chemistry"]
+    )
 
 
 def _score_complex(  # noqa: PLR0913
@@ -252,6 +272,16 @@ def _score_complex(  # noqa: PLR0913
         return None
     try:
         native = parse_sdf(sdf)[0]
+        chemistry_source = "legacy"
+        if cfg.chemistry == "validated":
+            mol2 = sdf.with_suffix(".mol2")
+            validated = (
+                validated_mol_from_mol2_text(native, mol2.read_text())
+                if mol2.exists()
+                else None
+            )
+            if validated is not None:
+                native, chemistry_source = validated, "mol2"
         heavy = np.array(
             [(a[1], a[2], a[3]) for a in native["atoms"] if a[0] != "H"],
             np.float32,
@@ -287,6 +317,7 @@ def _score_complex(  # noqa: PLR0913
         # (The pose head's output is an RMSD and is negated to become a score;
         # that sign flip does not belong here.)
         "head": float(np.mean(preds)),
+        "chemistry": chemistry_source,
     }
 
 

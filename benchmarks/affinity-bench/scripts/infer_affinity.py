@@ -11,6 +11,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -54,6 +55,31 @@ def main() -> None:
         "would measure memorisation, which is why an id list is required rather "
         "than the directory being walked.",
     )
+    parser.add_argument(
+        "--pocket-distance",
+        choices=("ca", "heavy"),
+        default=None,
+        help="Residue-selection distance. Defaults to the ARM's own setting, "
+        "which is what its head was trained on -- pass it only to measure an "
+        "arm deliberately under inputs it was not trained under.",
+    )
+    parser.add_argument(
+        "--chemistry",
+        choices=("legacy", "validated"),
+        default=None,
+        help="Where ligand chemistry comes from. Defaults to the ARM's own "
+        "setting, for the same reason as --pocket-distance.",
+    )
+    parser.add_argument(
+        "--ids-file",
+        type=Path,
+        default=None,
+        help="With --dataset pdbbind-holdout: score THESE PDBbind ids instead of "
+        "the holdout list, labelled from PDBbind's train/val/test CSVs in the "
+        "corpus builder's order. For a corpus's own validation split -- never "
+        "its training split, which would measure memorisation.",
+    )
+    parser.add_argument("--max-residues", type=int, default=50)
     parser.add_argument("--max-targets", type=int, default=None)
     add_seed_argument(parser)
     args = parser.parse_args()
@@ -67,16 +93,23 @@ def main() -> None:
         return
 
     cfg = EvalConfig()
+    cfg.affinity.pocket_distance = args.pocket_distance or variant.pocket_distance
+    cfg.affinity.chemistry = args.chemistry or variant.chemistry
+    cfg.affinity.max_residues = args.max_residues
     cfg.affinity.n_frames = args.n_frames
     cfg.affinity.max_targets = args.max_targets
 
     complexes = None
     if args.dataset == "pdbbind-holdout":
         root = Path("/gs/bs/tga-ohuelab/ysato/data/P-L")
+        if args.ids_file is None:
+            ids_file = cfg.paths.source_repo / "data" / "pdbbind_holdout_eval.txt"
+            csvs = ("test.csv", "val.csv")
+        else:
+            # Later CSVs overwrite earlier ones, as in tokenize_affinity_pdbbind.
+            ids_file, csvs = args.ids_file, ("train.csv", "val.csv", "test.csv")
         complexes = inference.pdbbind_complexes(
-            root,
-            cfg.paths.source_repo / "data" / "pdbbind_holdout_eval.txt",
-            tuple(root / n for n in ("test.csv", "val.csv")),
+            root, ids_file, tuple(root / n for n in csvs)
         )
         logger.info("pdbbind holdout: %d complexes", len(complexes))
         if not complexes:
@@ -92,6 +125,29 @@ def main() -> None:
         path = out_dir / f"{head.label or f'head{i}'}.csv"
         write_affinity(df, path)
         logger.info("wrote %d complexes -> %s", len(df), path)
+        # The dump schema holds predictions, so which chemistry route each
+        # complex took is recorded beside it. Without this a run that fell back
+        # to the rebuilt molecule for part of the set reads as a validated one.
+        if cfg.affinity.chemistry == "validated":
+            fell_back = sorted(df.loc[df["chemistry"] == "legacy", "pdbid"])
+            sidecar = path.with_suffix(".chemistry.json")
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "requested": cfg.affinity.chemistry,
+                        "counts": df["chemistry"].value_counts().to_dict(),
+                        "fell_back_to_legacy": fell_back,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            logger.info(
+                "chemistry: %d validated, %d fell back -> %s",
+                len(df) - len(fell_back),
+                len(fell_back),
+                sidecar,
+            )
 
 
 if __name__ == "__main__":

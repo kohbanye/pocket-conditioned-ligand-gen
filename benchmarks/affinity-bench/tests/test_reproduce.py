@@ -43,9 +43,24 @@ def test_published_single_head_numbers() -> None:
 
 
 def test_genscore_reference_numbers() -> None:
+    """The target, on all 285 core complexes.
+
+    The figures were 0.8159 / 0.7351 while two complexes were missing: 4k18 and
+    4mme fail GenScore's own graph construction on the distributed inputs, and a
+    283-complex dump was being compared against our 285-complex one. Repairing
+    only those two inputs completed the dump and moved the target to 0.8127 /
+    0.7281 -- the comparison got HARDER to state honestly, not easier, because
+    the reduced set happened to flatter GenScore. Both numbers are asserted so
+    the difference stays visible as a set-size effect rather than a drift.
+    """
     gen = _genscore()
-    assert A.scoring_r(gen) == pytest.approx(0.8159, abs=1e-3)
-    assert A.ranking_rho(gen) == pytest.approx(0.7351, abs=1e-3)
+    assert len(gen) == 285, "a short GenScore dump silently changes the target"
+    assert A.scoring_r(gen) == pytest.approx(0.8127, abs=1e-3)
+    assert A.ranking_rho(gen) == pytest.approx(0.7281, abs=1e-3)
+
+    reduced = gen[~gen["pdbid"].isin(["4k18", "4mme"])]
+    assert A.scoring_r(reduced) == pytest.approx(0.8159, abs=1e-3)
+    assert A.ranking_rho(reduced) == pytest.approx(0.7351, abs=1e-3)
 
 
 def test_vina_scoring_power() -> None:
@@ -79,7 +94,8 @@ def test_we_do_not_yet_beat_genscore() -> None:
 def test_metrics_table_assembles_from_the_dump_tree() -> None:
     metrics, sig = report.comparison(_RESULTS)
     assert "GenScore" in metrics.index
-    assert metrics.loc["GenScore", "scoring_R"] == pytest.approx(0.8159, abs=1e-3)
+    # All 285 complexes; see test_genscore_reference_numbers for why not 0.8159.
+    assert metrics.loc["GenScore", "scoring_R"] == pytest.approx(0.8127, abs=1e-3)
     assert not sig.empty
 
 

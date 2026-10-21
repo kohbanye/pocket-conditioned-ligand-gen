@@ -25,3 +25,21 @@
 [submodule "third_party/flowr"]
 	path = third_party/flowr
 	url = https://github.com/jule-c/flowr.git
+[submodule "third_party/GenScore"]
+	path = third_party/GenScore
+	url = https://github.com/sc8668/GenScore.git
+[submodule "third_party/RTMScore"]
+	path = third_party/RTMScore
+	url = https://github.com/sc8668/RTMScore.git
+[submodule "third_party/GIGN"]
+	path = third_party/GIGN
+	url = https://github.com/guaguabujianle/GIGN
+[submodule "third_party/OnionNet-2"]
+	path = third_party/OnionNet-2
+	url = https://github.com/zchwang/OnionNet-2
+[submodule "third_party/Sfcnn"]
+	path = third_party/Sfcnn
+	url = https://github.com/bioinfocqupt/Sfcnn.git
+[submodule "third_party/PLANET"]
+	path = third_party/PLANET
+	url = https://github.com/ComputArtCMCG/PLANET.git

@@ -55,6 +55,7 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
         mask_random_prob: float = 0.1,
         code_neighbours: Path | None = None,
         ligand_only_masking: bool = False,
+        ligand_block_masking: bool = False,
         seed: int = DEFAULT_SEED,
     ) -> None:
         self.block_size = block_size
@@ -64,7 +65,8 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
         # into the per-item seed keeps that while making the whole schedule
         # reproducible -- an unseeded generator gave dynamism but no
         # reproducibility, and a seed without the epoch would give the reverse.
-        self.epoch = 0
+        # Shared storage makes epoch changes visible to persistent workers.
+        self._epoch = torch.zeros((), dtype=torch.int64).share_memory_()
         self.base_vocab_size = base_vocab_size
         self.mask_token_id = mask_token_id
         self.mask_prob = mask_prob
@@ -74,6 +76,7 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
         self.mask_replace_prob = mask_replace_prob
         self.mask_random_prob = mask_random_prob
         self.ligand_only_masking = ligand_only_masking
+        self.ligand_block_masking = ligand_block_masking
         # A uniformly random code is an obvious intruder -- it decodes somewhere
         # unrelated, so spotting it teaches outlier detection rather than
         # repair. The errors this model has to repair are near misses: measured
@@ -113,7 +116,11 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
 
     def set_epoch(self, epoch: int) -> None:
         """Advance the masking schedule (see the note in ``__init__``)."""
-        self.epoch = epoch
+        self._epoch.fill_(epoch)
+
+    @property
+    def epoch(self) -> int:
+        return int(self._epoch.item())
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         rng = np.random.default_rng(
@@ -143,6 +150,18 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
                 rate = float(rng.uniform(self.mask_prob, self.mask_prob_max))
             k = max(1, round(rate * maskable.size))
             chosen = rng.choice(maskable, size=k, replace=False)
+            if self.ligand_block_masking:
+                # Retain exactly the baseline component mask counts. Only the
+                # topology of selected ligand codes changes to a contiguous
+                # token-order span; this does not imply spatial contiguity.
+                in_ligand = np.cumsum(arr == L_OPEN_ID) > np.cumsum(arr == L_CLOSE_ID)
+                ligand = np.flatnonzero(in_ligand & (arr >= NUM_SPECIAL))
+                n_ligand = int(in_ligand[chosen].sum())
+                if n_ligand:
+                    start = int(rng.integers(0, len(ligand) - n_ligand + 1))
+                    chosen = np.concatenate(
+                        (chosen[~in_ligand[chosen]], ligand[start : start + n_ligand])
+                    )
             labels[chosen] = arr[chosen]
 
             draw = rng.random(k)
@@ -230,6 +249,9 @@ class MLMTokenDataModule(L.LightningDataModule):
                         else None
                     ),
                     ligand_only_masking=self.config.ligand_only_masking,
+                    ligand_block_masking=getattr(
+                        self.config, "ligand_block_masking", False
+                    ),
                     seed=self._seed,
                 )
 

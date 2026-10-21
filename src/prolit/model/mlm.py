@@ -24,10 +24,18 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from prolit.tokenizers.lm_vocab import PAD_ID
+from prolit.tokenizers.lm_vocab import (
+    L_CLOSE_ID,
+    L_OPEN_ID,
+    P_CLOSE_ID,
+    P_OPEN_ID,
+    PAD_ID,
+)
 
 if TYPE_CHECKING:
     from prolit.config import ProLITMLMConfig
+
+IGNORE_INDEX = -100
 
 
 # --- rotary position embeddings (non-interleaved, ESM3 convention) ----------
@@ -209,6 +217,33 @@ class MLMOutput:
     logits: Tensor
 
 
+def component_balanced_mlm_loss(
+    logits: Tensor, labels: Tensor, input_ids: Tensor
+) -> Tensor:
+    """Mean component CE per example, then mean over nonempty examples.
+
+    Intact boundary markers identify protein/ligand spans even after corruption.
+    Missing components are omitted rather than halving a ligand-only objective.
+    Tensor-only reductions keep empty ranks differentiable and DDP compatible.
+    """
+    ce = F.cross_entropy(
+        logits.flatten(0, 1).float(),
+        labels.flatten(),
+        ignore_index=-100,
+        reduction="none",
+    ).view_as(labels)
+    means, present = [], []
+    for opening, closing in ((P_OPEN_ID, P_CLOSE_ID), (L_OPEN_ID, L_CLOSE_ID)):
+        inside = (input_ids == opening).cumsum(-1) > (input_ids == closing).cumsum(-1)
+        selected = inside & (labels != IGNORE_INDEX)
+        count = selected.sum(-1)
+        means.append((ce * selected).sum(-1) / count.clamp_min(1))
+        present.append(count > 0)
+    counts = torch.stack(present, -1).sum(-1)
+    per_example = torch.stack(means, -1).sum(-1) / counts.clamp_min(1)
+    return per_example.sum() / (counts > 0).sum().clamp_min(1)
+
+
 class ProLITMLM(nn.Module):
     """ESM3-style encoder + MLM head over the VQ-VAE complex-token vocabulary."""
 
@@ -240,11 +275,24 @@ class ProLITMLM(nn.Module):
     def get_input_embeddings(self) -> nn.Embedding:
         return self.embed
 
-    def encode(self, input_ids: Tensor, attention_mask: Tensor | None = None) -> Tensor:
+    def encode(
+        self,
+        input_ids: Tensor,
+        attention_mask: Tensor | None = None,
+        *,
+        return_all_layers: bool = False,
+    ) -> Tensor:
         """Return the final normed hidden states (B, L, hidden), pre-MLM-head.
 
         Shared by the MLM objective and by the pose-scoring head, which pools
         these representations over the ligand span instead of predicting tokens.
+
+        ``return_all_layers`` instead returns ``(1 + num_hidden_layers, B, L,
+        hidden)``: the embedding output followed by every layer's output, each
+        through this module's own final LayerNorm so the states share one scale.
+        It adds no parameters, and the last state is what the single-tensor form
+        returns, so a head that mixes the stack can reproduce today's behaviour
+        exactly by putting all its weight on the last state.
         """
         # Additive key-padding bias (B, 1, 1, S): 0 for real tokens, large
         # negative for pad. Built with masked_fill to avoid 0 * -inf = NaN.
@@ -256,25 +304,37 @@ class ProLITMLM(nn.Module):
             attn_bias.masked_fill_(pad, torch.finfo(dtype).min)
 
         x = self.embed(input_ids)
+        if not return_all_layers:
+            for layer in self.layers:
+                x = layer(x, attn_bias)
+            return self.norm(x)
+        states = [self.norm(x)]
         for layer in self.layers:
             x = layer(x, attn_bias)
-        return self.norm(x)
+            states.append(self.norm(x))
+        return torch.stack(states, dim=0)
 
     def forward(
         self,
         input_ids: Tensor,
         attention_mask: Tensor | None = None,
         labels: Tensor | None = None,
+        *,
+        component_balanced_loss: bool = False,
     ) -> MLMOutput:
         x = self.encode(input_ids, attention_mask)
         logits = self.head(x)
 
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)).float(),
-                labels.view(-1),
-                ignore_index=-100,
+            loss = (
+                component_balanced_mlm_loss(logits, labels, input_ids)
+                if component_balanced_loss
+                else F.cross_entropy(
+                    logits.view(-1, logits.size(-1)).float(),
+                    labels.view(-1),
+                    ignore_index=-100,
+                )
             )
         return MLMOutput(loss=loss, logits=logits)
 

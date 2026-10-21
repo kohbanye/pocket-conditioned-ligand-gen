@@ -35,8 +35,32 @@ Report = tuple[pd.DataFrame, pd.DataFrame]  # (metrics, significance)
 #: names are accepted so dumps carried over from the source repo read unchanged.
 BASELINES = (
     ("GenScore", "genscore", "score"),
+    # Measured here with each model's own released weights, on the same poses
+    # and labels as our arms -- see affinity_bench.adapters. GIGN ships three
+    # checkpoints; scoring.csv is their mean and the per-checkpoint dumps sit
+    # beside it, because picking the best would be selection on the test set.
+    #
+    # The label says "mean of 3" because that mean IS AN ENSEMBLE, and an
+    # unlabelled ensemble row beside single-model rows misreads as a
+    # single-model result. Verified: scoring.csv equals the arithmetic mean of
+    # the three repeats' predictions to 1.8e-15. Averaging them buys GIGN
+    # +0.0157 R and +0.0608 rho over its own single-model mean --
+    # per-repeat 0.8448/0.6860, 0.8410/0.7316, 0.8323/0.7105, mean-of-single
+    # 0.8393/0.7094, against 0.8550/0.7702 for the ensemble. More rho than the
+    # whole gap this bench is trying to close, so which quantity the row holds
+    # decides whether a comparison is ensemble-vs-ensemble or not.
+    # See docs/results/2026-09-14_leak_sensitivity_and_the_gign_bar.md.
+    ("GIGN (mean of 3)", "gign", "score"),
+    ("OnionNet-2", "onionnet2", "score"),
     ("Boltz-2", "boltz2", "score"),
     ("Vina", "vina", "vina_score"),
+    # The first baseline that sees the pose and is given NO explicit
+    # interaction features, so it is the like-for-like peer of our arms.
+    # Upstream reports 0.7928 on 283 complexes; measured here on all 285.
+    ("Sfcnn", "sfcnn", "head"),
+    # Interaction-free but pose-blind (2D ligand graph), so it belongs with
+    # Boltz-2 as a reference column rather than beside the scoring functions.
+    ("PLANET", "planet", "head"),
 )
 #: Every method this bench is judged against beats-or-not.
 REFERENCE = "GenScore"
