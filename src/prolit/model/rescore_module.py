@@ -185,7 +185,7 @@ class ComplexRescoreModule(L.LightningModule):
         if self.lora_rank:
             for name, param in self.encoder.named_parameters():
                 if "lora_" in name:
-                    param.requires_grad_(True)  # named `mode`, not `requires_grad`
+                    param.requires_grad = True
 
     def _freeze_encoder(self) -> None:
         """Train the head only: 0.59M parameters instead of 99.6M.

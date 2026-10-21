@@ -844,7 +844,7 @@ class TransformerVQVAE(nn.Module):
                     reduction="none",
                 )
                 w = weights[head_mask]
-                if self.config.balanced_chem_loss:
+                if getattr(self.config, "balanced_chem_loss", False):
                     # Balance over (source, class) jointly, not class alone. A
                     # pocket brings ~200 atoms and its ligand ~25, so a head can
                     # satisfy a pooled target on protein rows while the ligand

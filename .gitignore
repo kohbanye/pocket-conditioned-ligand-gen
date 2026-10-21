@@ -287,3 +287,11 @@ notebooks/*.html
 /benchmarks/sbdd-bench/data
 /benchmarks/sbdd-bench/weights
 /benchmarks/sbdd-bench/results_*
+
+# Per-loop snapshots of the library, taken so a long sweep keeps running while
+# src/ moves under it, and the tests that drive them. The test imports the
+# snapshot by sys.path, so committing it without the snapshot makes collection
+# fail in every checkout but the machine that holds one -- which is exactly
+# what happened: CI could not collect test_m14_readout.py at all.
+/experiments/
+/tests/test_m14_readout.py

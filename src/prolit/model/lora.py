@@ -27,8 +27,7 @@ class LoRALinear(nn.Module):
             raise ValueError(msg)
         self.base = base
         for param in self.base.parameters():
-            # Positional: Parameter.requires_grad_ names it `mode`, not `requires_grad`.
-            param.requires_grad_(False)
+            param.requires_grad = False
         self.lora_a = nn.Linear(base.in_features, rank, bias=False)
         self.lora_b = nn.Linear(rank, base.out_features, bias=False)
         nn.init.normal_(self.lora_a.weight, std=LORA_INIT_STD)
