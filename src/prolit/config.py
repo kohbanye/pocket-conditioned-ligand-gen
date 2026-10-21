@@ -575,6 +575,17 @@ class ProLITMLMConfig:
     max_position_embeddings: int = 1024
     tie_word_embeddings: bool = True
 
+    #: Auxiliary per-token contact heads over the ligand span. Off by default,
+    #: and that matters for more than taste: the heads are ``nn.Module``
+    #: attributes, so turning them on changes the state_dict. A checkpoint
+    #: trained without them loads into a model built from its OWN pickled
+    #: config, which has this False, and is unaffected.
+    contact_heads: bool = False
+    #: Class counts, mirroring :mod:`prolit.chem.contacts`. Named here rather
+    #: than imported so the model layer does not depend on the chemistry layer.
+    contact_residue_classes: int = 21
+    contact_itype_classes: int = 4
+
     @property
     def head_dim(self) -> int:
         return self.hidden_size // self.num_attention_heads
@@ -626,6 +637,17 @@ class MLMTrainingConfig:
     # When True, only ligand (``<l>..</l>``) tokens are masked -> the model learns
     # P(ligand | pocket) bidirectionally (a condition-only / rescoring-tuned MLM).
     ligand_only_masking: bool = False
+    #: Weight on each auxiliary contact loss, added to the MLM loss. Empty
+    #: means the heads still run (if the model config enables them) and are
+    #: logged, but contribute no gradient -- which is how to read off the
+    #: untrained baseline without changing the objective. ``model.contact_heads``
+    #: must be True for any of this to exist.
+    contact_loss_weights: dict[str, float] = field(default_factory=dict)
+    #: Train the auxiliary heads only, leaving the encoder exactly as the
+    #: warm-start checkpoint left it. The point is attribution: a generation
+    #: arm that uses the head must not also be using a different encoder, or a
+    #: change in clash rate cannot be assigned to the contact signal.
+    freeze_encoder: bool = False
     # Opt-in affinity representation ablations; no encoder/head parameter changes.
     component_balanced_loss: bool = False
     ligand_block_masking: bool = False

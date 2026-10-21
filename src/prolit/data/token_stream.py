@@ -22,10 +22,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol
 
-import numpy as np  # noqa: TC002
+import numpy as np
 import torch
 
 from prolit.data.descriptors import collate_molecules
+from prolit.data.token_io import CONTACT_IGNORE
 
 if TYPE_CHECKING:
     from prolit.data.token_io import SplitWriter
@@ -74,6 +75,12 @@ class ComplexTokenEncoder:
         self.device = device
         self._protein: dict[str, list[torch.Tensor | None]] = {s: [] for s in writers}
         self._ligand: dict[str, list[torch.Tensor | None]] = {s: [] for s in writers}
+        #: Per-LIGAND-ATOM auxiliary labels, one dict per queued document.
+        #: Expanded to per-TOKEN arrays at flush, where the protein length --
+        #: and therefore the offset of the ligand span -- is finally known.
+        self._labels: dict[str, list[dict[str, np.ndarray] | None]] = {
+            s: [] for s in writers
+        }
 
     # -- input ---------------------------------------------------------
     def add(
@@ -81,12 +88,20 @@ class ComplexTokenEncoder:
         split: str,
         protein: np.ndarray | None,
         ligand: np.ndarray | None = None,
+        contact_labels: dict[str, np.ndarray] | None = None,
     ) -> None:
-        """Queue one document. Unknown splits are dropped (e.g. a held-out PDB)."""
+        """Queue one document. Unknown splits are dropped (e.g. a held-out PDB).
+
+        ``contact_labels`` maps a label name to one entry per LIGAND ATOM, in
+        the order the atoms are emitted. They are rotation-invariant -- a rigid
+        rotation does not change which residue an atom touches -- so a caller
+        augmenting by rotation passes the same arrays for every copy.
+        """
         if split not in self._protein:
             return
         self._protein[split].append(self._norm(protein))
         self._ligand[split].append(self._norm(ligand))
+        self._labels[split].append(contact_labels)
         if len(self._protein[split]) >= self.batch_size:
             self.flush(split)
 
@@ -104,18 +119,63 @@ class ComplexTokenEncoder:
         """Encode and write everything queued for one split."""
         proteins = self._protein[split]
         ligands = self._ligand[split]
+        labels = self._labels[split]
         if not proteins:
             return
         protein_codes = self._encode_column(proteins)
         ligand_codes = self._encode_column(ligands)
-        self.writers[split].write(
-            [
-                self.vocab.build_sequence(protein_codes[i], ligand_codes[i])
-                for i in range(len(proteins))
-            ]
+        sequences = [
+            self.vocab.build_sequence(protein_codes[i], ligand_codes[i])
+            for i in range(len(proteins))
+        ]
+        token_labels = self._expand_labels(
+            labels, protein_codes, ligand_codes, sequences
         )
+        # Called with one argument when there are no labels, so a corpus that
+        # does not use them -- and any writer-like object written against the
+        # old signature -- behaves exactly as before.
+        if token_labels is None:
+            self.writers[split].write(sequences)
+        else:
+            self.writers[split].write(sequences, token_labels)
         proteins.clear()
         ligands.clear()
+        labels.clear()
+
+    def _expand_labels(
+        self,
+        labels: list[dict[str, np.ndarray] | None],
+        protein_codes: list[list[int]],
+        ligand_codes: list[list[int]],
+        sequences: list[list[int]],
+    ) -> dict[str, list[np.ndarray]] | None:
+        """Per-atom labels -> per-token arrays aligned with ``sequences``.
+
+        ``build_sequence`` lays out ``<bos><p> protein </p><l> ligand </l><eos>``,
+        so a ligand atom's token sits at ``4 + len(protein_codes) + i``.
+        Everything else is :data:`CONTACT_IGNORE`: the specials, the pocket
+        block, and any ligand atom the caller had no label for.
+        """
+        names = sorted({n for d in labels if d for n in d})
+        if not names:
+            return None
+        out: dict[str, list[np.ndarray]] = {n: [] for n in names}
+        for i, seq in enumerate(sequences):
+            start = 4 + len(protein_codes[i])
+            n_lig = len(ligand_codes[i])
+            for name in names:
+                arr = np.full(len(seq), CONTACT_IGNORE, dtype=np.uint8)
+                per_atom = (labels[i] or {}).get(name)
+                if per_atom is not None:
+                    if len(per_atom) != n_lig:
+                        msg = (
+                            f"{name}: {len(per_atom)} labels for {n_lig} ligand "
+                            "codes; the tokenizer dropped or added atoms"
+                        )
+                        raise ValueError(msg)
+                    arr[start : start + n_lig] = np.asarray(per_atom, dtype=np.uint8)
+                out[name].append(arr)
+        return out
 
     def flush_all(self) -> None:
         """Flush every split; call once the source is exhausted."""

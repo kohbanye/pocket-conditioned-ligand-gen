@@ -50,6 +50,16 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     parser.add_argument("--accumulate", type=int, default=None)
     parser.add_argument("--mask-prob", type=float, default=None)
     parser.add_argument(
+        "--component-balanced-loss",
+        action="store_true",
+        help="Equal pocket/ligand CE per example; unchanged model/head.",
+    )
+    parser.add_argument(
+        "--ligand-block-masking",
+        action="store_true",
+        help="Contiguous ligand token spans with baseline component mask counts.",
+    )
+    parser.add_argument(
         "--mask-replace-prob",
         type=float,
         default=None,
@@ -91,7 +101,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         "An epoch of this corpus is ~7.5 h on one GPU, and Lightning only "
         "checkpoints at validation, so the default of 1.0 means a run that "
         "dies or hits its walltime mid-epoch leaves NOTHING -- which is exactly "
-        "what happened twice on 2026-08-20 (once at 84%, once at 92%). Set it "
+        "what happened twice on 2026-08-20 (once at 84%%, once at 92%%). Set it "
         "to 0.25 for long continuations so partial progress survives.",
     )
     parser.add_argument(
@@ -114,6 +124,38 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         type=int,
         default=0,
         help="Stop when val/loss has not improved for this many checks (0=off).",
+    )
+    parser.add_argument(
+        "--contact-heads",
+        action="store_true",
+        help="Add the auxiliary per-token contact heads (nearest-residue class "
+        "and interaction type) over the masked ligand positions. Needs a corpus "
+        "built with --contact-labels; without the label streams the heads run "
+        "but get no gradient. Changes the state_dict, so a checkpoint trained "
+        "with this flag only loads into a model configured with it.",
+    )
+    parser.add_argument(
+        "--freeze-encoder",
+        action="store_true",
+        help="Train the contact heads only, leaving the encoder exactly as "
+        "--init-from left it. Needed for attribution: a generation arm using "
+        "the head must not also be using a different encoder.",
+    )
+    parser.add_argument(
+        "--contact-res-weight",
+        type=float,
+        default=0.0,
+        help="Weight on the nearest-residue loss. 0 leaves the head untrained "
+        "but still logged, which is how to read the baseline without changing "
+        "the objective.",
+    )
+    parser.add_argument(
+        "--contact-itype-weight",
+        type=float,
+        default=0.0,
+        help="Weight on the interaction-type loss. Measured 2026-10-09 to be "
+        "the weaker of the two: masking the atom removes its own element, "
+        "which is most of what decides its interaction type.",
     )
     parser.add_argument(
         "--init-from",
@@ -176,7 +218,19 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.num_workers = args.num_workers
     if args.atom_codebook_size is not None:
         config.model.atom_codebook_size = args.atom_codebook_size
+    config.model.contact_heads = args.contact_heads
+    config.freeze_encoder = args.freeze_encoder
+    config.contact_loss_weights = {
+        name: w
+        for name, w in (
+            ("res", args.contact_res_weight),
+            ("itype", args.contact_itype_weight),
+        )
+        if w
+    }
     config.ligand_only_masking = args.ligand_only_masking
+    config.component_balanced_loss = args.component_balanced_loss
+    config.ligand_block_masking = args.ligand_block_masking
     if args.mask_prob_max is not None:
         config.mask_prob_max = args.mask_prob_max
 

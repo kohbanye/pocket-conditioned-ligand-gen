@@ -35,7 +35,9 @@ from typing import Any
 
 import numpy as np
 import torch
+from descriptor_flags import add_descriptor_arguments, descriptor_kwargs
 
+from prolit.chem.contacts import contact_labels
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
@@ -43,6 +45,7 @@ from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
+    pocket_context_arrays,
     precompute_receptor_atom_features_from_text,
     rotate_atom_descriptor,
 )
@@ -63,6 +66,8 @@ logger = logging.getLogger(__name__)
 _w_prot_desc: ProteinAtomDescriptor | None = None
 _w_lig_desc: LigandAtomDescriptor | None = None
 _w_pocket_config: PocketExtractionConfig | None = None
+#: Whether this build writes the auxiliary contact label streams.
+_w_contact_labels: bool = False
 _w_allowed: dict[str, str] = {}
 _w_complex: bool = False
 _w_min_heavy: int = 6
@@ -153,13 +158,15 @@ def _worker_init(  # noqa: PLR0913
     min_heavy: int,
     max_heavy: int,
     stapled: dict | None = None,
+    contact_labels_on: bool = False,
 ) -> None:
     global _w_prot_desc, _w_lig_desc, _w_pocket_config  # noqa: PLW0603
     global _w_allowed, _w_complex, _w_min_heavy, _w_max_heavy  # noqa: PLW0603
-    global _w_stapled  # noqa: PLW0603
+    global _w_stapled, _w_contact_labels  # noqa: PLW0603
     _w_prot_desc = ProteinAtomDescriptor()
     _w_lig_desc = LigandAtomDescriptor()
     _w_pocket_config = PocketExtractionConfig(**pocket_config_dict)
+    _w_contact_labels = contact_labels_on
     _w_allowed = allowed
     _w_complex = complex_mode
     _w_min_heavy = min_heavy
@@ -255,16 +262,39 @@ def _process_zip(zip_path: str) -> list[tuple]:  # noqa: C901, PLR0912, PLR0915
             if prot_desc.shape[0] == 0:
                 continue
             lig_desc = None
+            clabels = None
             if _w_complex:
-                lig_desc, _e, _lm = _w_lig_desc.compute(
-                    mol["atoms"], mol["bonds"], frame
+                # Read off the worker's pocket config, which arrived as
+                # asdict(pocket_cfg): a standalone keyword would silently stay
+                # False here and the corpus would come out identical to the
+                # plain one, with nothing raised.
+                pkt = (
+                    pocket_context_arrays(pocket.atom_coords, prot_desc, frame)
+                    if _w_pocket_config.pocket_context
+                    else (None, None)
                 )
+                lig_desc, _e, _lm = _w_lig_desc.compute(
+                    mol["atoms"], mol["bonds"], frame, *pkt
+                )
+                # Labels here, not in the parent: this is the only place the
+                # real coordinates and the pocket's residue names exist. The
+                # parent sees codes, from which neither is recoverable.
+                if _w_contact_labels and lig_desc.shape[0] == heavy.shape[0]:
+                    res_lab, itype_lab = contact_labels(
+                        heavy,
+                        [a[0] for a in mol["atoms"] if a[0] != "H"],
+                        pocket.atom_coords,
+                        pocket.atom_elements,
+                        pocket.atom_aa,
+                        pocket.atom_names,
+                    )
+                    clabels = {"res": res_lab, "itype": itype_lab}
                 if lig_desc.shape[0] == 0:
                     continue
         except Exception:
             logger.exception("Error on system %s in %s", sid, zip_path)
             continue
-        out.append((label, prot_desc, lig_desc))
+        out.append((label, prot_desc, lig_desc, clabels))
     zf.close()
     return out
 
@@ -336,6 +366,15 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
     )
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument("--max-residues", type=int, default=50)
+    parser.add_argument("--pocket-distance", choices=("ca", "heavy"), default="ca")
+    parser.add_argument(
+        "--contact-labels",
+        action="store_true",
+        help="Also write per-token {split}.res / {split}.itype label streams "
+        "for the MLM's auxiliary contact heads. Complex mode only: a "
+        "protein-only document has no protein-ligand contact to label.",
+    )
+    add_descriptor_arguments(parser)
     parser.add_argument("--num-rotations", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -422,7 +461,12 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
     logger.info("Streaming %d PLINDER zips (complex=%s)", len(zips), args.complex)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    writers = {s: SplitWriter(args.out_dir, s) for s in ("train", "val")}
+    writers = {
+        s: SplitWriter(
+            args.out_dir, s, token_labels=args.contact_labels and args.complex
+        )
+        for s in ("train", "val")
+    }
     enc = (
         None
         if stapled_mode
@@ -434,12 +478,16 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
 
     from dataclasses import asdict  # noqa: PLC0415
 
-    pocket_cfg = PocketExtractionConfig(max_residues=args.max_residues)
+    pocket_cfg = PocketExtractionConfig(
+        max_residues=args.max_residues,
+        pocket_distance=args.pocket_distance,
+        **descriptor_kwargs(args),
+    )
     n_used = 0
 
     def _consume(results: list[tuple]) -> None:
         nonlocal n_used
-        for label, prot, lig in results:
+        for label, prot, lig, clabels in results:
             n_used += 1
             if stapled_cfg is not None:
                 # The worker already produced the finished stream, and no
@@ -450,13 +498,16 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
             n_rot = args.num_rotations if label == "train" else 1
             for r in range(n_rot):
                 if r == 0:
-                    enc.add(label, prot, lig)
+                    enc.add(label, prot, lig, clabels)
                 else:
                     rot = random_rotation_matrix(rng)
+                    # Same labels for every rotation: which residue an
+                    # atom touches is invariant under a rigid rotation.
                     enc.add(
                         label,
                         rotate_atom_descriptor(prot, rot),
                         rotate_atom_descriptor(lig, rot) if lig is not None else None,
+                        clabels,
                     )
 
     from tqdm import tqdm  # noqa: PLC0415
@@ -467,6 +518,7 @@ def main() -> None:  # noqa: PLR0915, C901, PLR0912
         "min_heavy": args.min_heavy,
         "max_heavy": args.max_heavy,
         "stapled": stapled_cfg,
+        "contact_labels_on": args.contact_labels and args.complex,
     }
     if args.num_workers > 0:
         import functools  # noqa: PLC0415
