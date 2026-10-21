@@ -59,6 +59,21 @@ class HeadSpec:
 
 
 @dataclass(frozen=True)
+class StapledSpec:
+    """The ESM3 x ConfSeq baseline's stand-ins for a VQ-VAE.
+
+    Paths relative to the source repo, as in ``pose_rescoring_bench``'s spec of
+    the same name: the ESM3 structure-token cache keyed by CASF target id, the
+    ConfSeq checkout, and the frozen ConfSeq vocabulary every stapled corpus
+    was written with.
+    """
+
+    esm3_cache: str = "data/esm3_tokens_casf2016"
+    confseq_repo: str = "third_party/ConfSeq"
+    confseq_vocab: str = "data/stapled/confseq_vocab.json"
+
+
+@dataclass(frozen=True)
 class Variant:
     """One affinity arm: a tokenizer, a backbone, and the head(s) on top.
 
@@ -101,6 +116,9 @@ class Variant:
     #: LoRA rank the head was TRAINED with (0 = none). Like readout and
     #: layer_mix it changes the state_dict, so a mismatch fails loudly.
     lora_rank: int = 0
+    #: Set for the ESM3 x ConfSeq baseline, which has no VQ-VAE: pocket codes
+    #: come from an ESM3 cache and the ligand from ConfSeq plus 4 pose tokens.
+    stapled: StapledSpec | None = None
     notes: str = ""
 
     @property
@@ -1393,6 +1411,43 @@ REGISTRY: dict[str, Variant] = {
     | IMASK_VARIANTS
     | IMASK_DROP_VARIANTS
 )
+
+#: The ESM3 x ConfSeq baseline on the three headline recipes (2026-09-19).
+#: Same corpora (the stapled tokenization of the same union complexes, the same
+#: val proteins), same flags and the SAME seeds as the V3 families, so each
+#: stapled head pairs with the ProLIT head of its seed; only the tokenizer and
+#: the MLM it implies (``mlm_stapled``, the rescoring baseline's backbone)
+#: differ. Scored in one frame: ESM3 and ConfSeq codes do not rotate.
+STAPLED_MLM = "pocket-ligand-mlm/mlm_stapled/checkpoints/mlm-e02-vl0.7394.ckpt"
+_STAPLED_ARMS = (
+    # (family, head stem, ProLIT twin family, pocket distance)
+    ("stapled_unionnc_corr", "aff_stapled_unionnccorr", "e250_unionnc_corr_v3", "ca"),
+    ("stapled_unionr8_ens", "aff_stapled_unionr8", "e250_unionr8_ens_v3", "ca"),
+    ("stapled_unionheavy", "aff_stapled_unionheavy", "e250_unionheavy_v3", "heavy"),
+)
+
+STAPLED_VARIANTS: dict[str, Variant] = {
+    f"{family}_s{seed}": Variant(
+        name=f"{family}_s{seed}",
+        description=f"ESM3 x ConfSeq + mlm_stapled, {twin} recipe, seed {seed}.",
+        mlm=STAPLED_MLM,
+        heads=(HeadSpec(f"{stem}_s{seed}", "kdki-mean"),),
+        codebook_size=12733,
+        pocket_distance=pocket,
+        stapled=StapledSpec(),
+        notes=f"stapled baseline; seed-paired with {twin}_s{seed}",
+    )
+    for family, stem, twin, pocket in _STAPLED_ARMS
+    for seed in V3_SEED_FAMILIES[twin]
+}
+REGISTRY.update(STAPLED_VARIANTS)
+
+#: Stapled family -> the ProLIT family it is seed-paired with.
+STAPLED_TWIN: dict[str, str] = {family: twin for family, _s, twin, _p in _STAPLED_ARMS}
+STAPLED_SEED_FAMILIES: dict[str, dict[int, str]] = {
+    family: {seed: f"{family}_s{seed}" for seed in V3_SEED_FAMILIES[twin]}
+    for family, _s, twin, _p in _STAPLED_ARMS
+}
 
 #: Which registered arms are the same experiment at a different training seed.
 #:

@@ -43,8 +43,19 @@ ALLOWED_IMPORTS: dict[str, set[str]] = {
 }
 
 #: Our own top-level import roots, so third-party imports are ignored.
+#:
+#: ``src`` is deliberately NOT here. It is a directory, not an import root --
+#: the library inside it is imported as ``prolit`` -- so an ``import src.*``
+#: anywhere in this repo always refers to a *vendored third-party* package.
+#: FoldToken ships one, and
+#: ``benchmarks/recon-bench/scripts/foldtoken_reconstruct_cli.py``
+#: imports ``src.chroma.data`` from it. Listing ``src`` here flagged that as a
+#: layer violation, a repo-wide src->prolit rename "fixed" the test, and the
+#: FoldToken baseline then failed every sample with a one-line `setup failed`
+#: for weeks. A test that is satisfied by breaking the code is worse than no
+#: test; see benchmarks/recon-bench/tests/test_foldtoken_cli_imports.py.
 OURS = {
-    "prolit", "prolit_bench", "pipelines", "scripts", "benchmarks", "src",
+    "prolit", "prolit_bench", "pipelines", "scripts", "benchmarks",
     "recon_bench", "pose_rescoring_bench", "sbdd_bench",
 }
 

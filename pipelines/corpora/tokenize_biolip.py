@@ -36,7 +36,9 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from descriptor_flags import add_descriptor_arguments, descriptor_kwargs
 
+from prolit.chem.contacts import contact_labels
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
 from prolit.data.token_io import SplitWriter
 from prolit.data.token_stream import ComplexTokenEncoder
@@ -44,6 +46,7 @@ from prolit.seeding import add_seed_argument, seed_from_args
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
+    pocket_context_arrays,
     precompute_receptor_atom_features_from_text,
     rotate_atom_descriptor,
 )
@@ -64,6 +67,8 @@ logger = logging.getLogger(__name__)
 _w_prot_desc: ProteinAtomDescriptor | None = None
 _w_lig_desc: LigandAtomDescriptor | None = None
 _w_pocket_config: PocketExtractionConfig | None = None
+#: Whether this build writes the auxiliary contact label streams.
+_w_contact_labels: bool = False
 _w_labels: dict[str, str] = {}
 _w_ccd_smiles: dict[str, str] = {}
 _w_biolip_dir: Path = Path("data/biolip")
@@ -178,14 +183,16 @@ def _worker_init(  # noqa: PLR0913
     min_heavy: int,
     max_heavy: int,
     stapled: dict | None = None,
+    contact_labels_on: bool = False,
 ) -> None:
     global _w_prot_desc, _w_lig_desc, _w_pocket_config  # noqa: PLW0603
     global _w_labels, _w_ccd_smiles, _w_biolip_dir  # noqa: PLW0603
     global _w_complex, _w_min_heavy, _w_max_heavy  # noqa: PLW0603
-    global _w_stapled, _w_stapled_vocab_only  # noqa: PLW0603
+    global _w_stapled, _w_stapled_vocab_only, _w_contact_labels  # noqa: PLW0603
     _w_prot_desc = ProteinAtomDescriptor()
     _w_lig_desc = LigandAtomDescriptor()
     _w_pocket_config = PocketExtractionConfig(**pocket_config_dict)
+    _w_contact_labels = contact_labels_on
     _w_labels = labels
     _w_ccd_smiles = ccd_smiles
     _w_biolip_dir = Path(biolip_dir)
@@ -212,9 +219,7 @@ def _worker_init(  # noqa: PLR0913
         )
         _w_stapled = StapledEncoder(
             cache=(
-                Esm3TokenCache(Path(stapled["cache"]))
-                if stapled.get("cache")
-                else None
+                Esm3TokenCache(Path(stapled["cache"])) if stapled.get("cache") else None
             ),
             confseq_repo=Path(stapled["confseq_repo"]),
             vocab=vocab_obj,
@@ -325,8 +330,9 @@ def _process_bucket(task: tuple[str, list[tuple]]) -> list[tuple]:  # noqa: C901
                         continue
                     out.append((label, toks, None))
                     continue
-                spocket = _w_stapled.setup_pocket(rec_name[:-4], rec_text_of(
-                    rec_bytes), heavy)
+                spocket = _w_stapled.setup_pocket(
+                    rec_name[:-4], rec_text_of(rec_bytes), heavy
+                )
                 if spocket is None:
                     continue
                 seq, why = _w_stapled.ligand_seq_with_reason(
@@ -345,16 +351,39 @@ def _process_bucket(task: tuple[str, list[tuple]]) -> list[tuple]:  # noqa: C901
             if prot_desc.shape[0] == 0:
                 continue
             lig_desc = None
+            clabels = None
             if _w_complex:
-                lig_desc, _e, _lm = _w_lig_desc.compute(
-                    mol["atoms"], mol["bonds"], frame
+                # Read off the worker's pocket config, which arrived as
+                # asdict(pocket_cfg): a standalone keyword would silently stay
+                # False here and the corpus would come out identical to the
+                # plain one, with nothing raised.
+                pkt = (
+                    pocket_context_arrays(pocket.atom_coords, prot_desc, frame)
+                    if _w_pocket_config.pocket_context
+                    else (None, None)
                 )
+                lig_desc, _e, _lm = _w_lig_desc.compute(
+                    mol["atoms"], mol["bonds"], frame, *pkt
+                )
+                # Labels here, not in the parent: this is the only place the
+                # real coordinates and the pocket's residue names exist. The
+                # parent sees codes, from which neither is recoverable.
+                if _w_contact_labels and lig_desc.shape[0] == heavy.shape[0]:
+                    res_lab, itype_lab = contact_labels(
+                        heavy,
+                        [a[0] for a in mol["atoms"] if a[0] != "H"],
+                        pocket.atom_coords,
+                        pocket.atom_elements,
+                        pocket.atom_aa,
+                        pocket.atom_names,
+                    )
+                    clabels = {"res": res_lab, "itype": itype_lab}
                 if lig_desc.shape[0] == 0:
                     continue
         except Exception:
             logger.exception("Error on %s_%s_%s_%s", pdb, ccd, ligchain, serial)
             continue
-        out.append((label, prot_desc, lig_desc))
+        out.append((label, prot_desc, lig_desc, clabels))
     return out
 
 
@@ -411,6 +440,15 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
     )
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument("--max-residues", type=int, default=50)
+    parser.add_argument("--pocket-distance", choices=("ca", "heavy"), default="ca")
+    parser.add_argument(
+        "--contact-labels",
+        action="store_true",
+        help="Also write per-token {split}.res / {split}.itype label streams "
+        "for the MLM's auxiliary contact heads. Complex mode only: a "
+        "protein-only document has no protein-ligand contact to label.",
+    )
+    add_descriptor_arguments(parser)
     parser.add_argument("--num-rotations", type=int, default=2)
     parser.add_argument("--num-workers", type=int, default=16)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -467,9 +505,7 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
         )
         mean = np.zeros(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
         std = np.ones(ATOM_DESCRIPTOR_DIM, dtype=np.float32)
-        vocab: AtomLMVocab = AtomLMVocab(
-            codebook_size=2 * args.codebook_size
-        )
+        vocab: AtomLMVocab = AtomLMVocab(codebook_size=2 * args.codebook_size)
     else:
         module = load_atom_vqvae(args.ckpt, device)
         module.eval()
@@ -503,7 +539,12 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
     logger.info("Processing %d BioLIP buckets (complex=%s)", len(codes), args.complex)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    writers = {s: SplitWriter(args.out_dir, s) for s in ("train", "val")}
+    writers = {
+        s: SplitWriter(
+            args.out_dir, s, token_labels=args.contact_labels and args.complex
+        )
+        for s in ("train", "val")
+    }
     enc = (
         None
         if (args.stapled_esm3_cache is not None or args.build_stapled_vocab)
@@ -519,7 +560,7 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
 
     def _consume(results: list[tuple]) -> None:
         nonlocal n_used
-        for label, prot, lig in results:
+        for label, prot, lig, clabels in results:
             n_used += 1
             if stapled_cfg is not None:
                 if prot is None:
@@ -541,20 +582,27 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
             n_rot = args.num_rotations if label == "train" else 1
             for r in range(n_rot):
                 if r == 0:
-                    enc.add(label, prot, lig)
+                    enc.add(label, prot, lig, clabels)
                 else:
                     rot = random_rotation_matrix(rng)
+                    # Same labels for every rotation: which residue an
+                    # atom touches is invariant under a rigid rotation.
                     enc.add(
                         label,
                         rotate_atom_descriptor(prot, rot),
                         rotate_atom_descriptor(lig, rot) if lig is not None else None,
+                        clabels,
                     )
 
     from dataclasses import asdict  # noqa: PLC0415
 
     from tqdm import tqdm  # noqa: PLC0415
 
-    pocket_cfg = PocketExtractionConfig(max_residues=args.max_residues)
+    pocket_cfg = PocketExtractionConfig(
+        max_residues=args.max_residues,
+        pocket_distance=args.pocket_distance,
+        **descriptor_kwargs(args),
+    )
     # Each task carries only its bucket's site list (small), NOT the whole
     # 958k-site dict -- avoids the per-worker dict copy (the 1.195T vmem OOM).
     tasks = [(c, by_bucket[c]) for c in codes]
@@ -585,6 +633,7 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
         "min_heavy": args.min_heavy,
         "max_heavy": args.max_heavy,
         "stapled": stapled_cfg,
+        "contact_labels_on": args.contact_labels and args.complex,
     }
     if args.num_workers > 0:
         import functools  # noqa: PLC0415
@@ -601,9 +650,7 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
             initializer=functools.partial(_worker_init, **init_kwargs),
             initargs=init_args,
         ) as pool:
-            asyncs = [
-                (t[0], pool.apply_async(_process_bucket, (t,))) for t in tasks
-            ]
+            asyncs = [(t[0], pool.apply_async(_process_bucket, (t,))) for t in tasks]
             for code, ar in tqdm(asyncs, total=len(asyncs), desc="buckets"):
                 try:
                     _consume(ar.get(timeout=args.bucket_timeout))
@@ -638,9 +685,7 @@ def main() -> None:  # noqa: PLR0915, PLR0912, C901
         return
 
     meta: dict = {
-        "vocab_size": (
-            stapled_vocab_size if stapled_mode else vocab.vocab_size
-        ),
+        "vocab_size": (stapled_vocab_size if stapled_mode else vocab.vocab_size),
         "all_atom": True,
         "pretrain": {
             "source": "biolip2",

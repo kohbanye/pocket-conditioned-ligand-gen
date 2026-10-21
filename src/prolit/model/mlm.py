@@ -17,7 +17,7 @@ architecture is borrowed.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -215,6 +215,10 @@ class MLMOutput:
 
     loss: Tensor | None
     logits: Tensor
+    #: Auxiliary per-token contact losses, keyed by target name. Empty unless
+    #: the heads are configured AND targets were passed.
+    contact_losses: dict[str, Tensor] = field(default_factory=dict)
+    contact_logits: dict[str, Tensor] = field(default_factory=dict)
 
 
 def component_balanced_mlm_loss(
@@ -257,6 +261,16 @@ class ProLITMLM(nn.Module):
         )
         self.norm = nn.LayerNorm(cfg.hidden_size, bias=False, eps=cfg.layer_norm_eps)
         self.head = MLMHead(cfg.hidden_size, cfg.vocab_size, cfg.layer_norm_eps)
+        # getattr: an older pickled config has no such field, and building a
+        # model from it must not raise.
+        self.contact_heads = nn.ModuleDict()
+        if getattr(cfg, "contact_heads", False):
+            self.contact_heads["res"] = nn.Linear(
+                cfg.hidden_size, getattr(cfg, "contact_residue_classes", 21)
+            )
+            self.contact_heads["itype"] = nn.Linear(
+                cfg.hidden_size, getattr(cfg, "contact_itype_classes", 4)
+            )
         if cfg.tie_word_embeddings:
             self.head.decoder.weight = self.embed.weight
         self.apply(self._init_weights)
@@ -321,6 +335,7 @@ class ProLITMLM(nn.Module):
         labels: Tensor | None = None,
         *,
         component_balanced_loss: bool = False,
+        contact_targets: dict[str, Tensor] | None = None,
     ) -> MLMOutput:
         x = self.encode(input_ids, attention_mask)
         logits = self.head(x)
@@ -336,7 +351,31 @@ class ProLITMLM(nn.Module):
                     ignore_index=-100,
                 )
             )
-        return MLMOutput(loss=loss, logits=logits)
+        contact_losses: dict[str, Tensor] = {}
+        contact_logits: dict[str, Tensor] = {}
+        for name, head in self.contact_heads.items():
+            aux_logits = head(x)
+            contact_logits[name] = aux_logits
+            target = (contact_targets or {}).get(name)
+            if target is None:
+                continue
+            # A batch can legitimately carry no labelled position -- a
+            # ligand-only document has no contact to predict -- and
+            # cross_entropy over an all-ignored target returns NaN, which would
+            # poison the total. Skip instead.
+            if not bool((target != IGNORE_INDEX).any()):
+                continue
+            contact_losses[name] = F.cross_entropy(
+                aux_logits.reshape(-1, aux_logits.size(-1)).float(),
+                target.reshape(-1),
+                ignore_index=IGNORE_INDEX,
+            )
+        return MLMOutput(
+            loss=loss,
+            logits=logits,
+            contact_losses=contact_losses,
+            contact_logits=contact_logits,
+        )
 
 
 def build_prolit_mlm(cfg: ProLITMLMConfig) -> ProLITMLM:

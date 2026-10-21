@@ -235,17 +235,6 @@ wget-log
 /results*/
 benchmarks/*/results*/
 
-# Result dumps and their derived tables: regenerable from a run, and large
-# (6.0M of json, 4.9M of csv against 908K of prose). The notes and figures that
-# read them ARE tracked -- they were kept out because they described artifacts
-# that lived only on this machine, and the weights are published now, so the
-# reason expired. What a number means belongs in git; the bytes it was computed
-# from belong beside the run that produced them.
-/docs/**/*.json
-/docs/**/*.csv
-/docs/**/*.parquet
-/docs/_build/
-
 # Cluster job scripts: what to run is in pipelines/, how to submit it is
 # site-specific. jobs/submit.py generates them; the generated and previously-run
 # ones stay local.
@@ -288,10 +277,36 @@ notebooks/*.html
 /benchmarks/sbdd-bench/weights
 /benchmarks/sbdd-bench/results_*
 
+# Baseline weights and scratch for the pose bench's adapters. The gnina release
+# binary alone is 2 GB, and the pocket/sdf caches under work/ are regenerable
+# from the CASF inputs.
+/benchmarks/pose-rescoring-bench/weights
+/benchmarks/pose-rescoring-bench/work
+/benchmarks/affinity-bench/weights
+/benchmarks/affinity-bench/work
+
+# The investigation record: notes, result dumps, derived tables and figures.
+# The policy CLAUDE.md states is that git carries code while a run directory
+# carries the command that produced it, and docs/ is the prose half of that run
+# directory -- written beside the weights, on the machine that has them, and
+# not reproducible from a checkout.
+#
+# 205 files under here WERE tracked while this line was absent, so the state
+# was neither: the older notes were in git and the newer ones invisible. They
+# are untracked in the same commit as this line and remain on disk, so nothing
+# is lost on this machine and the history still has them. A test that reads one
+# of them skips with a reason rather than failing collection -- see
+# tests/test_m01_reconstruction_contract.py.
+/docs/
+
 # Per-loop snapshots of the library, taken so a long sweep keeps running while
-# src/ moves under it, and the tests that drive them. The test imports the
-# snapshot by sys.path, so committing it without the snapshot makes collection
-# fail in every checkout but the machine that holds one -- which is exactly
-# what happened: CI could not collect test_m14_readout.py at all.
+# src/ moves under it, and the tests that drive them. A test imports its
+# snapshot by sys.path, so committing one without the snapshot makes collection
+# fail in every checkout but the machine that holds it -- which is exactly what
+# happened: CI could not collect test_m14_readout.py at all, and a collection
+# error takes the other 466 tests with it.
 /experiments/
 /tests/test_m14_readout.py
+/tests/test_fresh_prediction_diagnostics.py
+/tests/test_genscore_matched_train.py
+/tests/test_reconstruction_regression_report.py

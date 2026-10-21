@@ -70,6 +70,13 @@ class AtomVQVAEModule(L.LightningModule):
             not unified or getattr(self.config.atom, "keep_clash", False)
         ):
             names.append("clash")
+        if getattr(self.config.atom, "protein_ligand_clash_loss", False):
+            # Declared here, not discovered from the first batch: the balancer
+            # turns this list into parameters/buffers up front, so a term that
+            # appears later is silently dropped. That is exactly what happened
+            # on the first attempt -- training ran cleanly and the new loss had
+            # no effect at all.
+            names.append("clash_pl")
         if unified:
             names.append("pair")
         if getattr(self.config.atom, "local_distance_loss", False):
@@ -94,7 +101,17 @@ class AtomVQVAEModule(L.LightningModule):
     #: derivation puts a factor 1/2 on the Gaussian likelihood and none on the
     #: softmax one, which is the only place the two kinds differ.
     _REGRESSION = frozenset(
-        {"coord", "knn_offsets", "clash", "bond12", "bond13", "dmap", "pair", "local"}
+        {
+            "coord",
+            "knn_offsets",
+            "clash",
+            "clash_pl",
+            "bond12",
+            "bond13",
+            "dmap",
+            "pair",
+            "local",
+        }
     )
 
     #: Everything between the descriptor and the code. Frozen together or not

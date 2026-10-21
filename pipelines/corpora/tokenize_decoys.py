@@ -36,6 +36,7 @@ import torch
 
 # Sibling modules in this directory, imported by bare name: Python puts a
 # script's own directory on sys.path[0], so this resolves from any cwd.
+from descriptor_flags import add_descriptor_arguments, descriptor_kwargs
 from tokenize_biolip import (
     _bucket_code,
     _cd_test_pdbs,
@@ -981,6 +982,7 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
     parser.add_argument("--out-dir", type=Path, default=Path("data/lm_tokens_decoys"))
     parser.add_argument("--codebook-size", type=int, default=8192)
     parser.add_argument("--max-residues", type=int, default=50)
+    add_descriptor_arguments(parser)
     parser.add_argument("--n-complexes", type=int, default=12000)
     parser.add_argument(
         "--n-spin-decoys",
@@ -1203,7 +1205,9 @@ def main() -> None:  # noqa: C901, PLR0915, PLR0912
             std,
             vocab,
             device,
-            PocketExtractionConfig(max_residues=args.max_residues),
+            PocketExtractionConfig(
+                max_residues=args.max_residues, **descriptor_kwargs(args)
+            ),
         )
 
     # CASF-excluded, deduped (pdb, ccd) native sites, shuffled to a subset.

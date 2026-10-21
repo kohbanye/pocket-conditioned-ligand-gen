@@ -124,6 +124,25 @@ class TransformerVQVAEConfig:
     categorical_embed_dim: int = 8
 
 
+def _overlap_term(
+    x: Tensor, pair: Tensor, scored: Tensor, floor: Tensor | float
+) -> tuple[Tensor, Tensor]:
+    """``(mean squared overlap, fraction of scored pairs overlapping)``.
+
+    Shared by the ligand-ligand and protein-ligand terms so the two cannot
+    drift apart in how they measure the same thing. ``floor`` is a scalar for
+    the former and a per-pair tensor for the latter; the arithmetic is
+    identical either way.
+    """
+    loss = (
+        torch.relu(floor - pair).pow(2)[scored].mean()
+        if bool(scored.any())
+        else x.new_zeros(())
+    )
+    overlapping = ((pair < floor) & scored).float().sum()
+    return loss, overlapping / scored.float().sum().clamp_min(1)
+
+
 class TransformerVQVAE(nn.Module):
     """Transformer VQ-VAE with mixed-feature input + multi-head reconstruction."""
 
@@ -507,6 +526,91 @@ class TransformerVQVAE(nn.Module):
         sphi, cphi = project_unit_circle(reshaped[..., 2], reshaped[..., 3])
         return r, theta, sphi, cphi
 
+    def _vdw_radii_per_atom(self, x: Tensor, f: dict[str, FieldSpec]) -> Tensor:
+        """(B, L) van der Waals radius, looked up from the element channel.
+
+        The table is built once and cached: this runs inside the loss, on every
+        batch. ``OTHER`` and anything the table does not name fall back to
+        carbon, matching :func:`~prolit.chem.rigid_fit.vdw_radii`.
+
+        Bondi radii, not Vina's larger scoring set. The readout this term is
+        meant to move counts an overlap below 0.75 of the Bondi sum, and
+        ``docs/results/2026-08-24_it_is_clashes.md`` measured that mixing the
+        two sets is how a pose ends up optimised against a surface nobody
+        scores.
+        """
+        if getattr(self, "_vdw_table", None) is None:
+            from prolit.chem.rigid_fit import vdw_radii  # noqa: PLC0415
+            from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
+                LIGAND_ELEMENT_VOCAB,
+            )
+
+            self._vdw_table = torch.tensor(
+                vdw_radii(list(LIGAND_ELEMENT_VOCAB)), dtype=torch.float32
+            )
+        table = self._vdw_table.to(x.device)
+        idx = x[..., f["element"].start].long().clamp(0, table.numel() - 1)
+        return table[idx]
+
+    def _protein_ligand_clash(  # noqa: PLR0913 -- all six come from one cdist
+        self,
+        x: Tensor,
+        pair: Tensor,
+        pair_ref: Tensor,
+        real: Tensor,
+        lig: Tensor,
+        f: dict[str, FieldSpec],
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """Penalise a ligand atom placed inside the protein.
+
+        The ligand pair term is ``lig x lig``, so until this existed the decoder
+        could bury a ligand atom in the receptor for free -- and the decoder is
+        what produces the coordinates generation ships. Scored only where the
+        REFERENCE keeps the pair apart, the same rule the ligand term uses: the
+        objective is "do not invent an overlap the crystal does not have", not
+        "push everything apart", so a real van der Waals contact or an H-bond
+        partner excludes itself by its own reference distance.
+
+        The floor is a fraction of the two atoms' radius sum rather than one
+        distance, because a C/C contact and an N/O one have different right
+        answers. Measured null on reconstruction (clash rate 0.0241 -> 0.0243,
+        249 of 428 complexes identical): a crystal structure barely contains
+        the overlap this penalises, so the term has almost nothing to act on
+        there. Kept, defaulting off, because the idea recurs and the measurement
+        is the answer to it.
+        """
+        prot = real & ~lig
+        cross = lig.unsqueeze(2) & prot.unsqueeze(1)
+        radii = self._vdw_radii_per_atom(x, f)
+        scale = float(getattr(self.config, "protein_ligand_clash_scale", 0.75))
+        floor = scale * (radii.unsqueeze(2) + radii.unsqueeze(1))
+        scored = cross & (pair_ref >= floor)
+        loss, frac = _overlap_term(x, pair, scored, floor)
+        return {"clash_pl": loss}, {"clash_pl_pair_frac": frac}
+
+    def _unified_pair_loss(
+        self,
+        x: Tensor,
+        pair: Tensor,
+        pair_ref: Tensor,
+        real: Tensor,
+        eye: Tensor,
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """Every pair, every source, one relative-error term.
+
+        Relative rather than absolute: see the note on ``pair_distance_loss``.
+        Replaces the separate bond/geminal/distance-map terms, which is why the
+        caller returns immediately once this has run.
+        """
+        cut = float(getattr(self.config, "pair_distance_cutoff", 15.0))
+        floor = float(getattr(self.config, "pair_distance_floor", 0.3))
+        near = (real.unsqueeze(1) & real.unsqueeze(2)) & ~eye & (pair_ref < cut)
+        if not bool(near.any()):
+            return {"pair": x.new_zeros(())}, {"pair_mae": x.new_zeros(())}
+        delta = pair[near] - pair_ref[near]
+        rel = delta / pair_ref[near].clamp_min(floor)
+        return {"pair": rel.pow(2).mean()}, {"pair_mae": delta.abs().mean().detach()}
+
     def _ligand_pair_losses(
         self,
         x: Tensor,
@@ -544,27 +648,23 @@ class TransformerVQVAE(nn.Module):
             and (not unified or getattr(self.config, "keep_clash", False))
         )
         if want_clash:
-            losses["clash"] = (
-                torch.relu(d_floor - pair).pow(2)[scored].mean()
-                if bool(scored.any())
-                else x.new_zeros(())
+            loss, frac = _overlap_term(x, pair, scored, d_floor)
+            losses["clash"] = loss
+            diag["clash_pair_frac"] = frac
+
+        if getattr(self.config, "protein_ligand_clash_loss", False):
+            pl_losses, pl_diag = self._protein_ligand_clash(
+                x, pair, pair_ref, real, lig, f
             )
-            n_clash = ((pair < d_floor) & scored).float().sum()
-            diag["clash_pair_frac"] = n_clash / scored.float().sum().clamp_min(1)
+            losses.update(pl_losses)
+            diag.update(pl_diag)
 
         if unified:
-            # Every pair, every source, one term. See the note on
-            # ``pair_distance_loss`` for why the error is relative.
-            cut = float(getattr(self.config, "pair_distance_cutoff", 15.0))
-            floor = float(getattr(self.config, "pair_distance_floor", 0.3))
-            near = (real.unsqueeze(1) & real.unsqueeze(2)) & ~eye & (pair_ref < cut)
-            if bool(near.any()):
-                rel = (pair[near] - pair_ref[near]) / pair_ref[near].clamp_min(floor)
-                losses["pair"] = rel.pow(2).mean()
-                diag["pair_mae"] = (pair[near] - pair_ref[near]).abs().mean().detach()
-            else:
-                losses["pair"] = x.new_zeros(())
-                diag["pair_mae"] = x.new_zeros(())
+            pair_losses, pair_diag = self._unified_pair_loss(
+                x, pair, pair_ref, real, eye
+            )
+            losses.update(pair_losses)
+            diag.update(pair_diag)
             return losses, diag
 
         # Bonded and geminal distances, penalised on the DECODED coordinates.

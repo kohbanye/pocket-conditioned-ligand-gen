@@ -368,7 +368,9 @@ def prepare_atom_descriptors_from_tars(  # noqa: PLR0913
         msg = "No atom descriptors computed from tars -- check paths / source_types"
         raise RuntimeError(msg)
 
-    _save_atom_shard_metadata(Path(cache_dir), total_count, final_counts, elements)
+    _save_atom_shard_metadata(
+        Path(cache_dir), total_count, final_counts, elements, pocket_config
+    )
     logger.info(
         "Done: %d complexes in %d shards (%d attempted)",
         total_count,

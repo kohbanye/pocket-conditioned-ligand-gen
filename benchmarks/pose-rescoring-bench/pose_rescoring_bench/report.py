@@ -9,7 +9,8 @@ Directory layout (``results/<task>/<method_or_variant>/...``)::
     generation/baselines/per_model.csv, per_target.csv
 
 Two report kinds per task:
-- **comparison** — ours (``joint``) vs existing methods (reproduces the paper);
+- **comparison** — ours (``variants.PAPER_ARM``) vs existing methods
+  (reproduces the paper's pose table);
 - **ablation** — ``joint_nocasf`` (fair joint-side control) vs ``separate``
   (separately-trained protein+ligand tokenizers), learned heads only (the
   tokenizer-dependent part), significance vs ``joint_nocasf``.
@@ -26,10 +27,10 @@ import pandas as pd
 
 from pose_rescoring_bench import aggregate
 from pose_rescoring_bench.metrics import rescoring as R
+from pose_rescoring_bench.variants import ABLATION_ORDER, PAPER_ARM
 
 if TYPE_CHECKING:
     from pathlib import Path
-from pose_rescoring_bench.variants import ABLATION_ORDER
 
 Report = tuple[pd.DataFrame, pd.DataFrame]  # (metrics, significance)
 
@@ -53,27 +54,64 @@ def _rescoring_baseline(
     return R.orient(d, raw_col=raw_col)
 
 
+#: Baseline directory -> (table label, the column its dump calls the score).
+#:
+#: ``native_score`` is what the collected dumps use and ``head`` is what an
+#: adapter writes, so the pair is per-source rather than per-method.
+_POSE_BASELINES: tuple[tuple[str, str, str], ...] = (
+    ("RTMScore", "rtmscore", "native_score"),
+    ("GenScore", "genscore", "native_score"),
+    ("gnina", "gnina", "head"),
+    ("Vina", "vina", "head"),
+)
+
+
+def _baseline_dump(root: Path, sub: str) -> tuple[Path, str] | None:
+    """A baseline's dump, preferring one measured here over one collected.
+
+    Returns the path and which it is, so a table can say where its rows came
+    from. A measured dump was produced by ``scripts/measure_baselines.py`` from
+    the pinned submodule; a collected one was parsed out of a sibling checkout
+    that may not exist on this machine.
+    """
+    measured = root / sub / "pose_scores_measured.csv"
+    if measured.exists():
+        return measured, "measured"
+    collected = root / sub / "pose_scores.csv"
+    if collected.exists():
+        return collected, "collected"
+    return None
+
+
 def rescoring_comparison(results_dir: Path) -> Report:
     """Reproduce the paper pose table: baselines + Vina + ours (heads, Vina-fused)."""
     root = results_dir / "rescoring"
-    heads = _rescoring_variant_heads(root / "joint")
+    heads = _rescoring_variant_heads(root / PAPER_ARM)
     rmsd_key = heads[0][["pdbid", "pose", "rmsd"]]
     scored: dict[str, pd.DataFrame] = {}
-    vina_path = root / "vina" / "pose_scores.csv"
-    vina = (
-        _rescoring_baseline(vina_path, rmsd_key, "head") if vina_path.exists() else None
-    )
-    for name, sub in (("RTMScore", "rtmscore"), ("GenScore", "genscore")):
-        p = root / sub / "pose_scores.csv"
-        if p.exists():
-            scored[name] = _rescoring_baseline(p, rmsd_key, "native_score")
+    vina = None
+    for label, sub, raw_col in _POSE_BASELINES:
+        found = _baseline_dump(root, sub)
+        if found is None:
+            continue
+        path, source = found
+        # A measured dump always names the score column ``head``, whatever the
+        # collected one called it.
+        col = "head" if source == "measured" else raw_col
+        frame = _rescoring_baseline(path, rmsd_key, col)
+        scored[label] = frame
+        if sub == "vina":
+            vina = frame
+    # Name the row for how many heads are actually in it. The label said
+    # "3-head" while the arm it reads had one dump, so the table advertised an
+    # ensemble that was not there -- and would have kept saying "3" if a fourth
+    # dump appeared in the directory.
+    ours = f"OURS ({len(heads)}-head)" if len(heads) > 1 else "OURS"
+    scored[ours] = R.zsum(heads)
     if vina is not None:
-        scored["Vina"] = vina
-    scored["OURS (3-head)"] = R.zsum(heads)
-    if vina is not None:
-        scored["OURS (3-head + Vina)"] = R.zsum([*heads, vina])
+        scored[f"{ours} + Vina"] = R.zsum([*heads, vina])
     metrics = aggregate.rescoring_metrics(scored)
-    ref = "GenScore" if "GenScore" in scored else "OURS (3-head)"
+    ref = "GenScore" if "GenScore" in scored else ours
     sig = aggregate.rescoring_pairwise(scored, reference=ref)
     return metrics, sig
 

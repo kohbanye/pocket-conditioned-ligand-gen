@@ -76,6 +76,15 @@ class PocketExtractionConfig:
     #: ``asdict(pocket_config)``.
     pocket_context: bool = False
 
+    #: Fill a LIGAND atom's ``aa`` slot with the residue class it contacts
+    #: (within 4.5 A), instead of the constant ``X`` every ligand row has
+    #: carried. Costs no descriptor width -- the channel already exists and is
+    #: used by protein rows for their own residue -- so the token FORMAT is
+    #: unchanged, but the codes mean something different and the cache must be
+    #: rebuilt. Unlike ``pocket_context`` it displaces nothing: the knn slots
+    #: keep their ligand neighbours.
+    contact_residue_channel: bool = False
+
     #: Residue selection distance: CA (legacy) or minimum heavy-atom distance.
     #: Changing the crop changes both the token stream and canonical frame.
     pocket_distance: str = "ca"
@@ -99,6 +108,9 @@ def _default_atom_recon_weights() -> dict[str, float]:
         "aa": 0.5,
         "bb_sc": 0.1,
         "clash": 5.0,
+        # Protein-ligand overlap. Off unless the training config asks for it,
+        # so a run that does not enable the term is unaffected by its presence.
+        "clash_pl": 5.0,
         # Only consumed when ``AtomVQVAEConfig.predict_knn_offsets`` is set.
         "knn_offsets": 1.0,
         # Only consumed when ``AtomVQVAEConfig.bond_distance_loss`` is set.
@@ -342,6 +354,22 @@ class AtomVQVAEConfig:
     # non-bonded pair under 2.0 A.
     clash_floor: float = 1.2
 
+    # --- protein-ligand overlap -----------------------------------------
+    #
+    # The ligand pair term above is ``lig x lig`` ONLY: the decoder has never
+    # been penalised for putting a ligand atom inside the protein, which is the
+    # overlap generation actually suffers from. The second-pass repair
+    # (``refine_codes(order="clash")``) and the rigid relaxation are the only
+    # places protein-ligand overlap is seen at all, and both act after the
+    # decoder has already produced the coordinates.
+    protein_ligand_clash_loss: bool = False
+    # Floor as a FRACTION of the two atoms' van der Waals radius sum, matching
+    # the convention the readout uses (PoseBusters counts an overlap below 0.75
+    # of the sum). Not a fixed distance: a C/C contact and an O/H-bond partner
+    # have different right answers, and `2026-08-24_it_is_clashes.md` measured
+    # that the radius set alone moves the intermolecular energy by 1.73 kcal.
+    protein_ligand_clash_scale: float = 0.75
+
     # --- codebook balance (R2) ------------------------------------------
     #
     # Weight applied to ligand atoms in both the reconstruction loss and the
@@ -547,6 +575,17 @@ class ProLITMLMConfig:
     max_position_embeddings: int = 1024
     tie_word_embeddings: bool = True
 
+    #: Auxiliary per-token contact heads over the ligand span. Off by default,
+    #: and that matters for more than taste: the heads are ``nn.Module``
+    #: attributes, so turning them on changes the state_dict. A checkpoint
+    #: trained without them loads into a model built from its OWN pickled
+    #: config, which has this False, and is unaffected.
+    contact_heads: bool = False
+    #: Class counts, mirroring :mod:`prolit.chem.contacts`. Named here rather
+    #: than imported so the model layer does not depend on the chemistry layer.
+    contact_residue_classes: int = 21
+    contact_itype_classes: int = 4
+
     @property
     def head_dim(self) -> int:
         return self.hidden_size // self.num_attention_heads
@@ -598,6 +637,17 @@ class MLMTrainingConfig:
     # When True, only ligand (``<l>..</l>``) tokens are masked -> the model learns
     # P(ligand | pocket) bidirectionally (a condition-only / rescoring-tuned MLM).
     ligand_only_masking: bool = False
+    #: Weight on each auxiliary contact loss, added to the MLM loss. Empty
+    #: means the heads still run (if the model config enables them) and are
+    #: logged, but contribute no gradient -- which is how to read off the
+    #: untrained baseline without changing the objective. ``model.contact_heads``
+    #: must be True for any of this to exist.
+    contact_loss_weights: dict[str, float] = field(default_factory=dict)
+    #: Train the auxiliary heads only, leaving the encoder exactly as the
+    #: warm-start checkpoint left it. The point is attribution: a generation
+    #: arm that uses the head must not also be using a different encoder, or a
+    #: change in clash rate cannot be assigned to the contact signal.
+    freeze_encoder: bool = False
     # Opt-in affinity representation ablations; no encoder/head parameter changes.
     component_balanced_loss: bool = False
     ligand_block_masking: bool = False

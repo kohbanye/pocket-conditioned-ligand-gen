@@ -39,9 +39,19 @@ from pathlib import Path
 
 import numpy as np
 
+from prolit.data.token_io import SplitWriter
+
 #: Per-document sidecars a scoring cache carries next to ``.bin`` / ``.len``.
 #: ``.grp`` is handled separately because its values need offsetting.
 _LABEL_SIDECARS = ("rmsd", "comp", "dlen", "disp")
+
+#: Per-TOKEN label streams, concatenated the same way ``.bin`` is -- they have
+#: one entry per token rather than one per document, so they stay aligned under
+#: a byte-wise join exactly as the tokens do. Taken from the writer that emits
+#: them so the two cannot drift apart. ``_cat`` skips a name no input carries,
+#: which is what makes mixing a labelled corpus with an unlabelled one fail
+#: loudly later (the dataset checks length) rather than silently misalign.
+_TOKEN_LABELS = SplitWriter.TOKEN_LABELS
 
 
 def _cat(srcs: list[Path], dst: Path) -> bool:
@@ -130,7 +140,7 @@ def main() -> None:
             [d / f"{split}.bin" for d in args.inputs], args.out_dir / f"{split}.bin"
         )
         _cat([d / f"{split}.len" for d in args.inputs], args.out_dir / f"{split}.len")
-        for name in _LABEL_SIDECARS:
+        for name in (*_LABEL_SIDECARS, *_TOKEN_LABELS):
             _cat(
                 [d / f"{split}.{name}" for d in args.inputs],
                 args.out_dir / f"{split}.{name}",

@@ -24,6 +24,9 @@ Run (single GPU)::
 from __future__ import annotations
 
 import argparse
+import csv
+import hashlib
+import json
 import logging
 import math
 import re
@@ -135,8 +138,34 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     p.add_argument("--out-dir", type=Path, default=Path("data/lm_tokens_affinity"))
     p.add_argument("--codebook-size", type=int, default=8192)
     p.add_argument("--max-residues", type=int, default=50)
+    p.add_argument("--pocket-distance", choices=("ca", "heavy"), default="ca")
     p.add_argument("--min-heavy", type=int, default=6)
     p.add_argument("--max-heavy", type=int, default=60)
+    p.add_argument(
+        "--max-complexes",
+        type=int,
+        default=None,
+        help="Smoke-run limit applied AFTER the full cohort group split is assigned.",
+    )
+    p.add_argument(
+        "--chemistry-mode",
+        choices=("legacy", "validated-v1"),
+        default="legacy",
+        help="Opt-in validated CCD chemistry. Requires a fresh output directory; "
+        "existing checkpoints then provide a distribution-shift diagnostic only.",
+    )
+    p.add_argument(
+        "--validated-cohort",
+        action="store_true",
+        help="Require the same complete CCD matches as validated-v1, even in legacy "
+        "mode, for a sample-matched descriptor control.",
+    )
+    p.add_argument(
+        "--write-site-audit",
+        action="store_true",
+        help="Write accepted/rejected source identities and document offsets, "
+        "also for legacy chemistry. Requires a fresh output directory.",
+    )
     p.add_argument(
         "--affinity-types",
         default="KD,KI",
@@ -159,13 +188,21 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     add_seed_argument(p, default=0)
     args = p.parse_args()
     seed_from_args(args)
+    if args.max_complexes is not None and args.max_complexes < 1:
+        p.error("--max-complexes must be positive")
+    validated_cohort = args.validated_cohort or args.chemistry_mode == "validated-v1"
+    audit_enabled = validated_cohort or args.write_site_audit
+    if audit_enabled:
+        if args.out_dir.exists() and any(args.out_dir.iterdir()):
+            p.error("Validated chemistry experiments require a new, empty --out-dir")
+        if not args.casf_pdbs.is_file() or not args.cd_manifest.is_file():
+            p.error("Validated chemistry experiments require both exclusion sources")
 
     from rdkit import RDLogger  # noqa: PLC0415
 
     RDLogger.DisableLog("rdApp.*")
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
     cfg = AtomVQVAETrainingConfig()
     cfg.atom.codebook_size = args.codebook_size
@@ -206,7 +243,9 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         std,
         vocab,
         device,
-        PocketExtractionConfig(max_residues=args.max_residues),
+        PocketExtractionConfig(
+            max_residues=args.max_residues, pocket_distance=args.pocket_distance
+        ),
     )
 
     kinds = {k.strip().upper() for k in args.affinity_types.split(",") if k.strip()}
@@ -271,7 +310,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     gids_out: dict[str, list[int]] = {"train": [], "val": []}
 
     by_bucket: dict[str, list] = {}
-    for s in sites:
+    for s in sites[: args.max_complexes]:
         by_bucket.setdefault(_bucket_code(s[0]), []).append(s)
 
     import tokenize_biolip as tb  # noqa: PLC0415
@@ -282,6 +321,7 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
 
     n_ok = 0
     pks: list[float] = []
+    audit_rows: list[dict] = []
     for code in tqdm(sorted(by_bucket), desc="buckets"):
         site_list = by_bucket[code]
         rec_names = {f"{p_}{rc}.pdb" for p_, rc, _c, _l, _s, _k, _u in site_list}
@@ -291,32 +331,55 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         receptors = _read_needed("receptor", code, rec_names)
         ligands = _read_needed("ligand", code, lig_names)
         for pdb, rchain, ccd, ligchain, serial, pk, _uniprot in site_list:
+            audit = {
+                "pdbid": pdb,
+                "ccd": ccd,
+                "receptor_chain": rchain,
+                "ligand_chain": ligchain,
+                "serial": serial,
+                "uniprot": _uniprot,
+                "pk": pk,
+                "group": site_gid[(pdb, ccd)],
+                "split": "val" if site_gid[(pdb, ccd)] in val_gids else "train",
+                "status": "pending",
+            }
+            if audit_enabled:
+                audit_rows.append(audit)
             rec = receptors.get(f"{pdb}{rchain}.pdb")
             lig = ligands.get(f"{pdb}_{ccd}_{ligchain}_{serial}.pdb")
             if rec is None or lig is None:
+                audit["status"] = "missing_structure"
                 continue
             try:
                 mol = parse_ligand_pdb_text(
-                    lig.decode("utf-8", "replace"), ccd_smiles.get(ccd)
+                    lig.decode("utf-8", "replace"),
+                    ccd_smiles.get(ccd),
+                    preserve_chemistry=validated_cohort,
                 )
                 if mol is None:
+                    audit["status"] = "parse_failed"
                     continue
+                if args.chemistry_mode == "legacy":
+                    mol.pop("chemistry", None)
                 heavy = np.array(
                     [(a[1], a[2], a[3]) for a in mol["atoms"] if a[0] != "H"],
                     np.float32,
                 )
                 if not (args.min_heavy <= heavy.shape[0] <= args.max_heavy):
+                    audit["status"] = "heavy_atom_bounds"
                     continue
                 # Pocket is carved around THIS ligand, so it cannot be cached per
                 # receptor -- two ligands in one chain have different pockets.
                 setup = enc.setup_pocket(rec.decode("utf-8", "replace"), heavy)
                 if setup is None:
+                    audit["status"] = "pocket_failed"
                     continue
                 p_codes, frame = setup
                 gid = site_gid[(pdb, ccd)]
                 split = "val" if gid in val_gids else "train"
                 n_rot = args.num_rotations if split == "train" else 1
                 descs = enc.ligand_descs([mol], frame)
+                audit["first_document"] = writers[split].num_docs
                 wrote = 0
                 for k in range(max(n_rot, 1)):
                     # k == 0 is the unrotated complex, so --num-rotations 1
@@ -330,14 +393,19 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
                     gids_out[split].append(gid)
                     wrote += 1
                 if wrote == 0:
+                    audit["status"] = "encoding_failed"
                     continue
+                audit.update(status="accepted", documents=wrote)
                 pks.append(pk)
                 n_ok += 1
-            except Exception:
+            except Exception as exc:
+                audit.update(status="exception", reason=f"{type(exc).__name__}: {exc}")
                 logger.exception("failed %s_%s", pdb, ccd)
                 continue
 
     meta = {
+        "pocket_distance": args.pocket_distance,
+        "max_residues": args.max_residues,
         "vocab_size": vocab.vocab_size,
         # Separate-tokenizers mode doubles the code space (protein then ligand).
         "atom_codebook_size": (
@@ -355,12 +423,57 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     }
     if args.separate_protein_ckpt is not None:
         meta["separate_tokenizers"] = True
+    if audit_enabled:
+
+        def fingerprint(path: Path) -> dict:
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return {"path": str(path), "sha256": digest.hexdigest()}
+
+        meta.update(
+            chemistry_schema=(
+                "validated_v1" if args.chemistry_mode == "validated-v1" else "legacy"
+            ),
+            validated_cohort=validated_cohort,
+            seed=args.seed,
+            val_frac=args.val_frac,
+            exclusion_ids_sha256=hashlib.sha256(
+                "\n".join(sorted(excluded)).encode()
+            ).hexdigest(),
+            provenance=[
+                fingerprint(path)
+                for path in (
+                    args.casf_pdbs,
+                    args.cd_manifest,
+                    args.biolip_dir / "BioLiP.txt.gz",
+                    args.biolip_dir / "ligand.tsv.gz",
+                    Path(__file__),
+                )
+            ],
+            tokenizer_checkpoint=str(args.ckpt),
+            normalization=str(args.norm_stats),
+            descriptor_cache_version="affinity_ccd_v1",
+            max_complexes=args.max_complexes,
+        )
+        manifest = "".join(json.dumps(row, sort_keys=True) + "\n" for row in audit_rows)
+        (args.out_dir / "complex_manifest.jsonl").write_text(manifest)
+        with (args.out_dir / "complex_manifest.csv").open("w", newline="") as stream:
+            writer = csv.DictWriter(
+                stream, fieldnames=sorted({k for row in audit_rows for k in row})
+            )
+            writer.writeheader()
+            writer.writerows(audit_rows)
+        meta["complex_manifest_sha256"] = hashlib.sha256(manifest.encode()).hexdigest()
     for w in writers.values():
         w.close()
     for split, gl in gids_out.items():
         np.asarray(gl, dtype=np.int32).tofile(args.out_dir / f"{split}.grp")
     meta["train_pair_groups"] = sum(
-        1 for v in Counter(gids_out["train"]).values() if v >= 2  # noqa: PLR2004
+        1
+        for v in Counter(gids_out["train"]).values()
+        if v >= 2  # noqa: PLR2004
     )
     torch.save(meta, args.out_dir / "meta.pt")
     a = np.array(pks) if pks else np.zeros(1)

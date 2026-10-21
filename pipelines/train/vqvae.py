@@ -231,6 +231,24 @@ def build_parser() -> argparse.ArgumentParser:
         "holds ligand-only neighbours and cannot be reused with it.",
     )
     parser.add_argument(
+        "--protein-ligand-clash-loss",
+        action="store_true",
+        help="Penalise the decoder for placing a ligand atom inside the "
+        "protein. The existing pair term is ligand-ligand only, so until this "
+        "flag the decoder was never charged for the overlap generation "
+        "actually suffers from. Floor is a fraction of the vdW radius sum "
+        "(--protein-ligand-clash-scale), scored only where the reference keeps "
+        "the pair apart.",
+    )
+    parser.add_argument(
+        "--protein-ligand-clash-scale",
+        type=float,
+        default=None,
+        help="Fraction of the two atoms' vdW radius sum that counts as an "
+        "overlap. Default 0.75 matches the PoseBusters convention the readout "
+        "uses.",
+    )
+    parser.add_argument(
         "--clash-floor",
         type=float,
         default=None,
@@ -318,6 +336,9 @@ def main() -> None:  # noqa: C901, PLR0915
     config.atom.pair_distance_loss = args.pair_distance_loss
     config.atom.keep_clash = args.keep_clash
     config.atom.loss_balancing = args.loss_balancing
+    config.atom.protein_ligand_clash_loss = args.protein_ligand_clash_loss
+    if args.protein_ligand_clash_scale is not None:
+        config.atom.protein_ligand_clash_scale = args.protein_ligand_clash_scale
     if args.clash_floor is not None:
         config.atom.clash_floor = args.clash_floor
     config.pocket.pocket_context = args.pocket_context

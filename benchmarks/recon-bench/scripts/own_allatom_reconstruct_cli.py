@@ -14,7 +14,13 @@ One "arm" = one tokenizer configuration, given as JSON:
      "protein_ckpt": ..., "protein_norm": ...,
      "ligand_ckpt": ...,  "ligand_norm": ...,
      "ligand_frame": "pocket" | "local",  # frame the ligand is encoded in
+     "pocket_context": false | true,      # widen a ligand atom's knn to the pocket
      "pose_bits": null | 13 | 26 | ...}   # budget to transmit the ligand pose
+
+``pocket_context`` must match the descriptor cache the run was trained on. The
+descriptor is 33-D either way, so the wrong setting raises nothing: it feeds the
+tokenizer a well-formed descriptor from the wrong distribution and quietly
+reports a worse reconstruction.
 
 ``ligand_frame="local"`` mimics a single-modality ligand tokenizer (Mol-StrucTok,
 Geo2Seq): the molecule is encoded in its own canonical frame, so the tokens are
@@ -373,7 +379,7 @@ def prepare_pair(task):
     Returns ``(tag, payload)`` with ``payload=None`` when the complex is
     unusable (no ligand heavy atoms, or no pocket within the cutoff).
     """
-    tag, receptor, ligand, ligand_frame = task
+    tag, receptor, ligand, ligand_frame, pocket_context, contact_residue = task
     own = _W["own"]
     molecules = own["parse_sdf"](Path(ligand))
     if not molecules:
@@ -397,8 +403,45 @@ def prepare_pair(task):
         if ligand_frame == "local"
         else frame
     )
+    # The pocket-context arms widen each ligand atom's kNN search set to the
+    # pocket. Mirrors ``prolit.data.atom_descriptors._atom_process_pose``: the
+    # pocket atoms are expressed in the LIGAND's frame, so the two agree even
+    # under ``ligand_frame="local"``, where the ligand has a frame of its own.
+    pkt_canonical = pkt_elements = None
+    if pocket_context:
+        lig_centroid, lig_rotation = lig_frame
+        pkt_canonical = (
+            pocket.atom_coords.astype(np.float64) - lig_centroid
+        ) @ lig_rotation.T
+        element_field = own["fields_by_name"](own["ATOM_LAYOUT"])["element"]
+        pkt_elements = pdesc[:, element_field.start].astype(np.int64)
+    # The contacting-residue arm trains on a ligand ``aa`` channel holding the
+    # residue each atom touches. Feeding it the plain descriptor instead raises
+    # nothing -- the width is the same 33-D -- and silently scores it on a
+    # distribution it never saw. Exactly the trap the pocket-context arm set.
+    res_coords = res_classes = None
+    if contact_residue:
+        from prolit.tokenizers.descriptor_schema import (  # noqa: PLC0415
+            PROTEIN_AA_TO_IDX,
+            PROTEIN_AA_X_IDX,
+        )
+
+        centroid, rotation = lig_frame
+        res_coords = (
+            pocket.atom_coords.astype(np.float64) - centroid
+        ) @ rotation.T
+        res_classes = np.array(
+            [PROTEIN_AA_TO_IDX.get(a, PROTEIN_AA_X_IDX) for a in pocket.atom_aa],
+            dtype=np.int64,
+        )
     ldesc, _elements, lmeta = _W["lig_desc"].compute(
-        mol["atoms"], mol["bonds"], lig_frame
+        mol["atoms"],
+        mol["bonds"],
+        lig_frame,
+        pkt_canonical,
+        pkt_elements,
+        pocket_residue_coords=res_coords,
+        pocket_residues=res_classes,
     )
     if len(pdesc) == 0 or len(ldesc) == 0:
         return tag, None
@@ -569,6 +612,8 @@ def main() -> None:
     own = load_own(args.workdir)
     arm = json.loads(args.arm.read_text())
     arm.setdefault("ligand_frame", "pocket")
+    arm.setdefault("pocket_context", False)
+    arm.setdefault("contact_residue_channel", False)
     arm.setdefault("pose_bits", None)
     arm.setdefault("kind", "vq")
 
@@ -591,7 +636,15 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     pairs = json.loads(args.pairs.read_text())
     tasks = [
-        (p["id"], p["receptor"], p["ligand"], arm["ligand_frame"]) for p in pairs
+        (
+            p["id"],
+            p["receptor"],
+            p["ligand"],
+            arm["ligand_frame"],
+            arm["pocket_context"],
+            arm["contact_residue_channel"],
+        )
+        for p in pairs
     ]
 
     # Pool size from the affinity mask, not cpu_count: on a scheduler-allocated
@@ -607,7 +660,14 @@ def main() -> None:
     # remaining speedup is worth -- an unbounded pool is what got a local test
     # OOM-killed. The descriptor stage is ~4 s/complex, so 16 workers already
     # brings 303 complexes down to about a minute.
-    default_workers = min(available - 1, _MAX_PREP_WORKERS)
+    # The adapter launches this CLI without --workers, so the environment is the
+    # only way to cap it from above -- the same knob pb.py reads as
+    # RECON_BENCH_PB_WORKERS. Needed on a shared interactive node, where the job
+    # owns a slice of the memory that the affinity mask does not describe.
+    env_workers = os.environ.get("RECON_BENCH_OWN_PREP_WORKERS")
+    default_workers = (
+        int(env_workers) if env_workers else min(available - 1, _MAX_PREP_WORKERS)
+    )
     workers = max(1, min(args.workers or default_workers, len(tasks)))
     print(f"[own-allatom] preparing {len(tasks)} complexes on {workers} workers")
 

@@ -228,9 +228,19 @@ def run(
     pb_ids = {s.sample_id for s in samples[: pb_limit or len(samples)]} if pb_valid else set()
 
     for name in model_names:
-        model = prebuilt.get(name) or adapters.build(name, **adapter_kwargs.get(name, {}))
+        model = prebuilt.get(name)
+        # Whoever built the adapter owns its sample-set preparation. The CLI
+        # materializes the own_allatom arms it passes in via ``prebuilt`` (they
+        # define the sample set); adapters built right here have nobody else to
+        # do it, and bio2token silently returned "sample not materialized" for
+        # every row until this branch existed.
+        built_here = model is None
+        if built_here:
+            model = adapters.build(name, **adapter_kwargs.get(name, {}))
         try:
             model.setup()
+            if built_here and hasattr(model, "materialize"):
+                model.materialize(samples)
         except Exception as exc:  # noqa: BLE001
             for s in samples:
                 rows.append(

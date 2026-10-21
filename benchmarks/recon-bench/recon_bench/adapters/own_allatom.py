@@ -60,6 +60,15 @@ class Arm:
     protein_norm: Path | None = None
     ligand_norm: Path | None = None
     ligand_frame: str = "pocket"
+    #: Build each ligand atom's descriptor with its kNN search set widened to
+    #: the pocket. The descriptor stays 33-D, so an arm that sets this wrong is
+    #: served a well-formed descriptor from the wrong distribution and raises
+    #: nothing -- it just reconstructs worse. It must match the cache the run
+    #: was trained on.
+    pocket_context: bool = False
+    #: Build the ligand ``aa`` channel from the residue each atom contacts.
+    #: Same silent-failure shape as ``pocket_context``: 33-D either way.
+    contact_residue_channel: bool = False
     pose_bits: int | None = None
     kind: str = "vq"
     codebook: str = ""
@@ -74,6 +83,14 @@ class Arm:
 
 def _cache(name: str) -> Path:
     return paths.OWN_ALLATOM_CACHE / name
+
+
+def _pctx_cache(name: str) -> Path:
+    return paths.OWN_PCTX_CACHE / name
+
+
+def _ctcres_cache(name: str) -> Path:
+    return paths.OWN_CTCRES_CACHE / name
 
 
 ARMS: dict[str, Arm] = {
@@ -149,6 +166,66 @@ ARMS: dict[str, Arm] = {
             "three e250 arms: the ligand weight is not a protein/ligand "
             "trade-off at 3.0, which beats BOTH the unweighted arm and 8.3 on "
             "the protein side as well as the ligand side"
+        ),
+    ),
+    "joint_plclash": Arm(
+        name="joint_plclash",
+        label="ProLIT (protein-ligand clash loss)",
+        protein_run="vq_plclash_q",
+        ligand_run="vq_plclash_q",
+        protein_norm=_cache("normalization_stats.pt"),
+        ligand_norm=_cache("normalization_stats.pt"),
+        codebook="1 shared book (8192)",
+        notes=(
+            "joint_e250_lig3 plus --protein-ligand-clash-loss, one flag and "
+            "nothing else. The existing pair term is ligand-ligand ONLY, so "
+            "until this run the decoder had never been charged for placing a "
+            "ligand atom inside the protein -- the overlap generation actually "
+            "suffers from, and the decoder is what produces the coordinates "
+            "generation ships. Floor is 0.75 of the vdW radius sum, the same "
+            "convention clash_lig_atom_frac counts, and only pairs the "
+            "REFERENCE keeps apart are scored. Same descriptor, same cache, "
+            "same token format"
+        ),
+    ),
+    "joint_ctcres": Arm(
+        name="joint_ctcres",
+        label="ProLIT (contacting-residue channel)",
+        protein_run="vq_ctcres_q",
+        ligand_run="vq_ctcres_q",
+        contact_residue_channel=True,
+        protein_norm=_ctcres_cache("normalization_stats.pt"),
+        ligand_norm=_ctcres_cache("normalization_stats.pt"),
+        codebook="1 shared book (8192)",
+        notes=(
+            "A ligand atom's ``aa`` slot carries the residue class it contacts "
+            "within 4.5 A, instead of the constant X every ligand row has ever "
+            "carried. Costs no descriptor width -- protein rows already use "
+            "that channel for their own residue -- and displaces no knn slot, "
+            "which is the difference from joint_pctx. Unlike a contact FLAG "
+            "this adds information the coordinates do not contain: which "
+            "residue sits next to an atom is not recoverable from the atom's "
+            "own position"
+        ),
+    ),
+    "joint_pctx": Arm(
+        name="joint_pctx",
+        label="ProLIT (pocket-context descriptor)",
+        protein_run="vq_e250_pctx",
+        ligand_run="vq_e250_pctx",
+        protein_norm=_pctx_cache("normalization_stats.pt"),
+        ligand_norm=_pctx_cache("normalization_stats.pt"),
+        pocket_context=True,
+        codebook="1 shared book (8192)",
+        notes=(
+            "joint_e250_lig3's training command with one flag changed: two of "
+            "each ligand atom's four kNN slots are spent on the nearest POCKET "
+            "atoms instead of ligand ones. The descriptor width is unchanged, "
+            "so the interface information is paid for out of the ligand's own "
+            "local geometry. The matched control is joint_e250_lig3 -- same "
+            "seed, same 250 epochs, same everything but the descriptor cache "
+            "-- and it already loses on val/atom_coord (0.10715 vs 0.10211). "
+            "This arm is what that costs on the paper's table"
         ),
     ),
     "joint_pb3_s7": Arm(
@@ -563,6 +640,8 @@ class OwnAllAtomAdapter(ReconstructionModel):
         spec: dict = {
             "kind": self.arm.kind,
             "ligand_frame": self.arm.ligand_frame,
+            "pocket_context": self.arm.pocket_context,
+            "contact_residue_channel": self.arm.contact_residue_channel,
             "pose_bits": self.arm.pose_bits,
             "refiner_ckpt": (
                 str(self.arm.refiner_ckpt) if self.arm.refiner_ckpt else None

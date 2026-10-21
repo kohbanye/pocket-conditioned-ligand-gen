@@ -29,6 +29,7 @@ import torch
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
+from prolit.data.token_io import CONTACT_IGNORE
 from prolit.seeding import DEFAULT_SEED, derive_seed, torch_generator, worker_init_fn
 from prolit.tokenizers.lm_vocab import L_CLOSE_ID, L_OPEN_ID, NUM_SPECIAL, PAD_ID
 
@@ -56,6 +57,7 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
         code_neighbours: Path | None = None,
         ligand_only_masking: bool = False,
         ligand_block_masking: bool = False,
+        contact_label_paths: dict[str, Path] | None = None,
         seed: int = DEFAULT_SEED,
     ) -> None:
         self.block_size = block_size
@@ -91,6 +93,21 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
             )
 
         self.tokens = np.memmap(bin_path, dtype=np.uint16, mode="r")
+        #: Per-token auxiliary targets, positionally aligned with ``tokens``.
+        #: Absent for a corpus built without them, in which case the auxiliary
+        #: heads simply get no gradient -- a ligand-only or protein-only corpus
+        #: has no protein-ligand contact to predict in the first place.
+        self.contact_labels: dict[str, np.memmap] = {}
+        for name, path in (contact_label_paths or {}).items():
+            stream = np.memmap(path, dtype=np.uint8, mode="r")
+            if stream.shape[0] != self.tokens.shape[0]:
+                msg = (
+                    f"{name}: {stream.shape[0]} labels against "
+                    f"{self.tokens.shape[0]} tokens in {bin_path.name}; the "
+                    "streams must stay positionally aligned"
+                )
+                raise ValueError(msg)
+            self.contact_labels[name] = stream
         self.doc_lengths = np.fromfile(len_path, dtype=np.uint16).astype(np.int64)
         self.doc_offsets = np.concatenate([[0], np.cumsum(self.doc_lengths)]).astype(
             np.int64
@@ -121,6 +138,42 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
     @property
     def epoch(self) -> int:
         return int(self._epoch.item())
+
+    def _corrupt(
+        self, input_ids: np.ndarray, chosen: np.ndarray, rng: np.random.Generator
+    ) -> None:
+        """BERT's 80/10/10 in place: mask, swap, or leave the chosen positions.
+
+        The swap draws from a code's nearest neighbours in codebook space when a
+        neighbour table is configured, rather than uniformly over the
+        vocabulary. A uniform swap is a different code for a different part of
+        the pocket, which the model learns to spot from context alone; a
+        neighbour is a plausible alternative for the same atom, which is the
+        regime the iterative decoder actually produces.
+        """
+        k = chosen.shape[0]
+        draw = rng.random(k)
+        replace = draw < self.mask_replace_prob
+        swap = (draw >= self.mask_replace_prob) & (
+            draw < self.mask_replace_prob + self.mask_random_prob
+        )
+        # The remainder is left unchanged, which is the third arm of 80/10/10.
+        input_ids[chosen[replace]] = self.mask_token_id
+        n_swap = int(swap.sum())
+        if n_swap == 0:
+            return
+        pos = chosen[swap]
+        uniform = rng.integers(NUM_SPECIAL, self.base_vocab_size, size=n_swap)
+        if self.code_neighbours is None:
+            input_ids[pos] = uniform
+            return
+        codes = input_ids[pos].astype(np.int64) - NUM_SPECIAL
+        in_table = (codes >= 0) & (codes < len(self.code_neighbours))
+        slot = rng.integers(0, self.code_neighbours.shape[1], size=n_swap)
+        safe = np.clip(codes, 0, len(self.code_neighbours) - 1)
+        input_ids[pos] = np.where(
+            in_table, self.code_neighbours[safe, slot] + NUM_SPECIAL, uniform
+        )
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         rng = np.random.default_rng(
@@ -164,37 +217,26 @@ class MLMTokenDataset(Dataset[dict[str, Tensor]]):
                     )
             labels[chosen] = arr[chosen]
 
-            draw = rng.random(k)
-            replace = draw < self.mask_replace_prob
-            random_tok = (draw >= self.mask_replace_prob) & (
-                draw < self.mask_replace_prob + self.mask_random_prob
-            )
-            # remainder (draw >= replace+random) is left unchanged.
-            input_ids[chosen[replace]] = self.mask_token_id
-            n_rand = int(random_tok.sum())
-            if n_rand > 0:
-                pos = chosen[random_tok]
-                if self.code_neighbours is not None:
-                    codes = input_ids[pos].astype(np.int64) - NUM_SPECIAL
-                    ok = (codes >= 0) & (codes < len(self.code_neighbours))
-                    slot = rng.integers(0, self.code_neighbours.shape[1], size=n_rand)
-                    safe = np.clip(codes, 0, len(self.code_neighbours) - 1)
-                    near = np.where(
-                        ok,
-                        self.code_neighbours[safe, slot] + NUM_SPECIAL,
-                        rng.integers(NUM_SPECIAL, self.base_vocab_size, size=n_rand),
-                    )
-                    input_ids[pos] = near
-                else:
-                    input_ids[pos] = rng.integers(
-                        NUM_SPECIAL, self.base_vocab_size, size=n_rand
-                    )
+            self._corrupt(input_ids, chosen, rng)
 
-        return {
+        item = {
             "input_ids": torch.from_numpy(input_ids),
             "labels": torch.from_numpy(labels),
             "length": torch.tensor(n, dtype=torch.int64),
         }
+        # Supervised at the MASKED positions and nowhere else. Predicting the
+        # contact of a visible atom is a geometry calculation the decode loop
+        # already does exactly; the only question worth a head is what contact
+        # a hidden position should make.
+        for name, stream in self.contact_labels.items():
+            raw = np.asarray(stream[s:e], dtype=np.int64)
+            target = np.full(n, IGNORE_INDEX, dtype=np.int64)
+            if maskable.size > 0:
+                picked = raw[chosen]
+                keep = picked != CONTACT_IGNORE
+                target[chosen[keep]] = picked[keep]
+            item[f"contact_{name}"] = torch.from_numpy(target)
+        return item
 
 
 def collate_mlm(batch: list[dict[str, Tensor]]) -> dict[str, Tensor]:
@@ -205,15 +247,23 @@ def collate_mlm(batch: list[dict[str, Tensor]]) -> dict[str, Tensor]:
     input_ids = torch.full((bsz, max_len), PAD_ID, dtype=torch.long)
     labels = torch.full((bsz, max_len), IGNORE_INDEX, dtype=torch.long)
     attention_mask = torch.zeros((bsz, max_len), dtype=torch.long)
+    aux_keys = [k for k in batch[0] if k.startswith("contact_")]
+    aux = {
+        k: torch.full((bsz, max_len), IGNORE_INDEX, dtype=torch.long)
+        for k in aux_keys
+    }
     for i, b in enumerate(batch):
         n = lengths[i]
         input_ids[i, :n] = b["input_ids"]
         labels[i, :n] = b["labels"]
         attention_mask[i, :n] = 1
+        for k in aux_keys:
+            aux[k][i, :n] = b[k]
     return {
         "input_ids": input_ids,
         "labels": labels,
         "attention_mask": attention_mask,
+        **aux,
     }
 
 
@@ -252,6 +302,14 @@ class MLMTokenDataModule(L.LightningDataModule):
                     ligand_block_masking=getattr(
                         self.config, "ligand_block_masking", False
                     ),
+                    # Present only for a corpus built with them. Discovered
+                    # rather than configured: a run whose corpus lacks the
+                    # streams should train exactly as before, not fail.
+                    contact_label_paths={
+                        name: self.token_dir / f"{split}.{name}"
+                        for name in ("res", "itype")
+                        if (self.token_dir / f"{split}.{name}").exists()
+                    },
                     seed=self._seed,
                 )
 

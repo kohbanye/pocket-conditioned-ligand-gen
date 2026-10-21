@@ -725,6 +725,17 @@ REGISTRY: dict[str, Variant] = {
 
 ABLATION_ORDER: tuple[str, ...] = ("joint_nocasf", "separate")
 
+#: The arm whose numbers the paper's pose table reports.
+#:
+#: Stated here because it had drifted: ``report.rescoring_comparison`` hard-coded
+#: ``joint`` -- the first-generation ``xzkjxu9q`` tokenizer -- long after
+#: ``tests/test_reproduce_rescoring.py`` had been updated to pin ``e250_div``.
+#: Running ``make_tables.py`` therefore produced a table (DP@2A 89.5) that lost
+#: to RTMScore on every column, while the tests asserted the arm that wins on
+#: every column (95.4). Both were "the paper's table" depending on which file
+#: you read. One name, in one place, is what stops that recurring.
+PAPER_ARM: str = "e250_div"
+
 
 def get(name: str) -> Variant:
     """Look up a variant by name, raising a clear error for unknown names."""

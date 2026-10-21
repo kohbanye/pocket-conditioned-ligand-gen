@@ -14,7 +14,11 @@ __pycache__/
 # Model weights are symlinked/copied in from elsewhere, never committed.
 /weights/
 # Benchmark input structures (downloaded eval sets, extracted complexes).
-/data/
+# No trailing slash: `data` here is a SYMLINK to the eval-set directory, and
+# `/data/` matches only real directories, so the symlink showed up as an
+# untracked file. Committing a symlink like that is how a checkout later
+# turns it self-referential and eats the directory it points at.
+/data
 # Reconstruction outputs (PDBs, intermediate tensors).
 /outputs/
 # Aggregated result tables are small enough to keep; ignore only bulky dumps.

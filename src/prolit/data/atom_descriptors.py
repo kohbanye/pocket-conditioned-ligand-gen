@@ -42,13 +42,14 @@ from prolit.data.holdout import evaluation_pdbs, pdb_id_from_receptor
 from prolit.tokenizers.atom import (
     LigandAtomDescriptor,
     ProteinAtomDescriptor,
+    contact_residue_arrays,
+    pocket_context_arrays,
     precompute_receptor_atom_features,
 )
 from prolit.tokenizers.descriptor_schema import (
     ATOM_DESCRIPTOR_DIM,
     ATOM_LAYOUT,
     continuous_mask,
-    fields_by_name,
 )
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.protein import (
@@ -144,16 +145,25 @@ def _atom_process_pose(  # noqa: PLR0913
     # workers receive only asdict(pocket_config), so a standalone keyword
     # silently stayed False and the cache came out identical to the old one.
     if getattr(pocket_config, "pocket_context", False):
-        # Pocket atoms expressed in the LIGAND's frame, so the two agree even in
-        # the `local` ablation where the ligand has a frame of its own.
-        lig_centroid, lig_rotation = lig_frame
-        pkt_canonical = (
-            pocket.atom_coords.astype(np.float64) - lig_centroid
-        ) @ lig_rotation.T
-        element_field = fields_by_name(ATOM_LAYOUT)["element"]
-        pkt_elements = prot_arr[:, element_field.start].astype(np.int64)
+        pkt_canonical, pkt_elements = pocket_context_arrays(
+            pocket.atom_coords, prot_arr, lig_frame
+        )
+    # Independent of pocket_context: that knob widens the knn SEARCH set,
+    # this one fills the ``aa`` slot of a ligand row, which was the constant
+    # PROTEIN_AA_X_IDX on every ligand atom ever cached.
+    pkt_res_coords = pkt_res = None
+    if getattr(pocket_config, "contact_residue_channel", False):
+        pkt_res_coords, pkt_res = contact_residue_arrays(
+            pocket.atom_coords, pocket.atom_aa, lig_frame
+        )
     lig_arr, elements, _lig_meta = lig_desc.compute(
-        mol["atoms"], mol["bonds"], lig_frame, pkt_canonical, pkt_elements
+        mol["atoms"],
+        mol["bonds"],
+        lig_frame,
+        pkt_canonical,
+        pkt_elements,
+        pocket_residue_coords=pkt_res_coords,
+        pocket_residues=pkt_res,
     )
     if len(lig_arr) == 0:
         return None
@@ -259,7 +269,18 @@ def _save_atom_shard_metadata(
     total_count: int,
     shard_counts: list[int],
     unique_elements: set[str],
+    pocket_config: object | None = None,
 ) -> None:
+    """Write the shard index, and WHICH descriptor variant the shards hold.
+
+    The variant has to be recorded. ``pocket_context`` and
+    ``contact_residue_channel`` both keep the descriptor at 33-D, so two caches
+    that must never be mixed were previously byte-indistinguishable on disk --
+    ``shard_metadata.pt`` was identical for the plain and the pocket-context
+    build, and a tokenizer trained on one and fed the other raises nothing and
+    quietly reports a worse result. See
+    ``docs/results/2026-09-11_three_ceilings.md``.
+    """
     metadata = {
         "total_count": total_count,
         "shard_counts": shard_counts,
@@ -267,6 +288,10 @@ def _save_atom_shard_metadata(
         "descriptor_kind": "atom",
         "descriptor_dim": ATOM_DESCRIPTOR_DIM,
     }
+    for flag in ("pocket_context", "contact_residue_channel", "atom_order",
+                 "pocket_order", "pocket_distance"):
+        if pocket_config is not None and hasattr(pocket_config, flag):
+            metadata[flag] = getattr(pocket_config, flag)
     torch.save(metadata, cache_dir / _SHARD_METADATA_FILE)
     torch.save(sorted(unique_elements), cache_dir / "ligand_elements.pt")
     logger.info(
@@ -621,7 +646,11 @@ class AtomComplexDescriptorDataModule(L.LightningDataModule):
             msg = "No atom descriptors computed -- check data paths"
             raise RuntimeError(msg)
         _save_atom_shard_metadata(
-            self.cache_dir, total_count, shard_counts, unique_elements
+            self.cache_dir,
+            total_count,
+            shard_counts,
+            unique_elements,
+            self.training_config.pocket,
         )
 
     # ------------------------------------------------------------------

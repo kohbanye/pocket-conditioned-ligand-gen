@@ -21,6 +21,8 @@ import json
 import logging
 from pathlib import Path
 
+from descriptor_flags import add_descriptor_arguments, descriptor_kwargs
+
 from prolit.config import PocketExtractionConfig
 from prolit.data.atom_tar_prep import prepare_atom_descriptors_from_tars
 
@@ -81,13 +83,7 @@ def main() -> None:
             "split across several jobs / calibrated on one tar. Default: all."
         ),
     )
-    parser.add_argument(
-        "--pocket-context",
-        action="store_true",
-        help="widen each ligand atom's knn SEARCH set to the pocket, filling "
-        "its empty neighbour slots with the nearest protein atoms (33-D "
-        "unchanged). The cache records this choice; do not mix.",
-    )
+    add_descriptor_arguments(parser)
     parser.add_argument(
         "--atom-order",
         choices=["file", "buried_first"],
@@ -118,6 +114,7 @@ def main() -> None:
             "--cache-dir; the two are not interchangeable."
         ),
     )
+    parser.add_argument("--pocket-distance", choices=("ca", "heavy"), default="ca")
     args = parser.parse_args()
 
     shard_ids = None
@@ -131,11 +128,12 @@ def main() -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     pocket_config = PocketExtractionConfig(
+        pocket_distance=args.pocket_distance,
         distance_cutoff=args.distance_cutoff,
         max_residues=args.max_residues,
         pocket_order=args.pocket_order,
-        pocket_context=args.pocket_context,
         atom_order=args.atom_order,
+        **descriptor_kwargs(args),
     )
     total, counts = prepare_atom_descriptors_from_tars(
         repo_dir=args.repo_dir,

@@ -30,13 +30,17 @@ def main() -> None:
     args = p.parse_args()
 
     # foldtoken/ must be on the path for `model_interface` and `src.*`.
+    # `src` here is FoldToken's own vendored package, NOT ProLIT's src/: a
+    # repo-wide src->prolit rename rewrote the chroma import below once and
+    # silently disabled the whole FoldToken baseline (every sample came back
+    # `setup failed`, which reads like a missing checkpoint).
     sys.path.insert(0, str(Path(args.workdir) / "foldtoken"))
     sys.path.insert(0, str(args.workdir))
 
     import torch
     from model_interface import MInterface
     from omegaconf import OmegaConf
-    from prolit.chroma.data import Protein
+    from src.chroma.data import Protein
 
     config = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)
     model = MInterface(**config)
