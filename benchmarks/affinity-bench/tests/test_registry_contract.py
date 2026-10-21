@@ -68,10 +68,18 @@ def test_codebook_size_follows_the_shared_arm_registry() -> None:
 
     Getting it wrong does not raise: a head built against a vocabulary the
     weights were never fitted to still produces 285 plausible numbers.
+
+    The STAPLED arms are exempt, and have to be: their vocabulary is ESM3's
+    structure tokens joined to ConfSeq's, which is a code space the shared
+    registry does not describe and must not be asked to. The exemption is by
+    ``stapled``, not by name, so a new stapled arm inherits it and a ProLIT arm
+    cannot acquire it by accident.
     """
     from prolit_bench import variants as shared  # noqa: PLC0415
 
     for name, arm in variants.REGISTRY.items():
+        if getattr(arm, "stapled", None) is not None:
+            continue
         expected = (
             shared.SEPARATE if arm.is_separate else shared.JOINT
         ).combined_codebook_size

@@ -43,7 +43,8 @@ import torch
 from tokenize_decoys import _RmsdWriter
 
 from prolit.config import AtomVQVAETrainingConfig, PocketExtractionConfig
-from prolit.seeding import add_seed_argument, seed_from_args
+from prolit.seeding import add_seed_argument, rng_for, seed_from_args
+from prolit.tokenizers.geometry import random_rotation_matrix
 from prolit.tokenizers.ligand import parse_sdf
 from prolit.tokenizers.lm_vocab import AtomLMVocab
 from prolit.tokenizers.loaders import load_atom_vqvae
@@ -86,7 +87,7 @@ def _find_complex(roots: list[Path], pdb: str) -> Path | None:
     return None
 
 
-def main() -> None:  # noqa: PLR0915
+def main() -> None:  # noqa: C901, PLR0915
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", type=Path, required=True)
     p.add_argument("--norm-stats", type=Path, required=True)
@@ -102,6 +103,7 @@ def main() -> None:  # noqa: PLR0915
     )
     p.add_argument("--codebook-size", type=int, default=8192)
     p.add_argument("--max-residues", type=int, default=50)
+    p.add_argument("--pocket-distance", choices=("ca", "heavy"), default="ca")
     p.add_argument("--min-heavy", type=int, default=6)
     p.add_argument("--max-heavy", type=int, default=60)
     p.add_argument(
@@ -111,16 +113,30 @@ def main() -> None:  # noqa: PLR0915
         "the data; IC50 is PDBbind-curated so it is kept by default.",
     )
     p.add_argument("--val-frac", type=float, default=0.05)
+    p.add_argument(
+        "--num-rotations",
+        type=int,
+        default=1,
+        help="Documents per TRAIN complex, each under its own random rotation of "
+        "the whole complex before quantization (the BioLiP builder's flag, same "
+        "semantics). The pocket-canonical frame makes a pose's tokens "
+        "frame-dependent through the codebook, so one orientation per complex "
+        "teaches the head to read quantization noise as signal. Val is always 1: "
+        "it measures the model, not the augmentation. k=0 is the unrotated "
+        "complex, so 1 reproduces the original corpus byte for byte.",
+    )
     add_seed_argument(p, default=0)
     args = p.parse_args()
     seed_from_args(args)
+    # Same stream name as the BioLiP builder, so a rotation is drawn the same
+    # way in both halves of a union corpus.
+    rot_rng = rng_for(args.seed, "affinity_rotations")
 
     from rdkit import RDLogger  # noqa: PLC0415
 
     RDLogger.DisableLog("rdApp.*")
     torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
     cfg = AtomVQVAETrainingConfig()
     cfg.atom.codebook_size = args.codebook_size
@@ -134,7 +150,9 @@ def main() -> None:  # noqa: PLR0915
         norm["atom_std"].numpy(),
         AtomLMVocab(codebook_size=args.codebook_size),
         device,
-        PocketExtractionConfig(max_residues=args.max_residues),
+        PocketExtractionConfig(
+            max_residues=args.max_residues, pocket_distance=args.pocket_distance
+        ),
     )
 
     kinds = {k.strip().upper() for k in args.affinity_types.split(",") if k.strip()}
@@ -188,12 +206,27 @@ def main() -> None:  # noqa: PLR0915
                 n_setup += 1
                 continue
             p_codes, frame = setup
-            seq = enc.ligand_seq(p_codes, mol, frame)
-            if seq is None:
+            split = "val" if pdb in val_pdbs else "train"
+            # Val stays at one orientation: it measures the model, not the
+            # augmentation. The rotations of one complex are written
+            # consecutively, which is what RescoreDataset's
+            # rotations_per_complex indexing assumes.
+            n_rot = args.num_rotations if split == "train" else 1
+            descs = enc.ligand_descs([mol], frame)
+            wrote = 0
+            for k in range(max(n_rot, 1)):
+                # k == 0 is the unrotated complex, so --num-rotations 1
+                # reproduces the original corpus byte for byte.
+                rot = None if k == 0 else random_rotation_matrix(rot_rng)
+                codes = p_codes if rot is None else enc.pocket_codes_rotated(rot)
+                seq = enc.seqs_from_descs(codes, descs, rotation=rot)[0]
+                if seq is None:
+                    continue
+                writers[split].write(seq, float(labels[pdb]))
+                wrote += 1
+            if wrote == 0:
                 n_badlig += 1
                 continue
-            split = "val" if pdb in val_pdbs else "train"
-            writers[split].write(seq, float(labels[pdb]))
             pks.append(labels[pdb])
             n_ok += 1
         except Exception:
@@ -201,11 +234,14 @@ def main() -> None:  # noqa: PLR0915
             continue
 
     meta = {
+        "pocket_distance": args.pocket_distance,
+        "max_residues": args.max_residues,
         "vocab_size": AtomLMVocab(codebook_size=args.codebook_size).vocab_size,
         "atom_codebook_size": args.codebook_size,
         "source": "pdbbind2020_affinity_pk",
         "label": "pK (-log10 molar)",
         "affinity_types": sorted(kinds),
+        "num_rotations": args.num_rotations,
         "n_complexes": n_ok,
         "train_docs": writers["train"].num_docs,
         "val_docs": writers["val"].num_docs,

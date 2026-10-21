@@ -138,6 +138,70 @@ def pdbbind_complexes(
     return out
 
 
+@dataclass
+class StapledAffinityEncoder:
+    """``PoseEncoder``-shaped façade over the ESM3 x ConfSeq tokenizer.
+
+    The counterpart of ``pose_rescoring_bench.inference.stapled``, kept local so
+    this bench does not depend on that one. Two things differ from a
+    ``PoseEncoder`` and both are the baseline's premise: the pocket codes are
+    looked up per receptor in an ESM3 cache (so a complex's id has to be handed
+    over -- nothing in the PDB text recovers it), and there is no shared frame,
+    so ``n_frames`` averaging is not available. ESM3's codes and ConfSeq's
+    tokens are the same under rotation, and only the placement grid moves, so
+    one evaluation IS this arm's averaged answer rather than a cheaper
+    approximation of it.
+    """
+
+    inner: Any  # StapledEncoder; typed loosely, its import is deferred
+    frame_invariant: bool = True
+
+    def setup_pocket(
+        self, protein_text: str, reference_heavy: np.ndarray, struct_id: str
+    ) -> tuple[Any, None] | None:
+        pocket = self.inner.setup_pocket(struct_id, protein_text, reference_heavy)
+        return None if pocket is None else (pocket, None)
+
+    def ligand_seq(self, pocket: Any, mol: dict) -> list[int] | None:  # noqa: ANN401
+        heavy_idx = np.array(
+            [i for i, a in enumerate(mol["atoms"]) if a[0] != "H"], dtype=int
+        )
+        if heavy_idx.size == 0:
+            return None
+        return self.inner.ligand_seq(pocket, mol["atoms"], mol["bonds"], heavy_idx)
+
+
+def _build_stapled_encoder(
+    variant: Variant, paths: PathsConfig, cfg: AffinityConfig
+) -> StapledAffinityEncoder:
+    """The stapled façade, built from the cache and the frozen vocabulary.
+
+    Imported here rather than at module scope: ConfSeq pulls in Indigo, which
+    only the ``stapled`` dependency group installs, and scoring a ProLIT arm
+    must not require it.
+    """
+    from prolit.data.esm3_tokens import Esm3TokenCache  # noqa: PLC0415
+    from prolit.tokenizers.stapled import ConfSeqVocab, StapledVocab  # noqa: PLC0415
+    from prolit.tokenizers.stapled_encoder import StapledEncoder  # noqa: PLC0415
+
+    spec = variant.stapled
+    if spec is None:
+        msg = f"arm {variant.name!r} is not a stapled arm"
+        raise ValueError(msg)
+    return StapledAffinityEncoder(
+        inner=StapledEncoder(
+            cache=Esm3TokenCache(paths.ckpt(spec.esm3_cache)),
+            confseq_repo=paths.ckpt(spec.confseq_repo),
+            vocab=StapledVocab(
+                confseq=ConfSeqVocab.load(paths.ckpt(spec.confseq_vocab))
+            ),
+            pocket_cfg=PocketExtractionConfig(
+                max_residues=cfg.max_residues, pocket_distance=cfg.pocket_distance
+            ),
+        )
+    )
+
+
 def _build_encoder(
     variant: Variant,
     paths: PathsConfig,
@@ -223,7 +287,11 @@ def score_complexes(  # noqa: PLR0913
     RDLogger.DisableLog("rdApp.*")  # ty: ignore[unresolved-attribute]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    enc = _build_encoder(variant, paths, cfg, device)
+    enc = (
+        _build_stapled_encoder(variant, paths, cfg)
+        if variant.stapled is not None
+        else _build_encoder(variant, paths, cfg, device)
+    )
     mlm, mask_id = load_masked_lm(
         paths.ckpt(variant.mlm), variant.codebook_size, device
     )
@@ -286,6 +354,22 @@ def _score_complex(  # noqa: PLR0913
             [(a[1], a[2], a[3]) for a in native["atoms"] if a[0] != "H"],
             np.float32,
         )
+        if getattr(enc, "frame_invariant", False):
+            # The stapled baseline: one pocket lookup, one sequence, one score.
+            setup = enc.setup_pocket(protein.read_text(), heavy, tid)
+            if setup is None:
+                return None
+            seq = enc.ligand_seq(setup[0], native)
+            if seq is None:
+                return None
+            return {
+                "pdbid": tid,
+                "logka": item.logka,
+                "cluster": item.cluster,
+                "pll": float(ligand_pll(mlm, seq, mask_id, device)),
+                "head": _predict(seq, head, device),
+                "chemistry": chemistry_source,
+            }
         setup = enc.setup_pocket(protein.read_text(), heavy)
         if setup is None:
             return None
