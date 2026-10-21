@@ -30,7 +30,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -155,7 +155,7 @@ def contact_labels(  # noqa: PLR0913 -- plain arrays, not a pocket container
     if len(pc) == 0:
         return residue, itype
 
-    tree = cKDTree(pc)
+    tree = KDTree(pc)
     for i, xyz in enumerate(np.asarray(ligand_coords, dtype=float)):
         near = tree.query_ball_point(xyz, CONTACT_CUT)
         if not near:

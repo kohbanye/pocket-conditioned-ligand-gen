@@ -305,6 +305,8 @@ def score_complexes(  # noqa: PLR0913
         lora_rank=variant.lora_rank,
     )
 
+    models = _Models(enc, mlm, mask_id, head, device)
+
     items = complexes if complexes is not None else casf_complexes(paths.casf_dir)
     if cfg.max_targets is not None:
         items = items[: cfg.max_targets]
@@ -314,7 +316,7 @@ def score_complexes(  # noqa: PLR0913
         # One stream per complex, derived from the run seed, so a complex's
         # frames do not depend on how many complexes came before it.
         rng = rng_for(seed, f"casf_frames:{item.pdbid}")
-        row = _score_complex(item, enc, mlm, mask_id, head, device, cfg, rng)
+        row = _score_complex(item, models, cfg, rng)
         if row is not None:
             rows.append(row)
     # ``chemistry`` records which route each complex actually took, so a run
@@ -325,82 +327,139 @@ def score_complexes(  # noqa: PLR0913
     )
 
 
-def _score_complex(  # noqa: PLR0913
+@dataclass(frozen=True)
+class _Models:
+    """The objects every scoring route needs, built once per run.
+
+    None of them varies per complex; threading them individually is what put
+    the scoring function past both the argument and the branch limits.
+    """
+
+    enc: PoseEncoder
+    mlm: Any
+    mask_id: int
+    head: Any
+    device: torch.device
+
+
+@dataclass(frozen=True)
+class _Pose:
+    """One complex's parsed inputs, shared by both scoring routes."""
+
+    tid: str
+    native: dict
+    heavy: np.ndarray
+    protein_text: str
+
+
+def _load_ligand(sdf: Path, chemistry: str) -> tuple[dict, str]:
+    """The reference molecule, and which chemistry route actually produced it.
+
+    ``validated`` is a request, not a guarantee: a complex with no ``.mol2``
+    beside its SDF, or one the bond-order transfer rejects, falls back to the
+    rebuilt molecule. The returned tag is what keeps that fallback out of a
+    run reported as validated-input.
+    """
+    native = parse_sdf(sdf)[0]
+    if chemistry != "validated":
+        return native, "legacy"
+    mol2 = sdf.with_suffix(".mol2")
+    validated = (
+        validated_mol_from_mol2_text(native, mol2.read_text())
+        if mol2.exists()
+        else None
+    )
+    return (validated, "mol2") if validated is not None else (native, "legacy")
+
+
+def _score_frame_invariant(m: _Models, pose: _Pose) -> tuple[float, float] | None:
+    """The stapled baseline: one pocket lookup, one sequence, one score.
+
+    Its encoder places the ligand in its own frame, so there is nothing to
+    average over -- the extra frames below exist only to cancel our shared
+    frame's orientation dependence.
+    """
+    setup = m.enc.setup_pocket(pose.protein_text, pose.heavy, pose.tid)
+    if setup is None:
+        return None
+    seq = m.enc.ligand_seq(setup[0], pose.native)
+    if seq is None:
+        return None
+    return (
+        float(ligand_pll(m.mlm, seq, m.mask_id, m.device)),
+        _predict(seq, m.head, m.device),
+    )
+
+
+def _score_rotated_frames(
+    m: _Models, pose: _Pose, n_frames: int, rng: np.random.Generator
+) -> tuple[float, float] | None:
+    """``(pll, mean head score)`` over ``n_frames`` orientations of one complex.
+
+    Frame 0 is the unrotated one and is the only one the PLL is read from, so a
+    complex whose unrotated sequence does not encode is dropped rather than
+    reported with a PLL from a rotated frame.
+    """
+    setup = m.enc.setup_pocket(pose.protein_text, pose.heavy)
+    if setup is None:
+        return None
+    p_codes, frame = setup
+    # Computed once; each extra frame rotates the stored descriptors and
+    # re-quantizes, rather than recomputing RDKit features per orientation.
+    descs = m.enc.ligand_descs([pose.native], frame)
+    preds: list[float] = []
+    pll: float | None = None
+    for k in range(max(n_frames, 1)):
+        rot = None if k == 0 else random_rotation_matrix(rng)
+        codes = p_codes if rot is None else m.enc.pocket_codes_rotated(rot)
+        seq = m.enc.seqs_from_descs(codes, descs, rotation=rot)[0]
+        if seq is None:
+            continue
+        preds.append(_predict(seq, m.head, m.device))
+        if k == 0:
+            pll = float(ligand_pll(m.mlm, seq, m.mask_id, m.device))
+    if not preds or pll is None:
+        return None
+    # The affinity head's raw output IS the pK, so it is averaged directly.
+    # (The pose head's output is an RMSD and is negated to become a score;
+    # that sign flip does not belong here.)
+    return pll, float(np.mean(preds))
+
+
+def _score_complex(
     item: Complex,
-    enc: PoseEncoder,
-    mlm: Any,  # noqa: ANN401
-    mask_id: int,
-    head: Any,  # noqa: ANN401
-    device: torch.device,
+    m: _Models,
     cfg: AffinityConfig,
     rng: np.random.Generator,
 ) -> dict | None:
+    """One row of the dump, or ``None`` if this complex could not be scored."""
     tid, protein, sdf = item.pdbid, item.protein, item.ligand
     if not (protein.exists() and sdf.exists()):
         return None
     try:
-        native = parse_sdf(sdf)[0]
-        chemistry_source = "legacy"
-        if cfg.chemistry == "validated":
-            mol2 = sdf.with_suffix(".mol2")
-            validated = (
-                validated_mol_from_mol2_text(native, mol2.read_text())
-                if mol2.exists()
-                else None
-            )
-            if validated is not None:
-                native, chemistry_source = validated, "mol2"
+        native, chemistry_source = _load_ligand(sdf, cfg.chemistry)
         heavy = np.array(
             [(a[1], a[2], a[3]) for a in native["atoms"] if a[0] != "H"],
             np.float32,
         )
-        if getattr(enc, "frame_invariant", False):
-            # The stapled baseline: one pocket lookup, one sequence, one score.
-            setup = enc.setup_pocket(protein.read_text(), heavy, tid)
-            if setup is None:
-                return None
-            seq = enc.ligand_seq(setup[0], native)
-            if seq is None:
-                return None
-            return {
-                "pdbid": tid,
-                "logka": item.logka,
-                "cluster": item.cluster,
-                "pll": float(ligand_pll(mlm, seq, mask_id, device)),
-                "head": _predict(seq, head, device),
-                "chemistry": chemistry_source,
-            }
-        setup = enc.setup_pocket(protein.read_text(), heavy)
-        if setup is None:
-            return None
-        p_codes, frame = setup
-        # Computed once; each extra frame rotates the stored descriptors and
-        # re-quantizes, rather than recomputing RDKit features per orientation.
-        descs = enc.ligand_descs([native], frame)
-        preds: list[float] = []
-        for k in range(max(cfg.n_frames, 1)):
-            rot = None if k == 0 else random_rotation_matrix(rng)
-            codes = p_codes if rot is None else enc.pocket_codes_rotated(rot)
-            seq = enc.seqs_from_descs(codes, descs, rotation=rot)[0]
-            if seq is None:
-                continue
-            preds.append(_predict(seq, head, device))
-            if k == 0:
-                pll = float(ligand_pll(mlm, seq, mask_id, device))
-        if not preds:
-            return None
+        pose = _Pose(tid, native, heavy, protein.read_text())
+        scored = (
+            _score_frame_invariant(m, pose)
+            if getattr(m.enc, "frame_invariant", False)
+            else _score_rotated_frames(m, pose, cfg.n_frames, rng)
+        )
     except Exception:
         logger.exception("target %s failed", tid)
         return None
+    if scored is None:
+        return None
+    pll, pred = scored
     return {
         "pdbid": tid,
         "logka": item.logka,
         "cluster": item.cluster,
         "pll": pll,
-        # The affinity head's raw output IS the pK, so it is averaged directly.
-        # (The pose head's output is an RMSD and is negated to become a score;
-        # that sign flip does not belong here.)
-        "head": float(np.mean(preds)),
+        "head": pred,
         "chemistry": chemistry_source,
     }
 

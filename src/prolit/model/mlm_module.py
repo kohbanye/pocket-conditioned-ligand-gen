@@ -34,8 +34,7 @@ class ProLITMLMModule(L.LightningModule):
         self.save_hyperparameters()
         self.model = build_prolit_mlm(config.model)
         self._logged_param_count: bool = False
-        self._frozen = bool(getattr(config, "freeze_encoder", False))
-        if self._frozen:
+        if config.freeze_encoder:
             self._freeze_encoder()
 
     def _freeze_encoder(self) -> None:
@@ -61,7 +60,7 @@ class ProLITMLMModule(L.LightningModule):
         but a moving output.
         """
         super().train(mode)
-        if self._frozen:
+        if self.config.freeze_encoder:
             for name, child in self.model.named_children():
                 if name != "contact_heads":
                     child.eval()

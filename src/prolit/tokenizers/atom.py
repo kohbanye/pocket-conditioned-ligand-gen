@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from scipy.spatial import cKDTree
+from scipy.spatial import KDTree
 
 from prolit.tokenizers.descriptor_schema import (
     ATOM_DESCRIPTOR_DIM,
@@ -118,7 +118,7 @@ def _contacting_residue(
     if pocket.shape[0] == 0:
         return np.full(n, PROTEIN_AA_X_IDX, dtype=np.int64)
     res = np.asarray(pocket_residues, dtype=np.int64)
-    tree = cKDTree(pocket)
+    tree = KDTree(pocket)
     out = np.full(n, PROTEIN_AA_X_IDX, dtype=np.int64)
     dist, idx = tree.query(np.asarray(canonical, dtype=np.float64), k=1)
     close = dist <= CONTACT_CUT
