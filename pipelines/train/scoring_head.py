@@ -130,6 +130,125 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
     )
     parser.add_argument("--fast-dev-run", action="store_true")
     add_seed_argument(parser)
+    parser.add_argument("--encoder-lr-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--group-mean-weight",
+        type=float,
+        default=0.0,
+        help="Weight of a smooth-L1 term on each protein group's MEAN prediction "
+        "(0 = off). Targets the measured deficit: target-level differences come "
+        "out ~19%% too small, and per-complex regression does not penalise a "
+        "uniform per-target offset. Switching this on also switches batching to "
+        "whole groups, so a control must use the same batching with weight 0.",
+    )
+    parser.add_argument(
+        "--corr-weight",
+        type=float,
+        default=0.0,
+        help="Batch-wise Pearson term: loss = (1-w)*smooth_l1 + w*(1-PCC). 0 = off. "
+        "OnionNet-2 trains with w=0.7 by default and GenScore carries a corrcoef "
+        "term; a pure per-complex regression never asks predictions to line up on "
+        "a common scale, and squared error is minimised by shrinking toward the "
+        "mean when the signal is uncertain.",
+    )
+    parser.add_argument(
+        "--group-batch-partition",
+        action="store_true",
+        help="With group batching on, split a group larger than --max-per-group "
+        "across batches instead of drawing one random slice per epoch. Keeps the "
+        "epoch covering every document once; without it the union corpus with "
+        "real protein groups shows 46%% of its documents per epoch.",
+    )
+    parser.add_argument(
+        "--rotations-per-complex",
+        type=int,
+        default=1,
+        help="Orientations per complex held by the TRAIN corpus (built with "
+        "--num-rotations). >1 indexes one entry per complex and draws one "
+        "orientation per access, so an epoch stays complex-sized and the frame "
+        "varies across epochs -- unlike training on R times the documents, "
+        "which memorised the corpus. Val always uses one orientation.",
+    )
+    parser.add_argument(
+        "--readout",
+        default="ligand",
+        help="Which encoder states the head averages: 'ligand' (every existing "
+        "checkpoint), 'balanced' (pocket mean and ligand mean, equally "
+        "weighted), 'allatoms', or 'concat' (pocket mean and ligand mean kept side "
+        "by side; widens the head's first layer, so loading it under another "
+        "readout fails on shape). The first three are parameter-free. The pooling a "
+        "head is TRAINED under has to be the pooling it is scored under, so "
+        "this value belongs on the arm that names the checkpoint.",
+    )
+    parser.add_argument(
+        "--layer-mix",
+        action="store_true",
+        help="Let the head learn a softmax mix over the embedding output and "
+        "every encoder layer instead of reading the last layer only. The last "
+        "layer is the one the MLM objective specialised; intermediate layers "
+        "are often the better transfer features. Adds one weight per state "
+        "(14 for a 13-layer encoder) and nothing else, and the encoder stays "
+        "frozen. A checkpoint trained with this flag must be scored with it.",
+    )
+    parser.add_argument(
+        "--layer-mix-init-last",
+        type=float,
+        default=0.0,
+        help="With --layer-mix: starting logit of the LAST state, the others "
+        "starting at 0. 4.0 puts ~0.81 of the mix on the last layer, so "
+        "training starts roughly where a last-layer head already is. 0 (the "
+        "default) starts at the uniform average, which measured worse.",
+    )
+    parser.add_argument(
+        "--layer-mix-lr-scale",
+        type=float,
+        default=1.0,
+        help="With --layer-mix: multiply the learning rate of the mixing "
+        "scalars (and nothing else) by this. At 1.0 they did not move at all.",
+    )
+    parser.add_argument(
+        "--lora-rank",
+        type=int,
+        default=0,
+        help="Adapt the frozen encoder with rank-r LoRA on every attention "
+        "block's QKV and output projections (0 disables). The encoder's own "
+        "weights never change and the adapters start as a no-op.",
+    )
+    parser.add_argument("--lora-alpha", type=float, default=1.0)
+    parser.add_argument(
+        "--distill-path",
+        default="",
+        help="float32 .npy of teacher predictions, one per TRAINING document "
+        "in file order (experiments/.../dump_teacher_preds.py).",
+    )
+    parser.add_argument("--distill-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--input-mask-prob",
+        type=float,
+        default=0.0,
+        help="Replace this share of the TRAIN split's codebook tokens with the "
+        "encoder's <mask> id (0 disables; val and inference never mask). "
+        "Unlike a crop or chemistry change this stays inside the pretraining "
+        "distribution -- <mask> is what the MLM saw at 15%% of positions -- so "
+        "0.15 is the rate that matches it.",
+    )
+    parser.add_argument(
+        "--input-mask-side",
+        default="ligand",
+        help="Which side --input-mask-prob may hide: 'ligand' (the rows the "
+        "default readout pools, so the encoder has to fill them from the "
+        "pocket), 'pocket' (the side carrying the between-target scale), or "
+        "'both'.",
+    )
+    parser.add_argument(
+        "--input-mask-pool",
+        default="keep",
+        help="With --input-mask-prob: 'keep' leaves a masked LIGAND position in "
+        "the pooled mean, so the readout averages the state the encoder "
+        "inferred there; 'drop' removes it, making this plain input dropout "
+        "whose pooled statistic matches inference. Masked POCKET rows are "
+        "dropped either way -- they stop being codebook ids.",
+    )
     args = parser.parse_args()
     seed_from_args(args)
 
@@ -146,6 +265,20 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         config.micro_batch_size = args.micro_batch_size
     if args.lr is not None:
         config.learning_rate = args.lr
+    config.encoder_lr_scale = args.encoder_lr_scale
+    config.rotations_per_complex = args.rotations_per_complex
+    config.group_mean_weight = args.group_mean_weight
+    config.corr_weight = args.corr_weight
+    config.layer_mix_init_last = args.layer_mix_init_last
+    config.layer_mix_lr_scale = args.layer_mix_lr_scale
+    config.lora_rank = args.lora_rank
+    config.lora_alpha = args.lora_alpha
+    config.distill_path = args.distill_path
+    config.distill_weight = args.distill_weight
+    config.group_batch_partition = args.group_batch_partition
+    config.input_mask_prob = args.input_mask_prob
+    config.input_mask_side = args.input_mask_side
+    config.input_mask_pool = args.input_mask_pool
     if args.num_workers is not None:
         config.num_workers = args.num_workers
     if args.listwise_weight is not None:
@@ -220,7 +353,13 @@ def main() -> None:  # noqa: C901, PLR0912, PLR0915
         )
 
     dm = RescoreDataModule(config)
-    module = ComplexRescoreModule(config, mlm_state=mlm_state)
+    module = ComplexRescoreModule(
+        config,
+        mlm_state=mlm_state,
+        readout=args.readout,
+        layer_mix=args.layer_mix,
+        lora_rank=args.lora_rank,
+    )
 
     trainer = L.Trainer(
         deterministic=args.deterministic,
